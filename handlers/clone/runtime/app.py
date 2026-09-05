@@ -4,7 +4,7 @@ from handlers.common.clone_context import *
 from handlers.clone.admin import business_automation, group_manager
 from handlers.clone.group_manager_runtime import group_manager_new_members, group_manager_chat_member_welcome, group_manager_message, group_manager_special_callback
 from handlers.clone.group_manager_protection_runtime import group_manager_protection_message, anti_flood_message
-from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, forced_join_info_callback, forced_join_message_editor, forced_join_editor_callback, forced_join_editor_text_input, forced_join_editor_media_input, forced_join_toggle_callback, connect_forced_join_command
+from handlers.clone.forced_join_runtime import forced_join_request, forced_join_auto_approve, forced_join_info_callback, forced_join_message_editor, forced_join_editor_callback, forced_join_editor_text_input, forced_join_editor_media_input, forced_join_toggle_callback, forced_join_forward_handler
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler, ChatMemberHandler
 from telegram.request import HTTPXRequest
@@ -345,7 +345,6 @@ class CloneRuntimeAppMixin:
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
         app.add_handler(CommandHandler("connectgroup",self.connect_group_command))
-        app.add_handler(CommandHandler("connectforcedjoin",lambda update,context: connect_forced_join_command(self,update,context)))
         app.add_handler(CommandHandler("connectsupport",self.connect_support_command))
         app.add_handler(CommandHandler("confirm", self.seller_broadcast_confirm_command))
         app.add_handler(CommandHandler("cancel", self.seller_broadcast_cancel_command))
@@ -398,6 +397,9 @@ class CloneRuntimeAppMixin:
         app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-21)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_manager_message), group=-19)
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.broadcast_message_handler),group=-3)
+        # Forced Join target connection: only active after Group Manager → selected
+        # access group/channel → Forced Join → Add Group/Channel.
+        app.add_handler(MessageHandler(filters.FORWARDED, forced_join_forward_handler), group=-4)
         app.add_handler(MessageHandler(filters.FORWARDED,self.forward_handler),group=-2)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL, self.business_automation_media_handler), group=-4)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,self.welcome_media_handler),group=-1)
