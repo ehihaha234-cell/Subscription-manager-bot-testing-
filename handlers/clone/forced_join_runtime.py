@@ -621,9 +621,10 @@ async def forced_join_groups_page(q, context):
     rows.append([InlineKeyboardButton("⬅ Back",callback_data="gm_forced_join")])
     await q.edit_message_text(
         "🔗 Forced Group/Channel\n\n"
-        "Only groups/channels connected with /connectforcedjoin are shown here.\n\n"
+        "Groups/channels added with /connectforcedjoin are shown here.\n\n"
         "How to connect:\n"
-        "/connectforcedjoin",
+        "/connectforcedjoin <chat_id>\n"
+        "or /connectforcedjoin @username",
         reply_markup=_kb(rows)
     )
 
@@ -648,29 +649,24 @@ async def connect_forced_join_command(self, update, context):
     chat=update.effective_chat
     target_id=chat.id if chat and chat.type in {"group","supergroup","channel"} else 0
     if context.args:
-        try: target_id=int(context.args[0])
+        raw_target=str(context.args[0]).strip()
+        try:
+            target_id=int(raw_target)
         except ValueError:
-            await message.reply_text("❌ Send a valid chat ID.")
-            return
+            try:
+                info=await context.bot.get_chat(raw_target)
+                target_id=int(info.id)
+            except Exception:
+                await message.reply_text("❌ Send a valid chat ID or @username.")
+                return
     if not target_id:
         await message.reply_text(
             "❌ Use this command inside the required group/channel, "
-            "or send /connectforcedjoin <chat_id> from the bot admin chat."
+            "or send /connectforcedjoin <chat_id> (or @username) from the bot admin chat."
         )
         return
     try:
         info=await context.bot.get_chat(target_id)
-
-        # /connectgroup subscription chats are deliberately excluded from
-        # the Forced Join connection list.
-        connected = await get_channels(owner)
-        if any(int(x.get("chat_id", 0) or 0) == int(target_id) for x in (connected or [])):
-            await message.reply_text(
-                "❌ This group/channel is already connected for subscriptions "
-                "with /connectgroup.\n\n"
-                "Use a separate group/channel for Forced Join."
-            )
-            return
 
         member=await context.bot.get_chat_member(target_id, context.bot.id)
         if getattr(member,"status","") not in {"administrator","creator"}:
