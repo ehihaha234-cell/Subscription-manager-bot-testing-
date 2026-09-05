@@ -112,16 +112,24 @@ def group_editor_header(title: str, keyword: str | None, item: dict) -> str:
     return "\n".join(parts)
 
 async def groups_home(q,owner):
-    groups=[x for x in await get_channels(owner) if int(x.get('chat_id',0))<0]
-    rows=[[InlineKeyboardButton(f"👥 {str(x.get('title') or 'Group')[:35]}",callback_data=f"gm_select_{x['chat_id']}")] for x in groups]
+    groups=[x for x in await get_channels(owner) if str(x.get('chat_type') or '').lower() in {'group','supergroup','channel'}]
+    rows=[]
+    for x in groups:
+        chat_type=str(x.get('chat_type') or '').lower()
+        icon='📢' if chat_type=='channel' else '👥'
+        title=str(x.get('title') or ('Channel' if icon=='📢' else 'Group'))[:35]
+        rows.append([InlineKeyboardButton(f"{icon} {title}",callback_data=f"gm_select_{x['chat_id']}")])
     rows.append([InlineKeyboardButton('⬅ Admin Panel',callback_data='a_home')])
-    await q.edit_message_text('🛡 GROUP MANAGER\n\nSelect a connected group. Settings and messages are saved separately for each selected group.',reply_markup=kb(rows))
+    await q.edit_message_text('🛡 GROUP MANAGER\n\nSelect a connected group/channel. Settings and messages are saved separately for each selected group/channel.',reply_markup=kb(rows))
 
 async def group_home(q,context,owner):
     gid=selected(context); groups=await get_channels(owner); ch=next((x for x in groups if int(x.get('chat_id',0))==gid),None)
     if not ch: return await groups_home(q,owner)
     await get_group(owner,gid,ch.get('title') or 'Group')
-    text=f"🛡 GROUP MANAGER\n\n👥 Group: {ch.get('title') or 'Group'}\n🆔 ID: {gid}\n🟢 Bot: Connected\n\nAll settings below apply only to this group."
+    chat_type=str(ch.get('chat_type') or '').lower()
+    icon='📢' if chat_type=='channel' else '👥'
+    kind='Channel' if chat_type=='channel' else 'Group'
+    text=f"🛡 GROUP MANAGER\n\n{icon} {kind}: {ch.get('title') or kind}\n🆔 ID: {gid}\n🟢 Bot: Connected\n\nAll settings below apply only to this selected {kind.lower()}."
     rows=[
         [InlineKeyboardButton('👋 Welcome Message',callback_data='gm_welcome')],
         [InlineKeyboardButton('💬 Auto Reply',callback_data='gm_auto')],
