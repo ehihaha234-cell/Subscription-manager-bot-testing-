@@ -397,7 +397,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(MessageHandler(filters.ALL, group_manager_protection_message), group=-21)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_manager_message), group=-19)
         app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND,self.broadcast_message_handler),group=-3)
-        app.add_handler(MessageHandler(filters.FORWARDED), group=-4)
+        # Removed invalid MessageHandler registration without callback.
         app.add_handler(MessageHandler(filters.FORWARDED,self.forward_handler),group=-2)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL, self.business_automation_media_handler), group=-4)
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL,self.welcome_media_handler),group=-1)
