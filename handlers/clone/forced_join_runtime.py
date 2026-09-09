@@ -571,7 +571,7 @@ async def forced_join_message_editor(q, context, access_chat_id=None):
         [InlineKeyboardButton("🖼 Media", callback_data="fj_editor_media"), InlineKeyboardButton("👀 See", callback_data="fj_editor_media_see")],
         [InlineKeyboardButton("🔗 Buttons", callback_data="fj_editor_buttons"), InlineKeyboardButton("👀 See", callback_data="fj_editor_buttons_see")],
         [InlineKeyboardButton("👀 Full Preview", callback_data="fj_editor_preview")],
-        [InlineKeyboardButton("⬅ Back", callback_data="fj_editor")],
+        [InlineKeyboardButton("⬅ Back", callback_data="fj_editor_back")],
     ]
     media_line = f"🖼 Media: {len(media)}/10" if media else "🖼 Media: ❌ Not added"
     await q.edit_message_text(
@@ -595,7 +595,22 @@ async def forced_join_editor_callback(update, context):
 
     if a == "fj_editor":
         context.user_data.pop("fj_editor_input", None)
+        access_chat_id = context.user_data.get("gm_group_id") or context.user_data.get("fj_editor_chat_id")
+        if access_chat_id:
+            context.user_data["fj_editor_chat_id"] = int(access_chat_id)
+            return await forced_join_message_editor(q, context, int(access_chat_id))
         return await forced_join_editor_targets_page(q, context)
+
+    if a.startswith("fj_editor:"):
+        try:
+            access_chat_id = int(a.split(":", 1)[1])
+        except Exception:
+            await q.answer("❌ Invalid group/channel.", show_alert=True)
+            return True
+        context.user_data["fj_editor_chat_id"] = access_chat_id
+        context.user_data.pop("fj_editor_input", None)
+        await forced_join_message_editor(q, context, access_chat_id)
+        return True
 
     if a.startswith("fj_editor_select:"):
         try:
@@ -765,7 +780,7 @@ async def forced_join_page(q, context):
     rows=[
         [InlineKeyboardButton(("🔴 Disable Forced Join" if enabled else "🟢 Enable Forced Join"), callback_data="fj_toggle_feature")],
         [InlineKeyboardButton("🔗 Forced Group/Channel",callback_data="fj_forced_groups")],
-        [InlineKeyboardButton("📝 Approval Message",callback_data="fj_editor")],
+        [InlineKeyboardButton("📝 Approval Message",callback_data=f"fj_editor:{access_chat_id}")],
         [InlineKeyboardButton("⬅ Back",callback_data="gm_group")],
     ]
     await q.edit_message_text(
