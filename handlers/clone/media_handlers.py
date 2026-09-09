@@ -6,7 +6,7 @@ from handlers.common.clone_context import *
 class CloneMediaHandlersMixin:
     async def welcome_media_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
-        if not await self.seller_or_admin(update, context):
+        if update.effective_user.id!=self.seller_account(context):
             return
         if context.user_data.get("wait_support_ar_media"):
             keyword=context.user_data["wait_support_ar_media"]
@@ -59,7 +59,7 @@ class CloneMediaHandlersMixin:
 
         # Payment settings belong to the clone owner/seller. Keep the original
         # owner-only behavior rather than allowing ordinary clone users to write it.
-        if not await self.seller_or_admin(update, context):
+        if int(user.id) != int(self.seller_account(context)):
             return
 
         msg = update.effective_message
@@ -147,15 +147,15 @@ class CloneMediaHandlersMixin:
             seller_account_id = self.seller_account(context)
             recipients = {int(seller_account_id)}
             try:
-                for staff in await list_staff(owner):
-                    if staff.get("status") != "active":
+                for staff_row in await list_staff(owner):
+                    if staff_row.get("status") != "active":
                         continue
-                    permissions = staff.get("permissions") or []
+                    permissions = staff_row.get("permissions") or []
                     if "*" in permissions or "payments" in permissions:
-                        recipients.add(int(staff["user_id"]))
+                        recipients.add(int(staff_row["user_id"]))
             except Exception:
                 logger.exception(
-                    "Failed to load payment notification staff owner=%s payment_id=%s",
+                    "Failed to load payment notification staff owner=%s payment=%s",
                     owner, p.get("payment_id"),
                 )
 
@@ -173,24 +173,25 @@ class CloneMediaHandlersMixin:
                         "message_id": int(sent_message.message_id),
                     })
                 except TelegramError:
-                    # The payment is already safely stored as pending. One blocked
-                    # staff member must not prevent the other authorized recipients
-                    # from receiving the same payment notification.
                     logger.exception(
                         "Manual payment notification failed: owner=%s recipient=%s payment_id=%s",
                         owner, recipient_id, p.get("payment_id"),
                     )
 
-            await set_payment_notification_messages(
-                owner,
-                p["payment_id"],
-                notification_messages,
-            )
-
-            if not notification_messages:
+            if notification_messages:
+                await add_payment_notification_messages(
+                    owner, p["payment_id"], notification_messages
+                )
+            else:
+                # The payment is already safely stored as pending. Do not leave
+                # the user without confirmation if every live notification fails.
+                logger.error(
+                    "No payment notification recipient succeeded: owner=%s payment_id=%s",
+                    owner, p.get("payment_id"),
+                )
                 await update.effective_message.reply_text(
                     "✅ Payment screenshot submitted successfully. It is pending "
-                    "approval. Please do not submit the same screenshot again."
+                    "approval and the admin can review it from Pending Payments."
                 )
                 raise ApplicationHandlerStop
 
@@ -201,7 +202,7 @@ class CloneMediaHandlersMixin:
 
     async def forward_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
-        if not await self.seller_or_admin(update, context) or not context.user_data.get("wait_channel"): return
+        if update.effective_user.id!=self.seller_account(context) or not context.user_data.get("wait_channel"): return
         m=update.effective_message; chat=getattr(m,"forward_from_chat",None)
         if chat is None:
             origin=getattr(m,"forward_origin",None); chat=getattr(origin,"chat",None)
