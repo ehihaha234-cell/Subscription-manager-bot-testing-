@@ -138,6 +138,9 @@ class CloneUserUIMixin:
             "rejected":"❌",
         }.get(current_status,"ℹ️")
 
+        settings = await get_seller_settings(owner)
+        timezone_name = settings.get("timezone") or "Asia/Kolkata"
+
         lines=[
             f"{status_icon} Payment {current_status.title()}",
             "",
@@ -147,7 +150,7 @@ class CloneUserUIMixin:
             f"📝 Username: {username}",
             f"📦 Plan: {payment.get('plan')}",
             f"⏳ Duration: {payment.get('duration_text') or '-'}",
-            f"💰 Amount: {format_currency((await get_seller_settings(owner)).get('currency'), payment.get('amount',0))}",
+            f"💰 Amount: {format_currency(settings.get('currency'), payment.get('amount',0))}",
             f"📅 Submitted: {created_text}",
             f"📌 Status: {current_status.title()}",
         ]
