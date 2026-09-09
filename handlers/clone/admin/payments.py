@@ -237,14 +237,35 @@ async def handle(self, update, context, q, owner, staff, a, role):
             if not changed:
                 await q.answer('Payment is already being processed', show_alert=True)
                 return True
-            await context.bot.send_message(p['user_id'], '❌ Payment rejected')
             p = await get_payment(owner, pid) or p
             rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=q.from_user.id)
+            # The decision is already committed. Update the staff message first
+            # so the callback feels immediate; user notification follows.
             await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), rejected_caption, current_message=q.message
             )
+            try:
+                await context.bot.send_message(p['user_id'], '❌ Payment rejected')
+            except Exception:
+                logger.exception('Rejected-payment user notification failed owner=%s payment=%s', owner, pid)
             return True
         claimed = await claim_payment_for_processing(owner, pid, owner)
+        if claimed:
+            # Remove the buttons and immediately acknowledge the callback in the
+            # staff chat while the existing fulfillment flow continues unchanged.
+            try:
+                processing_caption = await self.payment_details_caption(
+                    owner, p, status='pending'
+                )
+                await q.edit_message_caption(
+                    caption=processing_caption + '\n\n⏳ Approval is being processed...',
+                    reply_markup=None,
+                )
+            except Exception:
+                logger.debug(
+                    'Could not show payment processing state owner=%s payment=%s',
+                    owner, pid, exc_info=True,
+                )
         if not claimed:
             latest = await get_payment(owner, pid)
             latest_status = (latest or {}).get('status', 'unknown')
