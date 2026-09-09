@@ -1,6 +1,8 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
+from database.staff import active_staff
+
 from database.seller_data import get_channels, get_seller_settings
 from database.subscription_guard import (
     clear_guard_logs,
@@ -116,8 +118,12 @@ async def subscription_guard_callback(update: Update, context: ContextTypes.DEFA
     seller_id = int(context.application.bot_data.get("seller_account_id") or 0)
     if not query or not owner_id or not seller_id:
         return
-    if query.from_user.id != seller_id:
-        await query.answer("Only the clone bot seller/admin can use this panel.", show_alert=True)
+    # Seller and promoted Admin have full seller-level management access.
+    # Moderator is intentionally excluded from Subscription Guard.
+    staff = await active_staff(owner_id, int(query.from_user.id))
+    is_admin = bool(staff and str(staff.get("role") or "").lower() == "admin")
+    if query.from_user.id != seller_id and not is_admin:
+        await query.answer("Not authorized.", show_alert=True)
         return
     action = query.data or ""
     settings = await get_guard_settings(owner_id)
