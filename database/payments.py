@@ -257,6 +257,8 @@ async def decide_payment_by_id(
         "remarks": remarks,
         "updated_at": now,
         "processed_at": now,
+        "approved_at": now if status == "approved" else None,
+        "rejected_at": now if status == "rejected" else None,
         "decision_status": status,
         "decision_admin_id": admin_id,
         "decision_admin_name": admin_name,

@@ -745,6 +745,8 @@ async def set_payment_status(owner_id,payment_id,status,admin_id,admin_name=None
                 "admin_id":admin_id,
                 "processed_by_name":admin_name,
                 "processed_at":now,
+                "approved_at": now if status == "approved" else None,
+                "rejected_at": now if status == "rejected" else None,
                 "updated_at":now,
             }
         },
@@ -786,6 +788,8 @@ async def finalize_processed_payment(owner_id,payment_id,status,admin_id,admin_n
                 "admin_id":admin_id,
                 "processed_by_name":admin_name,
                 "processed_at":now,
+                "approved_at": now if status == "approved" else None,
+                "rejected_at": now if status == "rejected" else None,
                 "updated_at":now,
             },
             "$unset":{
