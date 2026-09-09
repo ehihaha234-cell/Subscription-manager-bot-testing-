@@ -4,8 +4,12 @@ from database.mongo import get_database
 COLLECTION = "seller_staff"
 
 DEFAULT_PERMISSIONS = {
-    "admin": ["users", "payments", "plans", "channels", "broadcast", "statistics", "support", "guard"],
-    "moderator": ["users", "payments", "support", "guard_logs"],
+    # Admin has the same functional permissions as the seller. The UI/router
+    # separately hides Staff Management so an admin cannot manage other staff.
+    "admin": ["*"],
+    # Moderator: Seller Profile, Pending Payments/Payment History,
+    # User Management and Terms & Policy.
+    "moderator": ["users", "payments", "terms"],
 }
 
 

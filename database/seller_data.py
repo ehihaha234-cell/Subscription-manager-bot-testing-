@@ -698,6 +698,33 @@ async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,
 async def get_payment(owner_id,payment_id): return await c(PAYMENTS).find_one({"owner_id":owner_id,"payment_id":payment_id})
 async def pending_payments(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":"pending"}).sort("created_at",-1).to_list(length=50)
 async def payment_history(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":{"$in":["approved","rejected"]}}).sort("updated_at",-1).to_list(length=50)
+async def set_payment_notification_messages(owner_id:int, payment_id:str, messages:list[dict]):
+    """Store the pending-payment notification message IDs for later in-place edits."""
+    normalized = []
+    seen = set()
+    for item in messages or []:
+        try:
+            chat_id = int(item.get("chat_id"))
+            message_id = int(item.get("message_id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        key = (chat_id, message_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({"chat_id": chat_id, "message_id": message_id})
+    result = await c(PAYMENTS).update_one(
+        {"owner_id": int(owner_id), "payment_id": str(payment_id)},
+        {"$set": {"notification_messages": normalized, "updated_at": datetime.now(timezone.utc)}},
+    )
+    return result.matched_count > 0
+
+
+async def get_payment_notification_messages(owner_id:int, payment_id:str):
+    payment = await get_payment(owner_id, payment_id)
+    return list((payment or {}).get("notification_messages") or [])
+
+
 async def set_payment_status(owner_id,payment_id,status,admin_id):
     now=datetime.now(timezone.utc)
     r=await c(PAYMENTS).update_one(
