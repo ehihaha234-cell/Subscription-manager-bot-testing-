@@ -22,8 +22,8 @@ async def upsert_required(owner_id, access_chat_id, chat_id, title, chat_type, i
             "owner_id":int(owner_id),"access_chat_id":int(access_chat_id),
             "chat_id":int(chat_id),
             "title":title or "Group/Channel","chat_type":chat_type,
-            "invite_link":invite_link or "","enabled":True,"updated_at":now()
-        },"$setOnInsert":{"created_at":now()}},
+            "invite_link":invite_link or "","updated_at":now()
+        },"$setOnInsert":{"created_at":now(),"enabled":True}},
         upsert=True,
     )
     return await c().find_one(key)
