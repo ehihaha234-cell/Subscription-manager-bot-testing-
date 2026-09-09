@@ -99,6 +99,74 @@ async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=N
     except Exception:
         logger.exception("Forced Join approval editor message failed owner=%s user=%s", owner, user_id)
 
+async def forced_join_my_chat_member(update, context):
+    """Automatically discover every group/channel where this Clone Bot becomes admin.
+
+    This uses MY_CHAT_MEMBER, so it is completely separate from /connectgroup and
+    from normal user CHAT_MEMBER updates. A chat is added to the Forced Join
+    collection immediately when the clone bot is promoted to administrator.
+    """
+    cm = getattr(update, "my_chat_member", None)
+    if not cm:
+        return
+    chat = getattr(cm, "chat", None)
+    new = getattr(cm, "new_chat_member", None)
+    if not chat or not new:
+        return
+    if getattr(chat, "type", "") not in {"group", "supergroup", "channel"}:
+        return
+
+    status = str(getattr(new, "status", "") or "")
+    if status not in {"administrator", "creator"}:
+        return
+
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
+    if not owner:
+        return
+
+    chat_id = int(chat.id)
+    title = str(getattr(chat, "title", "") or "Group/Channel")
+    chat_type = str(getattr(chat, "type", "") or "group")
+    invite_link = ""
+
+    # Public groups/channels already have a stable join URL. For private chats,
+    # create a permanent invite when Telegram gives the bot invite permission.
+    username = str(getattr(chat, "username", "") or "").lstrip("@")
+    if username:
+        invite_link = f"https://t.me/{username}"
+    else:
+        try:
+            me = await context.bot.get_me()
+            bot_member = await context.bot.get_chat_member(chat_id, me.id)
+            if (getattr(bot_member, "status", "") == "creator"
+                    or getattr(bot_member, "can_invite_users", False)):
+                invite = await context.bot.create_chat_invite_link(
+                    chat_id=chat_id, name="Forced Join", member_limit=0
+                )
+                invite_link = str(getattr(invite, "invite_link", "") or "")
+        except Exception:
+            # Still register the chat. The seller can enable it in Forced Join;
+            # an empty link simply means Telegram did not allow link creation.
+            logger.warning(
+                "Forced Join auto-discovery: invite link unavailable owner=%s chat=%s",
+                owner, chat_id, exc_info=True,
+            )
+
+    try:
+        from database.forced_join import upsert_required
+        await upsert_required(
+            owner, 0, chat_id, title, chat_type, invite_link
+        )
+        logger.info(
+            "Forced Join auto-discovered admin chat owner=%s chat=%s type=%s",
+            owner, chat_id, chat_type,
+        )
+    except Exception:
+        logger.exception(
+            "Forced Join auto-discovery failed owner=%s chat=%s", owner, chat_id
+        )
+
+
 async def forced_join_request(update, context):
     req=update.chat_join_request
     if not req:
@@ -621,10 +689,10 @@ async def forced_join_groups_page(q, context):
     rows.append([InlineKeyboardButton("⬅ Back",callback_data="gm_forced_join")])
     await q.edit_message_text(
         "🔗 Forced Group/Channel\n\n"
-        "Groups/channels added with /connectforcedjoin are shown here.\n\n"
-        "How to connect:\n"
-        "/connectforcedjoin <chat_id>\n"
-        "or /connectforcedjoin @username",
+        "Every group/channel where this Clone Bot is an administrator is added automatically.\n\n"
+        "🟢 = enabled for Forced Join\n"
+        "🔴 = disabled\n\n"
+        "No /connectforcedjoin command is required.",
         reply_markup=_kb(rows)
     )
 
