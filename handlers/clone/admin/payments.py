@@ -14,23 +14,55 @@ async def _clone_qr_file_id(context, owner: int) -> str:
     return str(settings.get("upi_qr_file_id") or "")
 
 async def _sync_manual_payment_notifications(context, owner: int, payment: dict, caption: str):
-    """Edit every seller/admin/moderator copy of the same pending-payment message."""
+    """Edit every stored seller/admin/moderator copy of the same payment notification.
+
+    The payment record is the single source of truth for the message IDs.  This
+    deliberately edits the original notification messages in-place instead of
+    sending a second Approved/Rejected message.
+    """
     messages = payment.get("notification_messages") or []
+    if not messages:
+        logger.warning(
+            "No stored manual payment notification messages owner=%s payment=%s",
+            owner,
+            payment.get("payment_id"),
+        )
+        return
+
+    bot = context.bot
+
+    # De-duplicate IDs defensively.  A recipient should have exactly one copy.
+    seen = set()
     for item in messages:
         try:
-            await context.bot.edit_message_caption(
-                chat_id=int(item["chat_id"]),
-                message_id=int(item["message_id"]),
+            chat_id = int(item["chat_id"])
+            message_id = int(item["message_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        key = (chat_id, message_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=message_id,
                 caption=caption,
                 reply_markup=None,
             )
-        except TelegramError:
-            logger.exception(
-                "Failed to sync manual payment notification owner=%s payment=%s chat=%s message=%s",
+        except TelegramError as exc:
+            # One failed copy must never prevent the remaining seller/staff
+            # copies from being updated.
+            logger.warning(
+                "Failed to sync manual payment notification owner=%s payment=%s "
+                "chat=%s message=%s error=%s",
                 owner,
                 payment.get("payment_id"),
-                item.get("chat_id"),
-                item.get("message_id"),
+                chat_id,
+                message_id,
+                exc,
             )
 
 
