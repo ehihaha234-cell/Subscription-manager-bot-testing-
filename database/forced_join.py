@@ -23,7 +23,7 @@ async def upsert_required(owner_id, access_chat_id, chat_id, title, chat_type, i
             "chat_id":int(chat_id),
             "title":title or "Group/Channel","chat_type":chat_type,
             "invite_link":invite_link or "","updated_at":now()
-        },"$setOnInsert":{"created_at":now(),"enabled":True}},
+        },"$setOnInsert":{"created_at":now(),"enabled":False}},
         upsert=True,
     )
     return await c().find_one(key)
@@ -118,8 +118,8 @@ async def set_forced_join_editor(owner_id, message, access_chat_id=None):
 async def get_forced_join_enabled(owner_id, access_chat_id=None):
     doc = await settings_c().find_one(await _settings_key(owner_id, access_chat_id))
     if doc is None:
-        return False if access_chat_id else True
-    return bool(doc.get("enabled", True))
+        return False
+    return bool(doc.get("enabled", False))
 
 async def set_forced_join_enabled(owner_id, enabled, access_chat_id=None):
     key=await _settings_key(owner_id, access_chat_id)
