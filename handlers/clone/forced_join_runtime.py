@@ -835,6 +835,48 @@ async def forced_join_editor_media_input(update, context):
 
     received = len(item["media"])
     context.user_data["fj_editor_media_received"] = received
+
+    # Telegram albums arrive as multiple updates sharing the same
+    # media_group_id. Do not send one confirmation per update. Debounce
+    # the confirmation so the whole album is saved first, then send exactly
+    # one confirmation for the collection.
+    media_group_id = getattr(m, "media_group_id", None)
+    if media_group_id:
+        pending = context.user_data.get("fj_editor_media_confirm_tasks") or {}
+        old_task = pending.get(str(media_group_id))
+        if old_task and not old_task.done():
+            old_task.cancel()
+
+        async def _confirm_album():
+            import asyncio
+            try:
+                await asyncio.sleep(0.7)
+                current = await get_forced_join_editor_for_chat(owner, access_chat_id)
+                current_count = len(current.get("media") or [])
+                if current_count >= 10:
+                    reply = "✅ 10/10 media saved. Maximum reached."
+                else:
+                    reply = f"✅ Media {current_count}/10 saved. Send more media or press ⬅ Continue."
+                await m.reply_text(
+                    reply,
+                    reply_markup=_kb([[InlineKeyboardButton("⬅ Continue", callback_data="fj_editor")]]),
+                )
+                if current_count >= 10:
+                    context.user_data.pop("fj_editor_input", None)
+                    context.user_data.pop("fj_editor_media_collecting", None)
+                    context.user_data.pop("fj_editor_media_received", None)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Forced Join media album confirmation failed")
+            finally:
+                pending.pop(str(media_group_id), None)
+
+        pending[str(media_group_id)] = context.application.create_task(_confirm_album())
+        context.user_data["fj_editor_media_confirm_tasks"] = pending
+        return True
+
+    # A normal single-media message keeps the existing one-confirmation flow.
     if received >= 10:
         context.user_data.pop("fj_editor_input", None)
         context.user_data.pop("fj_editor_media_collecting", None)
