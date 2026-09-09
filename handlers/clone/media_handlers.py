@@ -145,24 +145,52 @@ class CloneMediaHandlersMixin:
             # actual seller account while keeping the payment itself stored under
             # the clone-specific owner/data scope.
             seller_account_id = self.seller_account(context)
+            recipients = {int(seller_account_id)}
             try:
-                await context.bot.send_photo(
-                    seller_account_id,
-                    p["screenshot_file_id"],
-                    caption=caption,
-                    reply_markup=kb,
-                )
-            except TelegramError:
-                # The payment is already safely stored as pending. Do not leave
-                # the user without confirmation if the live notification fails.
+                for staff in await list_staff(owner):
+                    if staff.get("status") != "active":
+                        continue
+                    permissions = staff.get("permissions") or []
+                    if "*" in permissions or "payments" in permissions:
+                        recipients.add(int(staff["user_id"]))
+            except Exception:
                 logger.exception(
-                    "Manual payment saved but seller notification failed: "
-                    "seller_account_id=%s data_owner_id=%s payment_id=%s",
-                    seller_account_id, owner, p.get("payment_id"),
+                    "Failed to load payment notification staff owner=%s payment_id=%s",
+                    owner, p.get("payment_id"),
                 )
+
+            notification_messages = []
+            for recipient_id in recipients:
+                try:
+                    sent_message = await context.bot.send_photo(
+                        chat_id=recipient_id,
+                        photo=p["screenshot_file_id"],
+                        caption=caption,
+                        reply_markup=kb,
+                    )
+                    notification_messages.append({
+                        "chat_id": int(recipient_id),
+                        "message_id": int(sent_message.message_id),
+                    })
+                except TelegramError:
+                    # The payment is already safely stored as pending. One blocked
+                    # staff member must not prevent the other authorized recipients
+                    # from receiving the same payment notification.
+                    logger.exception(
+                        "Manual payment notification failed: owner=%s recipient=%s payment_id=%s",
+                        owner, recipient_id, p.get("payment_id"),
+                    )
+
+            await set_payment_notification_messages(
+                owner,
+                p["payment_id"],
+                notification_messages,
+            )
+
+            if not notification_messages:
                 await update.effective_message.reply_text(
                     "✅ Payment screenshot submitted successfully. It is pending "
-                    "approval and the admin can review it from Pending Payments."
+                    "approval. Please do not submit the same screenshot again."
                 )
                 raise ApplicationHandlerStop
 

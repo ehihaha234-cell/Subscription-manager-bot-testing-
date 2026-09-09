@@ -21,7 +21,16 @@ class CloneAdminCallbacksMixin:
             return
         role = staff_record.get("role", "moderator")
         if role == "moderator":
-            allowed_prefixes = ("a_home", "a_users", "a_user_", "a_pending", "a_pay_", "a_live_support", "a_help")
+            allowed_prefixes = (
+                "a_home",
+                "a_users",
+                "a_user_",
+                "a_pending",
+                "a_history",
+                "a_pay_",
+                "a_seller_profile",
+                "a_terms",
+            )
             if not any(action == prefix or action.startswith(prefix) for prefix in allowed_prefixes):
                 await q.answer("Moderator permission is not available for this section.", show_alert=True)
                 return

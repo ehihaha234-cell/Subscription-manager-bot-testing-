@@ -419,7 +419,12 @@ class CloneLiveSupportMixin:
                     code,ctype,value,limit=[x.strip() for x in text.split("|",3)]
                     if ctype not in {"percent","fixed"}: raise ValueError("type")
                     await create_coupon(owner,code,ctype,float(value),int(limit))
-                    context.user_data.clear(); await update.effective_message.reply_text("✅ Coupon saved",reply_markup=self.admin_menu())
+                    context.user_data.clear()
+                    staff = await self.staff_record(update, context)
+                    await update.effective_message.reply_text(
+                        "✅ Coupon saved",
+                        reply_markup=self.admin_menu((staff or {}).get("role", "seller")),
+                    )
                 except Exception:
                     await update.effective_message.reply_text("❌ Use: SAVE20 | percent | 20 | 100")
                 return

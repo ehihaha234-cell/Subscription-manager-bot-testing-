@@ -106,7 +106,7 @@ class CloneStartMixin:
                     f"Users: {data.get('users',0)}\nPlans: {data.get('plans',0)}\n"
                     f"Channels/Groups: {data.get('channels',0)}\n"
                     f"Pending Payments: {data.get('pending',0)}\nRevenue: {format_currency(settings.get('currency'), data.get('revenue',0))}",
-                    reply_markup=self.admin_menu(),
+                    reply_markup=self.admin_menu(staff.get('role', 'seller')),
                 )
             elif target == "admin_terms":
                 policy = await get_policy(owner)
@@ -116,12 +116,12 @@ class CloneStartMixin:
                     if value: parts.append(f"{key.title()}:\n{value}")
                 await update.effective_message.reply_text(
                     "📜 Terms & Policy\n\n" + ("\n\n".join(parts) if parts else "No policy configured."),
-                    reply_markup=self.admin_menu(),
+                    reply_markup=self.admin_menu(staff.get('role', 'seller')),
                 )
             else:
                 await update.effective_message.reply_text(
                     await self.admin_panel_text(owner, update.effective_user),
-                    reply_markup=self.admin_menu(),
+                    reply_markup=self.admin_menu(staff.get('role', 'seller')),
                     parse_mode="HTML",
                 )
             return
