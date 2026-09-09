@@ -23,14 +23,16 @@ async def _clone_qr_file_id(context, owner: int) -> str:
 async def _update_payment_notification_messages(context, owner, payment_id, caption, current_message=None):
     """Edit every pending-payment notification for this payment."""
     refs = list(await get_payment_notification_messages(owner, payment_id) or [])
-    # Always include the message whose Approve/Reject button was pressed. This
-    # also repairs legacy payments whose reference was not stored.
+    # Always include the exact message whose Approve/Reject button was pressed.
+    # This repairs legacy payments and guarantees the visible pending message
+    # changes even if its notification reference was not stored.
     if current_message is not None:
         try:
-            refs.append({
+            current_ref = {
                 "chat_id": int(current_message.chat_id),
                 "message_id": int(current_message.message_id),
-            })
+            }
+            refs.append(current_ref)
         except (TypeError, ValueError, AttributeError):
             pass
 
@@ -66,6 +68,23 @@ async def _update_payment_notification_messages(context, owner, payment_id, capt
                 updated += 1
                 continue
             except TelegramError:
+                # When this is the callback message itself, retry through the
+                # message object. This handles message-context edge cases while
+                # preserving the same caption and removing Approve/Reject.
+                try:
+                    if (
+                        current_message is not None
+                        and int(current_message.chat_id) == chat_id
+                        and int(current_message.message_id) == message_id
+                    ):
+                        await current_message.edit_caption(
+                            caption=caption,
+                            reply_markup=None,
+                        )
+                        updated += 1
+                        continue
+                except Exception:
+                    pass
                 logger.warning(
                     "Could not update payment notification owner=%s payment=%s chat=%s message=%s: %s",
                     owner, payment_id, chat_id, message_id, exc,
