@@ -345,7 +345,6 @@ class CloneRuntimeAppMixin:
         app.add_handler(CommandHandler("help",self.help_command))
         app.add_handler(CommandHandler("admin",self.admin))
         app.add_handler(CommandHandler("connectgroup",self.connect_group_command))
-        app.add_handler(CommandHandler("connectforcedjoin",self.connect_forced_join_command))
         app.add_handler(CommandHandler("connectsupport",self.connect_support_command))
         app.add_handler(CommandHandler("confirm", self.seller_broadcast_confirm_command))
         app.add_handler(CommandHandler("cancel", self.seller_broadcast_cancel_command))
