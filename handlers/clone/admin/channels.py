@@ -173,7 +173,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 except Exception:
                     logger.exception('Failed delivery claim release failed owner_id=%s user_id=%s delivery_id=%s', owner, uid, claimed['_id'])
             await asyncio.sleep(0.75)
-        await q.edit_message_text(f'🔁 Retry completed\n\nSent: {sent}\nStill failed: {still_failed}\nAlready processing: {skipped}', reply_markup=self.admin_menu())
+        await q.edit_message_text(f'🔁 Retry completed\n\nSent: {sent}\nStill failed: {still_failed}\nAlready processing: {skipped}', reply_markup=self.admin_menu(role))
         return True
     if a.startswith('a_channel_del_'):
         await remove_channel(owner, int(a.replace('a_channel_del_', '')))

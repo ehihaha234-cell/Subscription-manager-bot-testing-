@@ -13,6 +13,27 @@ async def _clone_qr_file_id(context, owner: int) -> str:
     settings = await get_seller_settings(owner)
     return str(settings.get("upi_qr_file_id") or "")
 
+async def _sync_manual_payment_notifications(context, owner: int, payment: dict, caption: str):
+    """Edit every seller/admin/moderator copy of the same pending-payment message."""
+    messages = payment.get("notification_messages") or []
+    for item in messages:
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=int(item["chat_id"]),
+                message_id=int(item["message_id"]),
+                caption=caption,
+                reply_markup=None,
+            )
+        except TelegramError:
+            logger.exception(
+                "Failed to sync manual payment notification owner=%s payment=%s chat=%s message=%s",
+                owner,
+                payment.get("payment_id"),
+                item.get("chat_id"),
+                item.get("message_id"),
+            )
+
+
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_payment':
         settings = await get_seller_settings(owner)
@@ -130,7 +151,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a.startswith('a_pay_view_'):
         p = await get_payment(owner, a.replace('a_pay_view_', ''))
         if not p:
-            await q.edit_message_text('Not found', reply_markup=self.admin_menu())
+            await q.edit_message_text('Not found', reply_markup=self.admin_menu(role))
             return True
         kb = InlineKeyboardMarkup([[InlineKeyboardButton('✅ Approve', callback_data=f"a_pay_ok_{p['payment_id']}"), InlineKeyboardButton('❌ Reject', callback_data=f"a_pay_no_{p['payment_id']}")], [InlineKeyboardButton('⬅ Back', callback_data='a_pending')]])
         caption = await self.payment_details_caption(owner, p, status=p.get('status', 'pending'))
@@ -158,7 +179,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 await q.answer('Payment is already being processed', show_alert=True)
                 return True
             await context.bot.send_message(p['user_id'], '❌ Payment rejected')
-            rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=owner)
+            rejected_caption = await self.payment_details_caption(
+                owner, p, status='rejected', processed_by=owner
+            )
+            latest = await get_payment(owner, pid) or p
+            await _sync_manual_payment_notifications(
+                context, owner, latest, rejected_caption
+            )
             await q.edit_message_caption(caption=rejected_caption, reply_markup=None)
             return True
         claimed = await claim_payment_for_processing(owner, pid, owner)
@@ -224,7 +251,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
             else:
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
             await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: {format_currency((await get_seller_settings(owner)).get('currency'), float(p.get('amount') or 0))}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
-            approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
+            approved_caption = await self.payment_details_caption(
+                owner, p, status='approved', processed_by=owner
+            )
+            latest = await get_payment(owner, pid) or p
+            await _sync_manual_payment_notifications(
+                context, owner, latest, approved_caption
+            )
             await q.edit_message_caption(caption=approved_caption, reply_markup=None)
         except Exception as exc:
             logger.exception('Payment approval failed owner=%s payment=%s', owner, pid)

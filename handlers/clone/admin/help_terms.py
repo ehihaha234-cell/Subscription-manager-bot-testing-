@@ -21,6 +21,6 @@ async def handle(self, update, context, q, owner, staff, a, role):
         for key in ('terms', 'privacy', 'refund', 'support'):
             policy = await get_policy(key)
             parts.append(f"{key.title()}:\n{policy.get('text')}")
-        await q.edit_message_text('📜 Terms & Policy\n\n' + '\n\n'.join(parts), reply_markup=self.admin_menu())
+        await q.edit_message_text('📜 Terms & Policy\n\n' + '\n\n'.join(parts), reply_markup=self.admin_menu(role))
         return True
     return False

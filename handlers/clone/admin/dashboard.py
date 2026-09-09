@@ -6,7 +6,11 @@ from handlers.common.clone_context import *
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_home':
         context.user_data.clear()
-        await q.edit_message_text(await self.admin_panel_text(owner, q.from_user), reply_markup=self.admin_menu(), parse_mode='HTML')
+        await q.edit_message_text(
+            await self.admin_panel_text(owner, q.from_user),
+            reply_markup=self.admin_menu(role),
+            parse_mode='HTML',
+        )
         return True
     if a == 'a_seller_profile':
         timezone_name = await self.seller_timezone(owner)
@@ -51,11 +55,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
             f"\n\nThe owner controls reward days and reward plan from "
             f"Owner Dashboard → Subscription Management."
         )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('💎 Buy / Change Plan', url=f'https://t.me/{main_bot_username}?start=sellerplan')],
-            [InlineKeyboardButton('📤 Share Referral Link', url=f'https://t.me/share/url?url={referral_link}')],
-            [InlineKeyboardButton('⬅ Seller Admin Panel', callback_data='a_home')],
-        ])
+        if role == "moderator":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('⬅ Moderator Panel', callback_data='a_home')],
+            ])
+        else:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton('💎 Buy / Change Plan', url=f'https://t.me/{main_bot_username}?start=sellerplan')],
+                [InlineKeyboardButton('📤 Share Referral Link', url=f'https://t.me/share/url?url={referral_link}')],
+                [InlineKeyboardButton('⬅ Seller Admin Panel', callback_data='a_home')],
+            ])
         await q.edit_message_text(text, reply_markup=kb, disable_web_page_preview=True)
         return True
     if a == 'a_seller_plan_history':
