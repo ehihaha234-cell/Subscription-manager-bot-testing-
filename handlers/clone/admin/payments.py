@@ -21,18 +21,32 @@ async def _clone_qr_file_id(context, owner: int) -> str:
     return str(settings.get("upi_qr_file_id") or "")
 
 async def _update_payment_notification_messages(context, owner, payment_id, caption, current_message=None):
-    """Edit every pending-payment notification for this payment."""
+    """Reliably replace every pending-payment notification with its final status."""
     refs = list(await get_payment_notification_messages(owner, payment_id) or [])
-    # Always include the exact message whose Approve/Reject button was pressed.
-    # This repairs legacy payments and guarantees the visible pending message
-    # changes even if its notification reference was not stored.
+
+    # The callback message is the most important one. Edit the Message object
+    # directly first; this works even for older payments whose DB notification
+    # references were never stored.
     if current_message is not None:
         try:
-            current_ref = {
+            await current_message.edit_caption(caption=caption, reply_markup=None)
+            refs.append({
                 "chat_id": int(current_message.chat_id),
                 "message_id": int(current_message.message_id),
-            }
-            refs.append(current_ref)
+            })
+        except TelegramError as exc:
+            logger.warning(
+                "Direct payment notification edit failed owner=%s payment=%s: %s",
+                owner, payment_id, exc,
+            )
+            try:
+                await current_message.edit_text(text=caption, reply_markup=None)
+                refs.append({
+                    "chat_id": int(current_message.chat_id),
+                    "message_id": int(current_message.message_id),
+                })
+            except TelegramError:
+                pass
         except (TypeError, ValueError, AttributeError):
             pass
 
@@ -48,47 +62,34 @@ async def _update_payment_notification_messages(context, owner, payment_id, capt
         if key in seen:
             continue
         seen.add(key)
+
+        # The current callback message may already have been edited above.
+        # Telegram will reject a second identical edit; skip it quietly.
+        if current_message is not None and key == (int(current_message.chat_id), int(current_message.message_id)):
+            updated += 1
+            continue
+
         try:
             await context.bot.edit_message_caption(
-                chat_id=chat_id,
-                message_id=message_id,
-                caption=caption,
-                reply_markup=None,
+                chat_id=chat_id, message_id=message_id,
+                caption=caption, reply_markup=None,
             )
             updated += 1
+            continue
         except TelegramError as exc:
-            # Legacy/text notifications are handled as a fallback.
             try:
                 await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=caption,
-                    reply_markup=None,
+                    chat_id=chat_id, message_id=message_id,
+                    text=caption, reply_markup=None,
                 )
                 updated += 1
                 continue
             except TelegramError:
-                # When this is the callback message itself, retry through the
-                # message object. This handles message-context edge cases while
-                # preserving the same caption and removing Approve/Reject.
-                try:
-                    if (
-                        current_message is not None
-                        and int(current_message.chat_id) == chat_id
-                        and int(current_message.message_id) == message_id
-                    ):
-                        await current_message.edit_caption(
-                            caption=caption,
-                            reply_markup=None,
-                        )
-                        updated += 1
-                        continue
-                except Exception:
-                    pass
                 logger.warning(
                     "Could not update payment notification owner=%s payment=%s chat=%s message=%s: %s",
                     owner, payment_id, chat_id, message_id, exc,
                 )
+
     logger.info(
         "Payment notification status update owner=%s payment=%s updated=%s total_refs=%s",
         owner, payment_id, updated, len(seen),
