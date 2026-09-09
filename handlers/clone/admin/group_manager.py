@@ -299,7 +299,7 @@ async def delete_commands_page(q, settings):
 
 async def handle(self,update,context,q,owner,staff,a,role):
     if not a.startswith('gm_'): return False
-    if role!='seller': await q.answer('Only the seller can manage groups.',show_alert=True); return True
+    if role not in {'seller','admin'}: await q.answer('Only the seller or Admin can manage groups.',show_alert=True); return True
     try: await q.answer()
     except Exception: pass
     context.user_data.pop('gm_input', None)
@@ -604,7 +604,7 @@ async def handle_text(self,update,context):
     mode=context.user_data.get('gm_input'); gid=selected(context)
     if not mode or not gid: return False
     owner=self.owner(context)
-    if update.effective_user.id!=self.seller_account(context): return False
+    if not await self.seller_or_admin(update, context): return False
     text=(update.effective_message.text or '').strip()
     if mode=='af_messages':
         try: value=max(2,min(50,int(text)))

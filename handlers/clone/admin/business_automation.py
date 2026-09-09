@@ -629,8 +629,8 @@ async def _logout(record):
 async def handle(self, update, context, q, owner, staff_record, action, role):
     if not action.startswith("ba_"):
         return False
-    if role != "seller":
-        await q.answer("Only the seller can manage Business Automation.", show_alert=True)
+    if role not in {"seller", "admin"}:
+        await q.answer("Only the seller or Admin can manage Business Automation.", show_alert=True)
         return True
 
     # Inline Back/menu buttons also cancel any pending editor input.
@@ -921,7 +921,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
 
 async def handle_text(self, update, context):
     owner = self.owner(context)
-    if int(update.effective_user.id) != int(self.seller_account(context)):
+    if not await self.seller_or_admin(update, context):
         return False
     text = (update.effective_message.text or "").strip()
     auth = context.user_data.get("ba_auth")
@@ -1069,7 +1069,7 @@ async def handle_text(self, update, context):
 
 async def handle_media(self, update, context):
     owner = self.owner(context)
-    if int(update.effective_user.id) != int(self.seller_account(context)):
+    if not await self.seller_or_admin(update, context):
         return False
     editor = context.user_data.get("ba_editor") or {}
     field = str(editor.get("field") or "")
