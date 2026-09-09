@@ -30,6 +30,11 @@ def format_ist(dt):
     )
 
 
+def actor_name(user):
+    """Stable Telegram display name for payment audit records."""
+    return (getattr(user, "full_name", None) or getattr(user, "first_name", None) or str(getattr(user, "id", "Unknown"))).strip()
+
+
 async def safe_edit(query, text: str, reply_markup=None):
     try:
         await query.edit_message_caption(caption=text, reply_markup=reply_markup)
@@ -321,6 +326,7 @@ async def approve_payment_by_id(update: Update, context: ContextTypes.DEFAULT_TY
                 payment_id=payment_id,
                 status="approved",
                 admin_id=query.from_user.id,
+                admin_name=actor_name(query.from_user),
             )
             if decided is None:
                 payment = await get_payment(payment_id)
@@ -359,11 +365,13 @@ async def approve_payment_by_id(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
+        final_payment = await get_payment(payment_id)
         success_text = (
             "✅ Payment Approved\n\n"
             f"User: {result['user_id']}\n"
             f"Plan: {result['plan_name']}\n"
-            f"Expiry: {result['expiry_ist']}"
+            f"Expiry: {result['expiry_ist']}\n"
+            f"👮 Approved By: {(final_payment or {}).get('decision_admin_name') or actor_name(query.from_user)} (ID: {(final_payment or {}).get('decision_admin_id') or query.from_user.id})"
         )
         if not result.get("notification_sent", True):
             success_text += "\n\n⚠️ User notification could not be sent."
@@ -414,6 +422,7 @@ async def reject_payment_by_id(update: Update, context: ContextTypes.DEFAULT_TYP
             payment_id=payment_id,
             status="rejected",
             admin_id=query.from_user.id,
+            admin_name=actor_name(query.from_user),
         )
 
         if decided is None:
@@ -430,7 +439,12 @@ async def reject_payment_by_id(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        await safe_edit(query, "❌ Payment Rejected")
+        await safe_edit(
+            query,
+            "❌ Payment Rejected\n\n"
+            f"👮 Rejected By: {decided.get('decision_admin_name') or actor_name(query.from_user)} "
+            f"(ID: {decided.get('decision_admin_id') or query.from_user.id})",
+        )
 
         await context.bot.send_message(
             chat_id=user_id,
@@ -457,6 +471,7 @@ async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id=user_id,
             status="approved",
             admin_id=query.from_user.id,
+            admin_name=actor_name(query.from_user),
         )
 
         if payment is None:
@@ -493,11 +508,14 @@ async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        final_payment = await get_payment(str(payment.get("_id")))
         success_text = (
             "✅ Payment Approved\n\n"
             f"User: {result['user_id']}\n"
             f"Plan: {result['plan_name']}\n"
-            f"Expiry: {result['expiry_ist']}"
+            f"Expiry: {result['expiry_ist']}\n"
+            f"👮 Approved By: {(final_payment or payment).get('decision_admin_name') or actor_name(query.from_user)} "
+            f"(ID: {(final_payment or payment).get('decision_admin_id') or query.from_user.id})"
         )
         if not result.get("notification_sent", True):
             success_text += "\n\n⚠️ User notification could not be sent."
@@ -526,6 +544,7 @@ async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id=user_id,
             status="rejected",
             admin_id=query.from_user.id,
+            admin_name=actor_name(query.from_user),
         )
 
         if decided is None:
@@ -542,7 +561,12 @@ async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await safe_edit(query, "❌ Payment Rejected")
+        await safe_edit(
+            query,
+            "❌ Payment Rejected\n\n"
+            f"👮 Rejected By: {decided.get('decision_admin_name') or actor_name(query.from_user)} "
+            f"(ID: {decided.get('decision_admin_id') or query.from_user.id})",
+        )
 
         await context.bot.send_message(
             chat_id=user_id,
