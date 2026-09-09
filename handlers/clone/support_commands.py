@@ -6,7 +6,7 @@ from handlers.common.clone_context import *
 class CloneSupportCommandsMixin:
     async def support_template_command_handler(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         message=update.effective_message; user=update.effective_user; chat=update.effective_chat
-        if not message or not user or user.id!=self.seller_account(context) or not message.text:
+        if not message or not user or not await self.seller_or_admin(update, context) or not message.text:
             return
         owner=self.owner(context); support=await get_live_support_settings(owner)
         command=message.text.split()[0].split("@",1)[0].lstrip("/").lower()

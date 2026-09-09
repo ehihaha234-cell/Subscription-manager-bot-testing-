@@ -266,7 +266,7 @@ class CloneLiveSupportMixin:
         q=update.callback_query
         await q.answer()
         owner=self.owner(context)
-        if q.from_user.id!=self.seller_account(context):
+        if not await self.seller_or_admin(update, context):
             await q.answer("Not authorized",show_alert=True)
             return
         data=q.data

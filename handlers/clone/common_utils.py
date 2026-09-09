@@ -37,6 +37,17 @@ class CloneCommonUtilsMixin:
     async def auth(self,update,context):
         return bool(await self.staff_record(update, context))
 
+    async def management_role(self, update, context):
+        """Return the active clone staff role for management features."""
+        record = await self.staff_record(update, context)
+        if not record or record.get("status", "active") != "active":
+            return None
+        return str(record.get("role") or "").lower()
+
+    async def seller_or_admin(self, update, context):
+        """True for the clone seller and promoted Admin staff only."""
+        return (await self.management_role(update, context)) in {"seller", "admin"}
+
     async def safe_query_message(self,q,text,reply_markup=None):
         """Edit the callback's existing message, including media captions.
 
