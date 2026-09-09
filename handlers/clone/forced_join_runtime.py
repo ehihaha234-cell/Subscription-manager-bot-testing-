@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_media_prompt, FEATURE_CALLBACKS
-from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, save_pending_request, list_pending_requests, remove_pending_request
+from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, ensure_required_scope, save_pending_request, list_pending_requests, remove_pending_request
 from database.seller_data import get_channels
 from database.forced_join import (
     get_forced_join_editor, set_forced_join_editor,
@@ -146,29 +146,32 @@ async def forced_join_my_chat_member(update, context):
     was_admin = old_status in {"administrator", "creator"}
 
     if is_admin:
-        existing = await get_required(owner, chat_id)
-        if existing:
-            # Keep the seller's enabled/disabled choice. Only refresh basic
-            # chat metadata so renames/type changes do not create duplicates.
-            await c_update_required_metadata(owner, chat_id, title, chat.type)
-        else:
-            await upsert_required_disabled(owner, chat_id, title, chat.type)
+        # The same target is listed independently under every connected
+        # Group Manager access group/channel. Each scope has its own toggle.
+        connected = await get_channels(owner)
+        for access in connected or []:
+            access_chat_id=int(access.get("chat_id", 0) or 0)
+            if not access_chat_id:
+                continue
+            existing = await get_required(owner, chat_id, access_chat_id)
+            if existing:
+                await c_update_required_metadata(owner, access_chat_id, chat_id, title, chat.type)
+            else:
+                await upsert_required_disabled(owner, access_chat_id, chat_id, title, chat.type)
         logger.info(
-            "Forced Join chat detected owner=%s chat=%s type=%s status=%s",
-            owner, chat_id, chat.type, new_status,
+            "Forced Join chat detected owner=%s chat=%s type=%s scopes=%s status=%s",
+            owner, chat_id, chat.type, len(connected or []), new_status,
         )
         return
 
     # Once the bot is no longer an admin, it must disappear from the Forced
     # Join list so it can never remain as a stale target.
     if was_admin or new_status in {"left", "kicked", "member", "restricted"}:
-        existing = await get_required(owner, chat_id)
-        if existing:
-            await remove_required(owner, chat_id)
-            logger.info(
-                "Forced Join chat removed after bot lost admin status owner=%s chat=%s old=%s new=%s",
-                owner, chat_id, old_status, new_status,
-            )
+        await remove_required(owner, chat_id)
+        logger.info(
+            "Forced Join chat removed after bot lost admin status owner=%s chat=%s old=%s new=%s",
+            owner, chat_id, old_status, new_status,
+        )
 
 
 async def c_update_required_metadata(owner_id, chat_id, title, chat_type):
@@ -182,21 +185,25 @@ async def c_update_required_metadata(owner_id, chat_id, title, chat_type):
     )
 
 
-async def upsert_required_disabled(owner_id, chat_id, title, chat_type):
+async def upsert_required_disabled(owner_id, access_chat_id, chat_id, title, chat_type):
     """Insert an auto-detected Forced Join target disabled by default."""
     from database.mongo import get_database
     coll = get_database()["seller_forced_join"]
     now_utc = datetime.now(timezone.utc)
     await coll.update_one(
-        {"owner_id": int(owner_id), "chat_id": int(chat_id)},
+        {"owner_id": int(owner_id), "access_chat_id": int(access_chat_id), "chat_id": int(chat_id)},
         {"$set": {
             "owner_id": int(owner_id),
+            "access_chat_id": int(access_chat_id),
             "chat_id": int(chat_id),
             "title": title or "Group/Channel",
             "chat_type": chat_type,
-            "enabled": False,
             "updated_at": now_utc,
-        }, "$setOnInsert": {"created_at": now_utc, "invite_link": ""}},
+        }, "$setOnInsert": {
+            "created_at": now_utc,
+            "invite_link": "",
+            "enabled": False,
+        }},
         upsert=True,
     )
 
@@ -209,15 +216,15 @@ async def forced_join_request(update, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     if not owner:
         return
-    if not await get_forced_join_enabled(owner):
-        return
 
     access_chat_id=int(req.chat.id)
+    if not await get_forced_join_enabled(owner, access_chat_id):
+        return
     user_id=int(req.user_chat_id)
 
     required=[
-        x for x in await list_required(owner)
-        if x.get("enabled", True)
+        x for x in await list_required(owner, access_chat_id)
+        if x.get("enabled", False)
         and int(x.get("chat_id", 0) or 0) != access_chat_id
     ]
 
@@ -266,7 +273,7 @@ async def forced_join_request(update, context):
                     int(item["chat_id"]), name="Forced Join", member_limit=0
                 )
                 link=invite.invite_link
-                await update_invite(owner, int(item["chat_id"]), link)
+                await update_invite(owner, int(item["chat_id"]), link, access_chat_id)
             except Exception:
                 logger.exception(
                     "Could not create Forced Join invite owner=%s chat=%s",
@@ -330,33 +337,36 @@ async def forced_join_auto_approve(update, context):
         return
 
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    if not owner or not await get_forced_join_enabled(owner):
-        return
     user_id=int(getattr(new.user, "id", 0) or 0)
     if not owner or not user_id:
-        return
-
-    required=[
-        x for x in await list_required(owner)
-        if x.get("enabled", True)
-    ]
-    if not required:
         return
 
     pending=await list_pending_requests(owner, user_id)
     if not pending:
         return
 
-    # Check every required chat. This makes approval independent of which
-    # required group/channel generated the latest ChatMember update.
-    ok, missing=await _required_status(context.bot, user_id, required)
-    if not ok:
-        return
-
+    # Each pending access group/channel has its own Forced Join master switch
+    # and its own required-target list. Never compare against another access
+    # group's settings.
     for request in pending:
         access_chat_id=int(request.get("access_chat_id", 0) or 0)
         if not access_chat_id:
             continue
+        if not await get_forced_join_enabled(owner, access_chat_id):
+            continue
+
+        required=[
+            x for x in await list_required(owner, access_chat_id)
+            if x.get("enabled", False)
+            and int(x.get("chat_id", 0) or 0) != access_chat_id
+        ]
+        if not required:
+            continue
+
+        ok, missing=await _required_status(context.bot, user_id, required)
+        if not ok:
+            continue
+
         try:
             request_chat_id=int(request.get("user_chat_id", user_id) or user_id)
             await _send_forced_join_approval_message(context.bot, owner, user_id, request_chat_id, access_chat_id)
@@ -390,8 +400,12 @@ async def forced_join_info_callback(update, context):
         await forced_join_groups_page(q, context)
         return True
     if a=="fj_toggle_feature":
-        enabled=await get_forced_join_enabled(owner)
-        await set_forced_join_enabled(owner, not enabled)
+        access_chat_id=int(context.user_data.get("gm_group_id") or 0)
+        if not access_chat_id:
+            await q.answer("❌ Select a connected group/channel first.", show_alert=True)
+            return True
+        enabled=await get_forced_join_enabled(owner, access_chat_id)
+        await set_forced_join_enabled(owner, not enabled, access_chat_id)
         await forced_join_page(q, context)
         return True
     if a.startswith("fj_info:"):
@@ -509,9 +523,9 @@ def _approval_button_lines(rows):
 async def forced_join_editor_targets_page(q, context):
     """Select which connected group/channel gets its own approval message."""
     owner = int(context.application.bot_data.get("seller_owner_id") or 0)
-    items = await list_required(owner)
+    items = await get_channels(owner)
     rows = []
-    for item in items:
+    for item in items or []:
         chat_id = int(item.get("chat_id", 0) or 0)
         if not chat_id:
             continue
@@ -548,7 +562,8 @@ async def forced_join_message_editor(q, context, access_chat_id=None):
     media = item.get("media") or []
     buttons = item.get("buttons") or []
     button_count = sum(1 for row in buttons for b in row if b.get("type") in {"url", "callback"})
-    target = await get_required(owner, access_chat_id)
+    channels = await get_channels(owner)
+    target = next((x for x in (channels or []) if int(x.get("chat_id", 0) or 0) == access_chat_id), None)
     title = str((target or {}).get("title") or "Group/Channel")
     rows = [
         [InlineKeyboardButton(("🟢 Disable" if enabled else "🔴 Enable") + " Approval Message", callback_data="fj_editor_toggle")],
@@ -745,7 +760,8 @@ async def forced_join_editor_media_input(update, context):
 
 async def forced_join_page(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    enabled=await get_forced_join_enabled(owner)
+    access_chat_id=int(context.user_data.get("gm_group_id") or 0)
+    enabled=await get_forced_join_enabled(owner, access_chat_id) if access_chat_id else False
     rows=[
         [InlineKeyboardButton(("🔴 Disable Forced Join" if enabled else "🟢 Enable Forced Join"), callback_data="fj_toggle_feature")],
         [InlineKeyboardButton("🔗 Forced Group/Channel",callback_data="fj_forced_groups")],
@@ -762,7 +778,10 @@ async def forced_join_page(q, context):
 
 async def forced_join_groups_page(q, context):
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    items=await list_required(owner)
+    access_chat_id=int(context.user_data.get("gm_group_id") or 0)
+    if access_chat_id:
+        await ensure_required_scope(owner, access_chat_id)
+    items=await list_required(owner, access_chat_id) if access_chat_id else []
     rows=[]
     for x in items:
         mark="🟢" if x.get("enabled",True) else "🔴"
@@ -773,9 +792,11 @@ async def forced_join_groups_page(q, context):
     rows.append([InlineKeyboardButton("⬅ Back",callback_data="gm_forced_join")])
     await q.edit_message_text(
         "🔗 Forced Group/Channel\n\n"
-        "Only groups/channels connected with /connectforcedjoin are shown here.\n\n"
-        "How to connect:\n"
-        "/connectforcedjoin",
+        "Every group/channel where this Clone Bot is an administrator is detected automatically.\n\n"
+        "🔴 Disabled = this target will NOT be used for Forced Join.\n"
+        "🟢 Enabled = this target WILL be used for Forced Join.\n\n"
+        "If a group/channel is missing, remove the Clone Bot from it and add it again as an administrator.\n"
+        "Settings in this list belong only to the selected Group Manager group/channel.",
         reply_markup=_kb(rows)
     )
 
@@ -788,8 +809,11 @@ async def forced_join_toggle_callback(update, context):
     except Exception:
         return
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    await toggle_required(owner,chat_id)
-    await forced_join_page(q,context)
+    access_chat_id=int(context.user_data.get("gm_group_id") or 0)
+    if not access_chat_id:
+        return True
+    await toggle_required(owner,chat_id,access_chat_id)
+    await forced_join_groups_page(q,context)
     return True
 
 async def connect_forced_join_command(self, update, context):

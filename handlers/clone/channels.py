@@ -153,14 +153,26 @@ class CloneChannelsMixin:
                 member_limit=0,
             )
 
-            await upsert_required(
-                owner,
-                0,
-                target_id,
-                target_title,
-                target_type,
-                invite.invite_link,
-            )
+            # Legacy manual command: keep the target independent for every
+            # connected Group Manager access group/channel. It never creates
+            # one owner-wide Forced Join toggle.
+            connected = await get_channels(owner)
+            if not connected:
+                await message.reply_text(
+                    "❌ Connect at least one group/channel in Group Manager first."
+                )
+                return
+            for access in connected:
+                access_chat_id=int(access.get("chat_id", 0) or 0)
+                if access_chat_id:
+                    await upsert_required(
+                        owner,
+                        access_chat_id,
+                        target_id,
+                        target_title,
+                        target_type,
+                        invite.invite_link,
+                    )
 
             await message.reply_text(
                 "✅ Forced Join group/channel connected successfully.\n\n"
