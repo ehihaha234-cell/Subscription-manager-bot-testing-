@@ -152,11 +152,14 @@ class CloneUserUIMixin:
             f"📌 Status: {current_status.title()}",
         ]
 
-        if processed_by:
-            lines.extend([
-                f"👮 Processed By: {processed_by}",
-                f"🕒 Processed At: {self.format_dt(datetime.now(timezone.utc))}",
-            ])
+        audit_name = payment.get("processed_by_name")
+        audit_id = payment.get("admin_id")
+        if current_status == "approved" and (audit_name or audit_id):
+            lines.append(f"👮 Approved By: {audit_name or 'Unknown'} (ID: {audit_id or 'Unknown'})")
+        elif current_status == "rejected" and (audit_name or audit_id):
+            lines.append(f"👮 Rejected By: {audit_name or 'Unknown'} (ID: {audit_id or 'Unknown'})")
+        elif processed_by:
+            lines.append(f"👮 Processed By: {processed_by}")
 
         return "\n".join(lines)
 
