@@ -752,7 +752,7 @@ async def set_payment_status(owner_id,payment_id,status,admin_id,admin_name=None
     return r.modified_count>0
 
 
-async def claim_payment_for_processing(owner_id,payment_id,admin_id,admin_name=None):
+async def claim_payment_for_processing(owner_id,payment_id,admin_id):
     now=datetime.now(timezone.utc)
     r=await c(PAYMENTS).update_one(
         {
@@ -764,7 +764,6 @@ async def claim_payment_for_processing(owner_id,payment_id,admin_id,admin_name=N
             "$set":{
                 "status":"processing",
                 "processing_admin_id":admin_id,
-                "processing_admin_name":admin_name,
                 "processing_started_at":now,
                 "updated_at":now,
             }
@@ -791,7 +790,6 @@ async def finalize_processed_payment(owner_id,payment_id,status,admin_id,admin_n
             },
             "$unset":{
                 "processing_admin_id":"",
-                "processing_admin_name":"",
                 "processing_started_at":"",
                 "processing_error":"",
             },
@@ -816,7 +814,6 @@ async def release_processing_payment(owner_id,payment_id,error_message=""):
             },
             "$unset":{
                 "processing_admin_id":"",
-                "processing_admin_name":"",
                 "processing_started_at":"",
             },
         },
