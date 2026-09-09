@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_media_prompt, FEATURE_CALLBACKS
@@ -112,6 +112,94 @@ async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=N
                 await bot.send_document(chat_id=target_chat_id, document=fid, caption=caption, reply_markup=markup if idx==0 else None)
     except Exception:
         logger.exception("Forced Join approval editor message failed owner=%s user=%s", owner, user_id)
+
+async def forced_join_my_chat_member(update, context):
+    """Automatically maintain the Forced Join chat list from bot admin status.
+
+    This is intentionally independent of /connectgroup.  Whenever this clone
+    bot becomes an administrator/creator in a group, supergroup, or channel,
+    the chat is added to the Forced Join list in a disabled state.  If the bot
+    is no longer an administrator (or is removed), the chat is removed from
+    the Forced Join list.
+    """
+    cm = update.my_chat_member
+    if not cm:
+        return
+
+    chat = update.effective_chat
+    if not chat or chat.type not in {"group", "supergroup", "channel"}:
+        return
+
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
+    if not owner:
+        return
+
+    new_status = str(getattr(cm.new_chat_member, "status", "") or "")
+    old_status = str(getattr(cm.old_chat_member, "status", "") or "")
+    chat_id = int(chat.id)
+    title = str(getattr(chat, "title", "") or "Group/Channel")
+
+    # Admin/creator means the bot is eligible to be used as a Forced Join
+    # target.  It is inserted disabled by default; the seller must explicitly
+    # enable the green-dot button before it is used for Forced Join.
+    is_admin = new_status in {"administrator", "creator"}
+    was_admin = old_status in {"administrator", "creator"}
+
+    if is_admin:
+        existing = await get_required(owner, chat_id)
+        if existing:
+            # Keep the seller's enabled/disabled choice. Only refresh basic
+            # chat metadata so renames/type changes do not create duplicates.
+            await c_update_required_metadata(owner, chat_id, title, chat.type)
+        else:
+            await upsert_required_disabled(owner, chat_id, title, chat.type)
+        logger.info(
+            "Forced Join chat detected owner=%s chat=%s type=%s status=%s",
+            owner, chat_id, chat.type, new_status,
+        )
+        return
+
+    # Once the bot is no longer an admin, it must disappear from the Forced
+    # Join list so it can never remain as a stale target.
+    if was_admin or new_status in {"left", "kicked", "member", "restricted"}:
+        existing = await get_required(owner, chat_id)
+        if existing:
+            await remove_required(owner, chat_id)
+            logger.info(
+                "Forced Join chat removed after bot lost admin status owner=%s chat=%s old=%s new=%s",
+                owner, chat_id, old_status, new_status,
+            )
+
+
+async def c_update_required_metadata(owner_id, chat_id, title, chat_type):
+    """Refresh detected chat metadata without changing the enable toggle."""
+    # Keep this tiny helper local to the runtime module to avoid changing the
+    # existing /connectgroup or Forced Join database API.
+    from database.mongo import get_database
+    await get_database()["seller_forced_join"].update_one(
+        {"owner_id": int(owner_id), "chat_id": int(chat_id)},
+        {"$set": {"title": title or "Group/Channel", "chat_type": chat_type, "updated_at": datetime.now(timezone.utc)}},
+    )
+
+
+async def upsert_required_disabled(owner_id, chat_id, title, chat_type):
+    """Insert an auto-detected Forced Join target disabled by default."""
+    from database.mongo import get_database
+    coll = get_database()["seller_forced_join"]
+    now_utc = datetime.now(timezone.utc)
+    await coll.update_one(
+        {"owner_id": int(owner_id), "chat_id": int(chat_id)},
+        {"$set": {
+            "owner_id": int(owner_id),
+            "chat_id": int(chat_id),
+            "title": title or "Group/Channel",
+            "chat_type": chat_type,
+            "enabled": False,
+            "updated_at": now_utc,
+        }, "$setOnInsert": {"created_at": now_utc, "invite_link": ""}},
+        upsert=True,
+    )
+
 
 async def forced_join_request(update, context):
     req=update.chat_join_request
