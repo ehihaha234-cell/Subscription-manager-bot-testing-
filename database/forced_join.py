@@ -23,7 +23,7 @@ async def upsert_required(owner_id, access_chat_id, chat_id, title, chat_type, i
             "chat_id":int(chat_id),
             "title":title or "Group/Channel","chat_type":chat_type,
             "invite_link":invite_link or "","updated_at":now()
-        },"$setOnInsert":{"created_at":now(),"enabled":True}},
+        },"$setOnInsert":{"created_at":now(),"enabled":False}},
         upsert=True,
     )
     return await c().find_one(key)
@@ -52,13 +52,6 @@ async def remove_required(owner_id, chat_id, access_chat_id=None):
     if access_chat_id:
         query["access_chat_id"]=int(access_chat_id)
     await c().delete_one(query)
-
-async def remove_all_required_for_chat(owner_id, chat_id):
-    """Remove every Forced Join entry for a chat when the clone bot is no longer an admin/member."""
-    await c().delete_many({
-        "owner_id": int(owner_id),
-        "chat_id": int(chat_id),
-    })
 
 async def update_invite(owner_id, chat_id, invite_link, access_chat_id=None):
     query={"owner_id":int(owner_id),"chat_id":int(chat_id)}
@@ -125,7 +118,7 @@ async def set_forced_join_editor(owner_id, message, access_chat_id=None):
 async def get_forced_join_enabled(owner_id, access_chat_id=None):
     doc = await settings_c().find_one(await _settings_key(owner_id, access_chat_id))
     if doc is None:
-        return False if access_chat_id else True
+        return False
     return bool(doc.get("enabled", True))
 
 async def set_forced_join_enabled(owner_id, enabled, access_chat_id=None):
