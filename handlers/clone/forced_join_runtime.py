@@ -666,7 +666,12 @@ async def forced_join_editor_callback(update, context):
         return True
 
     if a == "fj_editor_media":
+        # Start a fresh media collection for this edit session.
+        # Keep the input mode active so Telegram albums / multiple consecutive
+        # media messages can all be collected (up to 10 files).
         context.user_data["fj_editor_input"] = "media"
+        context.user_data["fj_editor_media_collecting"] = True
+        context.user_data["fj_editor_media_received"] = 0
         await q.edit_message_text(
             editor_media_prompt("Forced Join Approval Message"),
             reply_markup=_kb([
@@ -691,6 +696,9 @@ async def forced_join_editor_callback(update, context):
         return True
 
     if a == "fj_editor_media_delete":
+        context.user_data.pop("fj_editor_input", None)
+        context.user_data.pop("fj_editor_media_collecting", None)
+        context.user_data.pop("fj_editor_media_received", None)
         item["media"] = []
         await set_forced_join_editor_for_chat(owner, access_chat_id, item)
         await q.answer("🗑 Media deleted.")
@@ -774,11 +782,39 @@ async def forced_join_editor_media_input(update, context):
     if not access_chat_id:
         return False
     item = await get_forced_join_editor_for_chat(owner, access_chat_id)
-    item["media"] = [entry]
+    media = list(item.get("media") or [])
+
+    # The first media in a new edit session replaces the previous media.
+    # Further media in the same session are appended, allowing up to 10 files.
+    received = int(context.user_data.get("fj_editor_media_received") or 0)
+    if received == 0:
+        media = []
+    if len(media) >= 10:
+        context.user_data.pop("fj_editor_input", None)
+        context.user_data.pop("fj_editor_media_collecting", None)
+        context.user_data.pop("fj_editor_media_received", None)
+        await m.reply_text(
+            "⚠️ Maximum 10 media files are already saved for this group/channel.",
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Continue", callback_data="fj_editor")]]),
+        )
+        return True
+
+    media.append(entry)
+    item["media"] = media[:10]
     await set_forced_join_editor_for_chat(owner, access_chat_id, item)
-    context.user_data.pop("fj_editor_input", None)
+
+    received = len(item["media"])
+    context.user_data["fj_editor_media_received"] = received
+    if received >= 10:
+        context.user_data.pop("fj_editor_input", None)
+        context.user_data.pop("fj_editor_media_collecting", None)
+        context.user_data.pop("fj_editor_media_received", None)
+        reply = "✅ 10/10 media saved. Maximum reached."
+    else:
+        reply = f"✅ Media {received}/10 saved. Send more media or press ⬅ Continue."
+
     await m.reply_text(
-        "✅ Media saved for this group/channel.",
+        reply,
         reply_markup=_kb([[InlineKeyboardButton("⬅ Continue", callback_data="fj_editor")]]),
     )
     return True
