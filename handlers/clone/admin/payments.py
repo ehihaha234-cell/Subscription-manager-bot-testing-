@@ -206,17 +206,18 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer(f'Already {current_status}', show_alert=True)
             return True
         if not approve:
-            changed = await set_payment_status(owner, pid, 'rejected', owner)
+            changed = await set_payment_status(owner, pid, 'rejected', q.from_user.id, q.from_user.full_name)
             if not changed:
                 await q.answer('Payment is already being processed', show_alert=True)
                 return True
             await context.bot.send_message(p['user_id'], '❌ Payment rejected')
-            rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=owner)
+            p = await get_payment(owner, pid) or p
+            rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=q.from_user.id)
             await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), rejected_caption, current_message=q.message
             )
             return True
-        claimed = await claim_payment_for_processing(owner, pid, owner)
+        claimed = await claim_payment_for_processing(owner, pid, q.from_user.id, q.from_user.full_name)
         if not claimed:
             latest = await get_payment(owner, pid)
             latest_status = (latest or {}).get('status', 'unknown')
@@ -268,7 +269,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     links.append(f"{ch.get('title')}: {inv.invite_link}")
                 except Exception as exc:
                     links.append(f"{ch.get('title')}: invite failed ({exc})")
-            finalized = await finalize_processed_payment(owner, pid, 'approved', owner)
+            decision_actor_id = int(p.get('processing_admin_id') or q.from_user.id)
+            decision_actor_name = p.get('processing_admin_name') or q.from_user.full_name
+            finalized = await finalize_processed_payment(owner, pid, 'approved', decision_actor_id, decision_actor_name)
             if not finalized:
                 raise RuntimeError('Could not finalize payment status')
             expiry_text = self.format_dt(expiry)
@@ -279,7 +282,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
             else:
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
             await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
-            approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
+            p = await get_payment(owner, pid) or p
+            approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=q.from_user.id)
             await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), approved_caption, current_message=q.message
             )
