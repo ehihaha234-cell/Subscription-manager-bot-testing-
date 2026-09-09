@@ -697,9 +697,13 @@ async def add_payment_notification_messages(owner_id, payment_id, messages):
         clean.append({"chat_id":chat_id,"message_id":message_id})
     if not clean:
         return False
+    # Merge references instead of replacing them. Each successful Telegram send
+    # is persisted immediately, so approval can update every chat that received
+    # the pending-payment notification.
     r=await c(PAYMENTS).update_one(
         {"owner_id":int(owner_id),"payment_id":str(payment_id)},
-        {"$set":{"notification_messages":clean,"updated_at":datetime.now(timezone.utc)}},
+        {"$addToSet":{"notification_messages":{"$each":clean}},
+         "$set":{"updated_at":datetime.now(timezone.utc)}},
     )
     return r.matched_count>0
 
