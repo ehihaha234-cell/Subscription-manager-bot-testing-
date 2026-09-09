@@ -121,20 +121,19 @@ async def forced_join_my_chat_member(update, context):
     if not owner:
         return
 
-    # If the clone bot is demoted, removed, or otherwise stops being an admin,
-    # immediately remove this chat from the Forced Join list. This keeps the
-    # list synchronized with the bot's real Telegram admin status.
+    # If the Clone Bot is no longer an administrator (or has left),
+    # immediately remove this chat from the Forced Join list.
     if status not in {"administrator", "creator"}:
         try:
-            await remove_all_required_for_chat(owner, int(chat.id))
+            from database.forced_join import remove_required
+            await remove_required(owner, int(chat.id))
             logger.info(
-                "Forced Join auto-removed chat after bot lost admin/member status owner=%s chat=%s status=%s",
+                "Forced Join auto-removed chat after admin access was lost owner=%s chat=%s status=%s",
                 owner, int(chat.id), status,
             )
         except Exception:
             logger.exception(
-                "Forced Join auto-remove failed owner=%s chat=%s status=%s",
-                owner, int(chat.id), status,
+                "Forced Join auto-remove failed owner=%s chat=%s", owner, int(chat.id)
             )
         return
 
@@ -170,7 +169,7 @@ async def forced_join_my_chat_member(update, context):
             )
 
     try:
-        from database.forced_join import upsert_required, remove_all_required_for_chat
+        from database.forced_join import upsert_required
         await upsert_required(
             owner, 0, chat_id, title, chat_type, invite_link
         )
@@ -706,10 +705,12 @@ async def forced_join_groups_page(q, context):
     rows.append([InlineKeyboardButton("⬅ Back",callback_data="gm_forced_join")])
     await q.edit_message_text(
         "🔗 Forced Group/Channel\n\n"
-        "Every group/channel where this Clone Bot is an administrator is added automatically.\n\n"
-        "🟢 = enabled for Forced Join\n"
-        "🔴 = disabled\n\n"
-        "No /connectforcedjoin command is required.",
+        "Every group/channel where this Clone Bot is an administrator is detected and added automatically.\n\n"
+        "🔴 = disabled — this group/channel will NOT be used for Forced Join\n"
+        "🟢 = enabled — this group/channel WILL be used for Forced Join\n\n"
+        "If your group/channel is missing from this list even after making this Clone Bot an administrator, remove the bot from the group/channel and add it again as administrator.\n\n"
+        "If the Clone Bot is no longer an administrator in a group/channel, it is automatically removed from this list.\n\n"
+        "Enable the group/channel with 🟢 to use it for Forced Join.",
         reply_markup=_kb(rows)
     )
 
@@ -723,7 +724,7 @@ async def forced_join_toggle_callback(update, context):
         return
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     await toggle_required(owner,chat_id)
-    await forced_join_page(q,context)
+    await forced_join_groups_page(q,context)
     return True
 
 async def connect_forced_join_command(self, update, context):
