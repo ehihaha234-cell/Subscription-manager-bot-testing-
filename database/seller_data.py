@@ -697,9 +697,29 @@ async def add_payment_notification_messages(owner_id, payment_id, messages):
         clean.append({"chat_id":chat_id,"message_id":message_id})
     if not clean:
         return False
+    # Merge with previously stored references. Multiple staff members can receive
+    # the same pending-payment notification, so replacing this list would make
+    # only the last recipient's message updatable after approval/rejection.
+    existing = await c(PAYMENTS).find_one(
+        {"owner_id":int(owner_id),"payment_id":str(payment_id)},
+        {"notification_messages":1},
+    )
+    merged = []
+    seen = set()
+    for item in ((existing or {}).get("notification_messages") or []) + clean:
+        try:
+            ref = {"chat_id": int(item.get("chat_id")), "message_id": int(item.get("message_id"))}
+        except (TypeError, ValueError, AttributeError):
+            continue
+        key = (ref["chat_id"], ref["message_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(ref)
+
     r=await c(PAYMENTS).update_one(
         {"owner_id":int(owner_id),"payment_id":str(payment_id)},
-        {"$set":{"notification_messages":clean,"updated_at":datetime.now(timezone.utc)}},
+        {"$set":{"notification_messages":merged,"updated_at":datetime.now(timezone.utc)}},
     )
     return r.matched_count>0
 
