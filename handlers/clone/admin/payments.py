@@ -3,6 +3,13 @@
 from handlers.common.clone_context import *
 
 
+def _actor_name(user):
+    return " ".join(
+        value for value in [getattr(user, "first_name", None), getattr(user, "last_name", None)]
+        if value
+    ).strip() or (f"@{user.username}" if getattr(user, "username", None) else "Unknown")
+
+
 async def _clone_qr_file_id(context, owner: int) -> str:
     bot_id = int(context.application.bot_data.get("seller_bot_id") or 0)
     qr = await get_bot_payment_qr(bot_id) if bot_id else ""
@@ -206,7 +213,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer(f'Already {current_status}', show_alert=True)
             return True
         if not approve:
-            changed = await set_payment_status(owner, pid, 'rejected', q.from_user.id, q.from_user.full_name)
+            changed = await set_payment_status(owner, pid, 'rejected', q.from_user.id, _actor_name(q.from_user))
             if not changed:
                 await q.answer('Payment is already being processed', show_alert=True)
                 return True
@@ -217,7 +224,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 context, owner, p.get('payment_id'), rejected_caption, current_message=q.message
             )
             return True
-        claimed = await claim_payment_for_processing(owner, pid, q.from_user.id, q.from_user.full_name)
+        claimed = await claim_payment_for_processing(owner, pid, owner)
         if not claimed:
             latest = await get_payment(owner, pid)
             latest_status = (latest or {}).get('status', 'unknown')
@@ -269,9 +276,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     links.append(f"{ch.get('title')}: {inv.invite_link}")
                 except Exception as exc:
                     links.append(f"{ch.get('title')}: invite failed ({exc})")
-            decision_actor_id = int(p.get('processing_admin_id') or q.from_user.id)
-            decision_actor_name = p.get('processing_admin_name') or q.from_user.full_name
-            finalized = await finalize_processed_payment(owner, pid, 'approved', decision_actor_id, decision_actor_name)
+            finalized = await finalize_processed_payment(owner, pid, 'approved', q.from_user.id, _actor_name(q.from_user))
             if not finalized:
                 raise RuntimeError('Could not finalize payment status')
             expiry_text = self.format_dt(expiry)
