@@ -163,7 +163,7 @@ class CloneBroadcastMixin:
 
     async def seller_broadcast_confirm_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
-        if int(update.effective_user.id) != int(self.seller_account(context)):
+        if not await self.seller_or_admin(update, context):
             return
         pending = context.user_data.get("seller_broadcast_confirmation") or {}
         if int(pending.get("owner_id") or 0) != int(owner):
@@ -188,7 +188,7 @@ class CloneBroadcastMixin:
 
     async def seller_broadcast_cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
-        if int(update.effective_user.id) != int(self.seller_account(context)):
+        if not await self.seller_or_admin(update, context):
             return
         pending = context.user_data.pop("seller_broadcast_confirmation", None)
         if pending:
@@ -306,7 +306,7 @@ class CloneBroadcastMixin:
 
     async def broadcast_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = self.owner(context)
-        if update.effective_user.id != self.seller_account(context):
+        if not await self.seller_or_admin(update, context):
             return
 
         scheduled_editor = context.user_data.get("scheduled_broadcast_editor") or {}
