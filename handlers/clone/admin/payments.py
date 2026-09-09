@@ -13,10 +13,22 @@ async def _clone_qr_file_id(context, owner: int) -> str:
     settings = await get_seller_settings(owner)
     return str(settings.get("upi_qr_file_id") or "")
 
-async def _update_payment_notification_messages(self, context, owner, payment_id, caption):
-    """Edit every pending-payment notification that was sent for this payment."""
-    refs = await get_payment_notification_messages(owner, payment_id)
+async def _update_payment_notification_messages(self, context, owner, payment_id, caption, current_message=None):
+    """Edit every pending-payment notification for this payment."""
+    refs = list(await get_payment_notification_messages(owner, payment_id) or [])
+    # Always include the message whose Approve/Reject button was pressed. This
+    # also repairs legacy payments whose reference was not stored.
+    if current_message is not None:
+        try:
+            refs.append({
+                "chat_id": int(current_message.chat_id),
+                "message_id": int(current_message.message_id),
+            })
+        except (TypeError, ValueError, AttributeError):
+            pass
+
     seen = set()
+    updated = 0
     for ref in refs:
         try:
             chat_id = int(ref.get("chat_id"))
@@ -34,11 +46,28 @@ async def _update_payment_notification_messages(self, context, owner, payment_id
                 caption=caption,
                 reply_markup=None,
             )
+            updated += 1
         except TelegramError as exc:
-            logger.warning(
-                "Could not update payment notification owner=%s payment=%s chat=%s message=%s: %s",
-                owner, payment_id, chat_id, message_id, exc,
-            )
+            # Legacy/text notifications are handled as a fallback.
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=caption,
+                    reply_markup=None,
+                )
+                updated += 1
+                continue
+            except TelegramError:
+                logger.warning(
+                    "Could not update payment notification owner=%s payment=%s chat=%s message=%s: %s",
+                    owner, payment_id, chat_id, message_id, exc,
+                )
+    logger.info(
+        "Payment notification status update owner=%s payment=%s updated=%s total_refs=%s",
+        owner, payment_id, updated, len(seen),
+    )
+    return updated
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
@@ -184,7 +213,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await context.bot.send_message(p['user_id'], '❌ Payment rejected')
             rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=owner)
             await self._update_payment_notification_messages(
-                context, owner, p.get('payment_id'), rejected_caption
+                context, owner, p.get('payment_id'), rejected_caption, current_message=q.message
             )
             return True
         claimed = await claim_payment_for_processing(owner, pid, owner)
@@ -252,7 +281,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
             approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
             await self._update_payment_notification_messages(
-                context, owner, p.get('payment_id'), approved_caption
+                context, owner, p.get('payment_id'), approved_caption, current_message=q.message
             )
         except Exception as exc:
             logger.exception('Payment approval failed owner=%s payment=%s', owner, pid)
