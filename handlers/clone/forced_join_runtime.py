@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_media_prompt, FEATURE_CALLBACKS
 from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, ensure_required_scope, save_pending_request, list_pending_requests, remove_pending_request
 from database.seller_data import get_channels
@@ -59,6 +59,51 @@ def _render_forced_join_variables(value: str, user) -> str:
     return rendered
 
 
+async def _send_forced_join_media_collection(bot, target_chat_id, media, text="", markup=None):
+    """Send saved approval media as one Telegram media group.
+
+    Telegram's sendMediaGroup API is required here; sending the saved files
+    one-by-one creates separate messages.  A media group cannot carry an
+    inline keyboard, so when buttons exist they are sent in one small
+    follow-up message after the album.  The first media item keeps the
+    approval text as its caption.
+    """
+    media = list(media or [])[:10]
+    if not media:
+        if text or markup:
+            await bot.send_message(chat_id=target_chat_id, text=text or " ", reply_markup=markup)
+        return
+
+    if len(media) == 1:
+        e = media[0]
+        fid = e.get("file_id")
+        typ = e.get("type")
+        if typ == "photo":
+            await bot.send_photo(chat_id=target_chat_id, photo=fid, caption=text or None, reply_markup=markup)
+        elif typ == "video":
+            await bot.send_video(chat_id=target_chat_id, video=fid, caption=text or None, reply_markup=markup)
+        else:
+            await bot.send_document(chat_id=target_chat_id, document=fid, caption=text or None, reply_markup=markup)
+        return
+
+    album = []
+    for idx, e in enumerate(media):
+        fid = e.get("file_id")
+        typ = e.get("type")
+        caption = text if idx == 0 and text else None
+        if typ == "photo":
+            album.append(InputMediaPhoto(media=fid, caption=caption))
+        elif typ == "video":
+            album.append(InputMediaVideo(media=fid, caption=caption))
+        elif typ == "document":
+            album.append(InputMediaDocument(media=fid, caption=caption))
+    if not album:
+        return
+    await bot.send_media_group(chat_id=target_chat_id, media=album)
+    if markup:
+        await bot.send_message(chat_id=target_chat_id, text="🔗", reply_markup=markup)
+
+
 async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=None, access_chat_id=None):
     # Approval-message settings are isolated per connected/access chat.
     # Legacy owner-wide settings are used only when a chat has never been
@@ -96,20 +141,9 @@ async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=N
         return
     target_chat_id=int(user_chat_id)
     try:
-        if not media:
-            if text or markup:
-                await bot.send_message(chat_id=target_chat_id, text=text or " ", reply_markup=markup)
-            return
-        for idx,entry in enumerate(media):
-            fid=entry.get("file_id")
-            typ=entry.get("type")
-            caption=text if idx == 0 else None
-            if typ=="photo":
-                await bot.send_photo(chat_id=target_chat_id, photo=fid, caption=caption, reply_markup=markup if idx==0 else None)
-            elif typ=="video":
-                await bot.send_video(chat_id=target_chat_id, video=fid, caption=caption, reply_markup=markup if idx==0 else None)
-            elif typ=="document":
-                await bot.send_document(chat_id=target_chat_id, document=fid, caption=caption, reply_markup=markup if idx==0 else None)
+        await _send_forced_join_media_collection(
+            bot, target_chat_id, media, text=text, markup=markup
+        )
     except Exception:
         logger.exception("Forced Join approval editor message failed owner=%s user=%s", owner, user_id)
 
@@ -686,13 +720,9 @@ async def forced_join_editor_callback(update, context):
         if not media:
             await q.answer("❌ No media configured.", show_alert=True)
             return True
-        e = media[0]; typ = e.get("type"); fid = e.get("file_id")
-        if typ == "photo":
-            await q.message.reply_photo(fid)
-        elif typ == "video":
-            await q.message.reply_video(fid)
-        else:
-            await q.message.reply_document(fid)
+        await _send_forced_join_media_collection(
+            context.bot, q.message.chat_id, media
+        )
         return True
 
     if a == "fj_editor_media_delete":
@@ -727,13 +757,13 @@ async def forced_join_editor_callback(update, context):
     if a == "fj_editor_preview":
         markup = _approval_markup(item.get("buttons") or [])
         text = item.get("text") or "❌ No text added."
-        if not item.get("media"):
+        media = item.get("media") or []
+        if not media:
             await q.message.reply_text(text, reply_markup=markup)
         else:
-            e = item["media"][0]; typ = e.get("type"); fid = e.get("file_id")
-            if typ == "photo": await q.message.reply_photo(fid, caption=text, reply_markup=markup)
-            elif typ == "video": await q.message.reply_video(fid, caption=text, reply_markup=markup)
-            else: await q.message.reply_document(fid, caption=text, reply_markup=markup)
+            await _send_forced_join_media_collection(
+                context.bot, q.message.chat_id, media, text=text, markup=markup
+            )
         return True
 
     return False
