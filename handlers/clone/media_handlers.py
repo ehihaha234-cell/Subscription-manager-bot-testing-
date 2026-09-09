@@ -168,10 +168,16 @@ class CloneMediaHandlersMixin:
                         caption=caption,
                         reply_markup=kb,
                     )
-                    notification_messages.append({
+                    notification_ref = {
                         "chat_id": int(recipient_id),
                         "message_id": int(sent_message.message_id),
-                    })
+                    }
+                    notification_messages.append(notification_ref)
+                    # Persist each message immediately so one later recipient
+                    # failure can never discard earlier chat references.
+                    await add_payment_notification_messages(
+                        owner, p["payment_id"], [notification_ref]
+                    )
                 except TelegramError:
                     logger.exception(
                         "Manual payment notification failed: owner=%s recipient=%s payment_id=%s",
