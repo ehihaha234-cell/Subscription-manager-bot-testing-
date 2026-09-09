@@ -811,6 +811,81 @@ async def forced_join_editor_media_input(update, context):
     access_chat_id = int(context.user_data.get("fj_editor_chat_id") or 0)
     if not access_chat_id:
         return False
+
+    # Telegram albums arrive as separate updates with the same media_group_id.
+    # Buffer that album first, then save it in one DB write. This prevents
+    # concurrent album updates from overwriting each other and keeps the
+    # editor confirmation to exactly one message per album.
+    media_group_id = getattr(m, "media_group_id", None)
+    if media_group_id:
+        import asyncio
+
+        groups = context.user_data.setdefault("fj_editor_media_groups", {})
+        key = str(media_group_id)
+        state = groups.get(key)
+        if state is None:
+            state = {
+                "entries": [],
+                "received_before": int(context.user_data.get("fj_editor_media_received") or 0),
+                "task": None,
+            }
+            groups[key] = state
+
+        # Avoid duplicate file IDs if Telegram/client retries an album update.
+        if not any(x.get("file_id") == entry.get("file_id") for x in state["entries"]):
+            state["entries"].append(entry)
+
+        old_task = state.get("task")
+        if old_task and not old_task.done():
+            old_task.cancel()
+
+        async def _flush_album():
+            try:
+                # Wait briefly for the remaining album updates to arrive.
+                await asyncio.sleep(1.0)
+
+                current = await get_forced_join_editor_for_chat(owner, access_chat_id)
+                media = list(current.get("media") or [])
+                if state["received_before"] == 0:
+                    media = []
+
+                existing_ids = {str(x.get("file_id")) for x in media if x.get("file_id")}
+                for album_entry in state["entries"]:
+                    if len(media) >= 10:
+                        break
+                    fid = str(album_entry.get("file_id") or "")
+                    if fid and fid not in existing_ids:
+                        media.append(album_entry)
+                        existing_ids.add(fid)
+
+                current["media"] = media[:10]
+                await set_forced_join_editor_for_chat(owner, access_chat_id, current)
+
+                received = len(current["media"])
+                context.user_data["fj_editor_media_received"] = received
+
+                if received >= 10:
+                    context.user_data.pop("fj_editor_input", None)
+                    context.user_data.pop("fj_editor_media_collecting", None)
+                    context.user_data.pop("fj_editor_media_received", None)
+                    reply = "✅ 10/10 media saved. Maximum reached."
+                else:
+                    reply = f"✅ Media {received}/10 saved. Send more media or press ⬅ Continue."
+
+                await m.reply_text(
+                    reply,
+                    reply_markup=_kb([[InlineKeyboardButton("⬅ Continue", callback_data="fj_editor")]]),
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Failed to save Forced Join approval media album")
+            finally:
+                groups.pop(key, None)
+
+        state["task"] = context.application.create_task(_flush_album())
+        return True
+
     item = await get_forced_join_editor_for_chat(owner, access_chat_id)
     media = list(item.get("media") or [])
 
@@ -835,48 +910,6 @@ async def forced_join_editor_media_input(update, context):
 
     received = len(item["media"])
     context.user_data["fj_editor_media_received"] = received
-
-    # Telegram albums arrive as multiple updates sharing the same
-    # media_group_id. Do not send one confirmation per update. Debounce
-    # the confirmation so the whole album is saved first, then send exactly
-    # one confirmation for the collection.
-    media_group_id = getattr(m, "media_group_id", None)
-    if media_group_id:
-        pending = context.user_data.get("fj_editor_media_confirm_tasks") or {}
-        old_task = pending.get(str(media_group_id))
-        if old_task and not old_task.done():
-            old_task.cancel()
-
-        async def _confirm_album():
-            import asyncio
-            try:
-                await asyncio.sleep(0.7)
-                current = await get_forced_join_editor_for_chat(owner, access_chat_id)
-                current_count = len(current.get("media") or [])
-                if current_count >= 10:
-                    reply = "✅ 10/10 media saved. Maximum reached."
-                else:
-                    reply = f"✅ Media {current_count}/10 saved. Send more media or press ⬅ Continue."
-                await m.reply_text(
-                    reply,
-                    reply_markup=_kb([[InlineKeyboardButton("⬅ Continue", callback_data="fj_editor")]]),
-                )
-                if current_count >= 10:
-                    context.user_data.pop("fj_editor_input", None)
-                    context.user_data.pop("fj_editor_media_collecting", None)
-                    context.user_data.pop("fj_editor_media_received", None)
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                logger.exception("Forced Join media album confirmation failed")
-            finally:
-                pending.pop(str(media_group_id), None)
-
-        pending[str(media_group_id)] = context.application.create_task(_confirm_album())
-        context.user_data["fj_editor_media_confirm_tasks"] = pending
-        return True
-
-    # A normal single-media message keeps the existing one-confirmation flow.
     if received >= 10:
         context.user_data.pop("fj_editor_input", None)
         context.user_data.pop("fj_editor_media_collecting", None)
