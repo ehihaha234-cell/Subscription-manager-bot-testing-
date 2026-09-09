@@ -5,7 +5,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from handlers.common.editor_engine import parse_editor_buttons, build_editor_keyboard, editor_media_prompt, FEATURE_CALLBACKS
 from database.forced_join import list_required, get_required, toggle_required, remove_required, update_invite, save_pending_request, list_pending_requests, remove_pending_request
 from database.seller_data import get_channels
-from database.forced_join import get_forced_join_editor, set_forced_join_editor, get_forced_join_enabled, set_forced_join_enabled, get_forced_join_editor_enabled, set_forced_join_editor_enabled
+from database.forced_join import (
+    get_forced_join_editor, set_forced_join_editor,
+    get_forced_join_enabled, set_forced_join_enabled,
+    get_forced_join_editor_enabled, set_forced_join_editor_enabled,
+    get_forced_join_editor_for_chat, set_forced_join_editor_for_chat,
+    get_forced_join_editor_enabled_for_chat, set_forced_join_editor_enabled_for_chat,
+)
 
 logger=logging.getLogger(__name__)
 
@@ -53,10 +59,18 @@ def _render_forced_join_variables(value: str, user) -> str:
     return rendered
 
 
-async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=None):
-    if not await get_forced_join_editor_enabled(owner):
+async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=None, access_chat_id=None):
+    # Approval-message settings are isolated per connected/access chat.
+    # Legacy owner-wide settings are used only when a chat has never been
+    # configured before.
+    if access_chat_id is not None:
+        enabled = await get_forced_join_editor_enabled_for_chat(owner, int(access_chat_id))
+        item = await get_forced_join_editor_for_chat(owner, int(access_chat_id))
+    else:
+        enabled = await get_forced_join_editor_enabled(owner)
+        item = await get_forced_join_editor(owner)
+    if not enabled:
         return
-    item=await get_forced_join_editor(owner)
     if not item:
         return
     raw_text=item.get("text") or ""
@@ -99,90 +113,6 @@ async def _send_forced_join_approval_message(bot, owner, user_id, user_chat_id=N
     except Exception:
         logger.exception("Forced Join approval editor message failed owner=%s user=%s", owner, user_id)
 
-async def forced_join_my_chat_member(update, context):
-    """Automatically discover every group/channel where this Clone Bot becomes admin.
-
-    This uses MY_CHAT_MEMBER, so it is completely separate from /connectgroup and
-    from normal user CHAT_MEMBER updates. A chat is added to the Forced Join
-    collection immediately when the clone bot is promoted to administrator.
-    """
-    cm = getattr(update, "my_chat_member", None)
-    if not cm:
-        return
-    chat = getattr(cm, "chat", None)
-    new = getattr(cm, "new_chat_member", None)
-    if not chat or not new:
-        return
-    if getattr(chat, "type", "") not in {"group", "supergroup", "channel"}:
-        return
-
-    status = str(getattr(new, "status", "") or "")
-    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
-    if not owner:
-        return
-
-    # If the Clone Bot is no longer an administrator (or has left),
-    # immediately remove this chat from the Forced Join list.
-    if status not in {"administrator", "creator"}:
-        try:
-            from database.forced_join import remove_required
-            await remove_required(owner, int(chat.id))
-            logger.info(
-                "Forced Join auto-removed chat after admin access was lost owner=%s chat=%s status=%s",
-                owner, int(chat.id), status,
-            )
-        except Exception:
-            logger.exception(
-                "Forced Join auto-remove failed owner=%s chat=%s", owner, int(chat.id)
-            )
-        return
-
-    if not owner:
-        return
-
-    chat_id = int(chat.id)
-    title = str(getattr(chat, "title", "") or "Group/Channel")
-    chat_type = str(getattr(chat, "type", "") or "group")
-    invite_link = ""
-
-    # Public groups/channels already have a stable join URL. For private chats,
-    # create a permanent invite when Telegram gives the bot invite permission.
-    username = str(getattr(chat, "username", "") or "").lstrip("@")
-    if username:
-        invite_link = f"https://t.me/{username}"
-    else:
-        try:
-            me = await context.bot.get_me()
-            bot_member = await context.bot.get_chat_member(chat_id, me.id)
-            if (getattr(bot_member, "status", "") == "creator"
-                    or getattr(bot_member, "can_invite_users", False)):
-                invite = await context.bot.create_chat_invite_link(
-                    chat_id=chat_id, name="Forced Join", member_limit=0
-                )
-                invite_link = str(getattr(invite, "invite_link", "") or "")
-        except Exception:
-            # Still register the chat. The seller can enable it in Forced Join;
-            # an empty link simply means Telegram did not allow link creation.
-            logger.warning(
-                "Forced Join auto-discovery: invite link unavailable owner=%s chat=%s",
-                owner, chat_id, exc_info=True,
-            )
-
-    try:
-        from database.forced_join import upsert_required
-        await upsert_required(
-            owner, 0, chat_id, title, chat_type, invite_link
-        )
-        logger.info(
-            "Forced Join auto-discovered admin chat owner=%s chat=%s type=%s",
-            owner, chat_id, chat_type,
-        )
-    except Exception:
-        logger.exception(
-            "Forced Join auto-discovery failed owner=%s chat=%s", owner, chat_id
-        )
-
-
 async def forced_join_request(update, context):
     req=update.chat_join_request
     if not req:
@@ -207,7 +137,7 @@ async def forced_join_request(update, context):
         try:
             # Send while the join-request private chat is available, then approve.
             # This works even if the user has never pressed /start.
-            await _send_forced_join_approval_message(context.bot, owner, user_id, req.user_chat_id)
+            await _send_forced_join_approval_message(context.bot, owner, user_id, req.user_chat_id, access_chat_id)
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
         except Exception:
             logger.exception("Automatic approval failed access=%s user=%s", access_chat_id, user_id)
@@ -218,7 +148,7 @@ async def forced_join_request(update, context):
     ok, missing=await _required_status(context.bot, user_id, required)
     if ok:
         try:
-            await _send_forced_join_approval_message(context.bot, owner, user_id, req.user_chat_id)
+            await _send_forced_join_approval_message(context.bot, owner, user_id, req.user_chat_id, access_chat_id)
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
             await remove_pending_request(owner, user_id, access_chat_id)
             try:
@@ -341,7 +271,7 @@ async def forced_join_auto_approve(update, context):
             continue
         try:
             request_chat_id=int(request.get("user_chat_id", user_id) or user_id)
-            await _send_forced_join_approval_message(context.bot, owner, user_id, request_chat_id)
+            await _send_forced_join_approval_message(context.bot, owner, user_id, request_chat_id, access_chat_id)
             await context.bot.approve_chat_join_request(access_chat_id, user_id)
             await remove_pending_request(owner, user_id, access_chat_id)
             try:
@@ -488,28 +418,64 @@ def _approval_button_lines(rows):
             lines.append(" && ".join(parts))
     return "\n".join(lines) or "❌ No buttons configured."
 
-async def forced_join_message_editor(q, context):
-    owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    item=await get_forced_join_editor(owner)
-    enabled=await get_forced_join_editor_enabled(owner)
-    # Editor page has no target user. Keep configured variables untouched here;
-    # they are resolved only when the approval message is actually delivered.
-    text=item.get("text") or ""
-    media=item.get("media") or []
-    buttons=item.get("buttons") or []
-    button_count=sum(1 for row in buttons for b in row if b.get("type") in {"url","callback"})
-    rows=[
+async def forced_join_editor_targets_page(q, context):
+    """Select which connected group/channel gets its own approval message."""
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
+    items = await list_required(owner)
+    rows = []
+    for item in items:
+        chat_id = int(item.get("chat_id", 0) or 0)
+        if not chat_id:
+            continue
+        title = str(item.get("title") or "Group/Channel")[:34]
+        rows.append([InlineKeyboardButton(
+            f"📝 {title}", callback_data=f"fj_editor_select:{chat_id}"
+        )])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="gm_forced_join")])
+    text = (
+        "📝 Forced Join Approval Message\n\n"
+        "Select a connected group/channel. Each one has a separate approval "
+        "message, media, buttons and enable/disable setting.\n\n"
+        "Changing one group/channel will NOT change the others."
+    )
+    if not rows[:-1]:
+        text += "\n\n❌ No connected groups/channels found."
+    await q.edit_message_text(text, reply_markup=_kb(rows))
+
+async def forced_join_message_editor(q, context, access_chat_id=None):
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
+    if access_chat_id is None:
+        access_chat_id = context.user_data.get("fj_editor_chat_id")
+    try:
+        access_chat_id = int(access_chat_id or 0)
+    except (TypeError, ValueError):
+        access_chat_id = 0
+    if not access_chat_id:
+        return await forced_join_editor_targets_page(q, context)
+    context.user_data["fj_editor_chat_id"] = access_chat_id
+    item = await get_forced_join_editor_for_chat(owner, access_chat_id)
+    enabled = await get_forced_join_editor_enabled_for_chat(owner, access_chat_id)
+    raw_text = item.get("text") or ""
+    text = raw_text
+    media = item.get("media") or []
+    buttons = item.get("buttons") or []
+    button_count = sum(1 for row in buttons for b in row if b.get("type") in {"url", "callback"})
+    target = await get_required(owner, access_chat_id)
+    title = str((target or {}).get("title") or "Group/Channel")
+    rows = [
         [InlineKeyboardButton(("🟢 Disable" if enabled else "🔴 Enable") + " Approval Message", callback_data="fj_editor_toggle")],
-        [InlineKeyboardButton("📝 Text",callback_data="fj_editor_text"), InlineKeyboardButton("👀 See",callback_data="fj_editor_text_see")],
-        [InlineKeyboardButton("🖼 Media",callback_data="fj_editor_media"), InlineKeyboardButton("👀 See",callback_data="fj_editor_media_see")],
-        [InlineKeyboardButton("🔗 Buttons",callback_data="fj_editor_buttons"), InlineKeyboardButton("👀 See",callback_data="fj_editor_buttons_see")],
-        [InlineKeyboardButton("👀 Full Preview",callback_data="fj_editor_preview")],
-        [InlineKeyboardButton("⬅ Back",callback_data="gm_forced_join")],
+        [InlineKeyboardButton("📝 Text", callback_data="fj_editor_text"), InlineKeyboardButton("👀 See", callback_data="fj_editor_text_see")],
+        [InlineKeyboardButton("🖼 Media", callback_data="fj_editor_media"), InlineKeyboardButton("👀 See", callback_data="fj_editor_media_see")],
+        [InlineKeyboardButton("🔗 Buttons", callback_data="fj_editor_buttons"), InlineKeyboardButton("👀 See", callback_data="fj_editor_buttons_see")],
+        [InlineKeyboardButton("👀 Full Preview", callback_data="fj_editor_preview")],
+        [InlineKeyboardButton("⬅ Back", callback_data="fj_editor")],
     ]
     media_line = f"🖼 Media: {len(media)}/10" if media else "🖼 Media: ❌ Not added"
     await q.edit_message_text(
         "📝 Forced Join Approval Message\n\n"
-        "Sent after all required groups/channels are joined and the original access request is approved.\n\n"
+        f"Target: {title}\n\n"
+        "Sent after all required groups/channels are joined and this "
+        "group/channel's access request is approved.\n\n"
         "Current Setup\n\n"
         f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
         f"📝 Text: {'✅ Added' if text else '❌ Not added'}\n"
@@ -518,160 +484,174 @@ async def forced_join_message_editor(q, context):
         reply_markup=_kb(rows),
     )
 
-
 async def forced_join_editor_callback(update, context):
-    q=update.callback_query
+    q = update.callback_query
     await q.answer()
-    a=q.data or ""
-    owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    item=await get_forced_join_editor(owner)
+    a = q.data or ""
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
 
-    if a=="fj_editor":
-        await forced_join_message_editor(q,context); return True
-    if a=="fj_editor_toggle":
-        current=await get_forced_join_editor_enabled(owner)
-        enabled=await set_forced_join_editor_enabled(owner, not current)
-        await forced_join_message_editor(q,context)
+    if a == "fj_editor":
+        context.user_data.pop("fj_editor_input", None)
+        return await forced_join_editor_targets_page(q, context)
+
+    if a.startswith("fj_editor_select:"):
+        try:
+            access_chat_id = int(a.split(":", 1)[1])
+        except Exception:
+            await q.answer("❌ Invalid group/channel.", show_alert=True)
+            return True
+        context.user_data["fj_editor_chat_id"] = access_chat_id
+        context.user_data.pop("fj_editor_input", None)
+        await forced_join_message_editor(q, context, access_chat_id)
+        return True
+
+    access_chat_id = int(context.user_data.get("fj_editor_chat_id") or 0)
+    if not access_chat_id:
+        await forced_join_editor_targets_page(q, context)
+        return True
+
+    item = await get_forced_join_editor_for_chat(owner, access_chat_id)
+
+    if a == "fj_editor_toggle":
+        current = await get_forced_join_editor_enabled_for_chat(owner, access_chat_id)
+        enabled = await set_forced_join_editor_enabled_for_chat(owner, access_chat_id, not current)
+        await forced_join_message_editor(q, context, access_chat_id)
         await q.answer("✅ Approval Message enabled." if enabled else "⛔ Approval Message disabled.", show_alert=True)
         return True
 
-    if a=="fj_editor_text":
-        context.user_data["fj_editor_input"]="text"
+    if a == "fj_editor_text":
+        context.user_data["fj_editor_input"] = "text"
         await q.edit_message_text(
             "📝 Forced Join Approval Message\n\n"
             "Send the message you want to set.\n\n"
-            "You can use HTML and:\n"
-            + FORCED_JOIN_APPROVAL_VARIABLES,
-            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
+            "You can use HTML and:\n" + FORCED_JOIN_APPROVAL_VARIABLES,
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data="fj_editor")]]),
         )
         return True
 
-    if a=="fj_editor_text_see":
-        text=item.get("text") or "❌ No text added."
+    if a == "fj_editor_text_see":
+        text = item.get("text") or "❌ No text added."
         await q.edit_message_text(
             "📝 Current Text\n\n" + text,
-            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data="fj_editor")]]),
         )
         return True
 
-    if a=="fj_editor_media":
-        context.user_data["fj_editor_input"]="media"
+    if a == "fj_editor_media":
+        context.user_data["fj_editor_input"] = "media"
         await q.edit_message_text(
             editor_media_prompt("Forced Join Approval Message"),
             reply_markup=_kb([
-                [InlineKeyboardButton("🗑 Delete Media",callback_data="fj_editor_media_delete")],
-                [InlineKeyboardButton("⬅ Back",callback_data="fj_editor")],
+                [InlineKeyboardButton("🗑 Delete Media", callback_data="fj_editor_media_delete")],
+                [InlineKeyboardButton("⬅ Back", callback_data="fj_editor")],
             ]),
         )
         return True
 
-    if a=="fj_editor_media_see":
-        media=item.get("media") or []
+    if a == "fj_editor_media_see":
+        media = item.get("media") or []
         if not media:
-            await q.answer("❌ No media configured.",show_alert=True)
+            await q.answer("❌ No media configured.", show_alert=True)
             return True
-        # See = media only. Do not attach approval text or configured buttons.
-        e=media[0]; typ=e.get("type"); fid=e.get("file_id")
-        if typ=="photo":
+        e = media[0]; typ = e.get("type"); fid = e.get("file_id")
+        if typ == "photo":
             await q.message.reply_photo(fid)
-        elif typ=="video":
+        elif typ == "video":
             await q.message.reply_video(fid)
         else:
             await q.message.reply_document(fid)
         return True
 
-    if a=="fj_editor_media_delete":
-        item["media"]=[]
-        await set_forced_join_editor(owner,item)
+    if a == "fj_editor_media_delete":
+        item["media"] = []
+        await set_forced_join_editor_for_chat(owner, access_chat_id, item)
         await q.answer("🗑 Media deleted.")
-        await forced_join_message_editor(q,context)
+        await forced_join_message_editor(q, context, access_chat_id)
         return True
 
-    if a=="fj_editor_buttons":
-        context.user_data["fj_editor_input"]="buttons"
+    if a == "fj_editor_buttons":
+        context.user_data["fj_editor_input"] = "buttons"
         await q.edit_message_text(
             "🔗 Forced Join Approval Message Buttons\n\n" + _approval_buttons_header(),
-            reply_markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]]),
+            reply_markup=_kb([[InlineKeyboardButton("⬅ Back", callback_data="fj_editor")]]),
         )
         return True
 
-    if a=="fj_editor_buttons_see":
-        # See = one message only: exact configured button definitions in the
-        # header, followed by the actual configured keyboard preview.
-        rows=_approval_button_lines(item.get("buttons") or [])
-        text="🔗 Current Buttons\n\n" + rows
-        markup=_approval_markup(item.get("buttons") or [])
+    if a == "fj_editor_buttons_see":
+        rows_text = _approval_button_lines(item.get("buttons") or [])
+        text = "🔗 Current Buttons\n\n" + rows_text
+        markup = _approval_markup(item.get("buttons") or [])
         if markup:
-            markup.append([InlineKeyboardButton("⬅ Back",callback_data="fj_editor")])
+            markup = _kb(markup.inline_keyboard + [[InlineKeyboardButton("⬅ Back", callback_data="fj_editor")]])
         else:
-            markup=_kb([[InlineKeyboardButton("⬅ Back",callback_data="fj_editor")]])
-        await q.edit_message_text(text,reply_markup=markup)
+            markup = _kb([[InlineKeyboardButton("⬅ Back", callback_data="fj_editor")]])
+        await q.edit_message_text(text, reply_markup=markup)
         return True
 
-    if a=="fj_editor_preview":
-        markup=_approval_markup(item.get("buttons") or [])
-        text=item.get("text") or "❌ No text added."
-        media=item.get("media") or []
-        if not media:
-            await q.message.reply_text(text,reply_markup=markup)
+    if a == "fj_editor_preview":
+        markup = _approval_markup(item.get("buttons") or [])
+        text = item.get("text") or "❌ No text added."
+        if not item.get("media"):
+            await q.message.reply_text(text, reply_markup=markup)
         else:
-            e=media[0]; typ=e.get("type"); fid=e.get("file_id")
-            if typ=="photo": await q.message.reply_photo(fid,caption=text,reply_markup=markup)
-            elif typ=="video": await q.message.reply_video(fid,caption=text,reply_markup=markup)
-            else: await q.message.reply_document(fid,caption=text,reply_markup=markup)
+            e = item["media"][0]; typ = e.get("type"); fid = e.get("file_id")
+            if typ == "photo": await q.message.reply_photo(fid, caption=text, reply_markup=markup)
+            elif typ == "video": await q.message.reply_video(fid, caption=text, reply_markup=markup)
+            else: await q.message.reply_document(fid, caption=text, reply_markup=markup)
         return True
 
-    if a=="fj_editor_media_back" or a=="fj_editor_buttons_back":
-        await forced_join_message_editor(q,context); return True
     return False
 
-
 async def forced_join_editor_text_input(update, context):
-    mode=context.user_data.get("fj_editor_input")
-    if mode not in {"text","buttons"}:
+    mode = context.user_data.get("fj_editor_input")
+    if mode not in {"text", "buttons"}:
         return False
-    owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    item=await get_forced_join_editor(owner)
-    text=(update.effective_message.text or "").strip()
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
+    access_chat_id = int(context.user_data.get("fj_editor_chat_id") or 0)
+    if not access_chat_id:
+        return False
+    item = await get_forced_join_editor_for_chat(owner, access_chat_id)
+    text = (update.effective_message.text or "").strip()
     if not text:
         await update.effective_message.reply_text("❌ Cannot be empty.")
         return True
-    if mode=="text":
-        item["text"]=text
+    if mode == "text":
+        item["text"] = text
     else:
         try:
-            item["buttons"]=_parse_approval_buttons(text)
+            item["buttons"] = _parse_approval_buttons(text)
         except ValueError as e:
             await update.effective_message.reply_text(f"❌ {e}")
             return True
-    await set_forced_join_editor(owner,item)
-    context.user_data.pop("fj_editor_input",None)
+    await set_forced_join_editor_for_chat(owner, access_chat_id, item)
+    context.user_data.pop("fj_editor_input", None)
     await update.effective_message.reply_text(
-        "✅ Saved.",
-        reply_markup=_kb([[InlineKeyboardButton("⬅ Continue",callback_data="fj_editor")]]),
+        "✅ Saved for this group/channel.",
+        reply_markup=_kb([[InlineKeyboardButton("⬅ Continue", callback_data="fj_editor")]]),
     )
     return True
 
 async def forced_join_editor_media_input(update, context):
-    if context.user_data.get("fj_editor_input")!="media":
+    if context.user_data.get("fj_editor_input") != "media":
         return False
-    m=update.effective_message
-    entry=None
-    if m.photo: entry={"type":"photo","file_id":m.photo[-1].file_id}
-    elif m.video: entry={"type":"video","file_id":m.video.file_id}
-    elif m.document: entry={"type":"document","file_id":m.document.file_id}
+    m = update.effective_message
+    entry = None
+    if m.photo: entry = {"type": "photo", "file_id": m.photo[-1].file_id}
+    elif m.video: entry = {"type": "video", "file_id": m.video.file_id}
+    elif m.document: entry = {"type": "document", "file_id": m.document.file_id}
     if not entry:
         return False
-    owner=int(context.application.bot_data.get("seller_owner_id") or 0)
-    item=await get_forced_join_editor(owner)
-    media=item.get("media") or []
-    media=[entry]  # replace current approval media
-    item["media"]=media
-    await set_forced_join_editor(owner,item)
-    context.user_data.pop("fj_editor_input",None)
+    owner = int(context.application.bot_data.get("seller_owner_id") or 0)
+    access_chat_id = int(context.user_data.get("fj_editor_chat_id") or 0)
+    if not access_chat_id:
+        return False
+    item = await get_forced_join_editor_for_chat(owner, access_chat_id)
+    item["media"] = [entry]
+    await set_forced_join_editor_for_chat(owner, access_chat_id, item)
+    context.user_data.pop("fj_editor_input", None)
     await m.reply_text(
-        "✅ Media saved.",
-        reply_markup=_kb([[InlineKeyboardButton("⬅ Continue",callback_data="fj_editor")]]),
+        "✅ Media saved for this group/channel.",
+        reply_markup=_kb([[InlineKeyboardButton("⬅ Continue", callback_data="fj_editor")]]),
     )
     return True
 
@@ -705,12 +685,9 @@ async def forced_join_groups_page(q, context):
     rows.append([InlineKeyboardButton("⬅ Back",callback_data="gm_forced_join")])
     await q.edit_message_text(
         "🔗 Forced Group/Channel\n\n"
-        "Every group/channel where this Clone Bot is an administrator is detected and added automatically.\n\n"
-        "🔴 = disabled — this group/channel will NOT be used for Forced Join\n"
-        "🟢 = enabled — this group/channel WILL be used for Forced Join\n\n"
-        "If your group/channel is missing from this list even after making this Clone Bot an administrator, remove the bot from the group/channel and add it again as administrator.\n\n"
-        "If the Clone Bot is no longer an administrator in a group/channel, it is automatically removed from this list.\n\n"
-        "Enable the group/channel with 🟢 to use it for Forced Join.",
+        "Only groups/channels connected with /connectforcedjoin are shown here.\n\n"
+        "How to connect:\n"
+        "/connectforcedjoin",
         reply_markup=_kb(rows)
     )
 
@@ -724,7 +701,7 @@ async def forced_join_toggle_callback(update, context):
         return
     owner=int(context.application.bot_data.get("seller_owner_id") or 0)
     await toggle_required(owner,chat_id)
-    await forced_join_groups_page(q,context)
+    await forced_join_page(q,context)
     return True
 
 async def connect_forced_join_command(self, update, context):
@@ -735,24 +712,29 @@ async def connect_forced_join_command(self, update, context):
     chat=update.effective_chat
     target_id=chat.id if chat and chat.type in {"group","supergroup","channel"} else 0
     if context.args:
-        raw_target=str(context.args[0]).strip()
-        try:
-            target_id=int(raw_target)
+        try: target_id=int(context.args[0])
         except ValueError:
-            try:
-                info=await context.bot.get_chat(raw_target)
-                target_id=int(info.id)
-            except Exception:
-                await message.reply_text("❌ Send a valid chat ID or @username.")
-                return
+            await message.reply_text("❌ Send a valid chat ID.")
+            return
     if not target_id:
         await message.reply_text(
             "❌ Use this command inside the required group/channel, "
-            "or send /connectforcedjoin <chat_id> (or @username) from the bot admin chat."
+            "or send /connectforcedjoin <chat_id> from the bot admin chat."
         )
         return
     try:
         info=await context.bot.get_chat(target_id)
+
+        # /connectgroup subscription chats are deliberately excluded from
+        # the Forced Join connection list.
+        connected = await get_channels(owner)
+        if any(int(x.get("chat_id", 0) or 0) == int(target_id) for x in (connected or [])):
+            await message.reply_text(
+                "❌ This group/channel is already connected for subscriptions "
+                "with /connectgroup.\n\n"
+                "Use a separate group/channel for Forced Join."
+            )
+            return
 
         member=await context.bot.get_chat_member(target_id, context.bot.id)
         if getattr(member,"status","") not in {"administrator","creator"}:
