@@ -13,7 +13,7 @@ async def _clone_qr_file_id(context, owner: int) -> str:
     settings = await get_seller_settings(owner)
     return str(settings.get("upi_qr_file_id") or "")
 
-async def _update_payment_notification_messages(self, context, owner, payment_id, caption, current_message=None):
+async def _update_payment_notification_messages(context, owner, payment_id, caption, current_message=None):
     """Edit every pending-payment notification for this payment."""
     refs = list(await get_payment_notification_messages(owner, payment_id) or [])
     # Always include the message whose Approve/Reject button was pressed. This
@@ -212,7 +212,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 return True
             await context.bot.send_message(p['user_id'], '❌ Payment rejected')
             rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=owner)
-            await self._update_payment_notification_messages(
+            await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), rejected_caption, current_message=q.message
             )
             return True
@@ -280,7 +280,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
             await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
             approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
-            await self._update_payment_notification_messages(
+            await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), approved_caption, current_message=q.message
             )
         except Exception as exc:
