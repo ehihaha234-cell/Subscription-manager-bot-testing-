@@ -697,13 +697,9 @@ async def add_payment_notification_messages(owner_id, payment_id, messages):
         clean.append({"chat_id":chat_id,"message_id":message_id})
     if not clean:
         return False
-    # Merge references instead of replacing them. Each successful Telegram send
-    # is persisted immediately, so approval can update every chat that received
-    # the pending-payment notification.
     r=await c(PAYMENTS).update_one(
         {"owner_id":int(owner_id),"payment_id":str(payment_id)},
-        {"$addToSet":{"notification_messages":{"$each":clean}},
-         "$set":{"updated_at":datetime.now(timezone.utc)}},
+        {"$set":{"notification_messages":clean,"updated_at":datetime.now(timezone.utc)}},
     )
     return r.matched_count>0
 
@@ -924,12 +920,11 @@ async def fulfill_subscription_payment(
         ]
     }
     base_expiry = {"$cond": [active_before, "$expiry_date", now]}
+    # Use MongoDB's date + milliseconds arithmetic instead of $dateAdd.
+    # This keeps the fulfillment pipeline compatible with older MongoDB
+    # deployments while preserving the same renewal semantics.
     new_expiry = {
-        "$dateAdd": {
-            "startDate": base_expiry,
-            "unit": "minute",
-            "amount": added_minutes,
-        }
+        "$add": [base_expiry, added_minutes * 60 * 1000]
     }
 
     set_fields = {
