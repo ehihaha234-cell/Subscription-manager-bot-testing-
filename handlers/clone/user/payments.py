@@ -50,9 +50,13 @@ async def handle(self, update, context, q, owner, action):
                 f"💳 Payment\n\nPlan: {plan['name']}\n{stars_line}"
             )
         if manual_enabled:
-            manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay and upload your payment screenshot."
+            # Manual payment stays on the plan/payment-details page. The user
+            # does not need to open a separate upload screen; after selecting
+            # the plan, the next photo they send is handled by the existing
+            # manual-payment screenshot flow.
+            context.user_data['waiting_child_screenshot'] = True
+            manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay the amount and send your payment screenshot here."
             text = f'{text}\n\n{manual_text}' if text else f'💳 Payment\n\n{manual_text}'
-            rows.append([InlineKeyboardButton('📤 Upload Payment Screenshot', callback_data='c_upload')])
         if not enabled and currency != 'INR':
             notice = f'⚠️ Automatic checkout is currently unavailable for {currency} in this bot. Use Manual Payment or Telegram Stars.'
             text = f'{text}\n\n{notice}' if text else notice
