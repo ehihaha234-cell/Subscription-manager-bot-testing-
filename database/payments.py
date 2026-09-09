@@ -121,6 +121,7 @@ async def create_payment(
         "duration_text": duration_text,
         "status": "pending",
         "admin_id": None,
+        "admin_name": None,
         "remarks": None,
         "updated_at": now,
         "pending_key": key,
@@ -188,6 +189,7 @@ async def decide_latest_payment(
     status: str,
     admin_id: int = None,
     remarks: str = None,
+    admin_name: str = None,
 ):
     payment = await payments_collection().find_one(
         {
@@ -205,6 +207,7 @@ async def decide_latest_payment(
         status=status,
         admin_id=admin_id,
         remarks=remarks,
+        admin_name=admin_name,
     )
 
 
@@ -213,6 +216,7 @@ async def update_payment_status(
     status: str,
     admin_id: int = None,
     remarks: str = None,
+    admin_name: str = None,
 ):
     """Backward-compatible boolean wrapper for legacy callbacks."""
     payment = await decide_latest_payment(
@@ -220,6 +224,7 @@ async def update_payment_status(
         status=status,
         admin_id=admin_id,
         remarks=remarks,
+        admin_name=admin_name,
     )
     return payment is not None
 
@@ -229,6 +234,7 @@ async def decide_payment_by_id(
     status: str,
     admin_id: int = None,
     remarks: str = None,
+    admin_name: str = None,
 ):
     """
     Atomically decide one pending payment.
@@ -249,11 +255,13 @@ async def decide_payment_by_id(
     set_fields = {
         "status": status,
         "admin_id": admin_id,
+        "admin_name": admin_name,
         "remarks": remarks,
         "updated_at": now,
         "processed_at": now,
         "decision_status": status,
         "decision_admin_id": admin_id,
+        "decision_admin_name": admin_name,
         "decision_at": now,
     }
 
@@ -296,6 +304,7 @@ async def update_payment_status_by_id(
     status: str,
     admin_id: int = None,
     remarks: str = None,
+    admin_name: str = None,
 ):
     """Backward-compatible boolean wrapper around the atomic decision."""
     payment = await decide_payment_by_id(
@@ -303,6 +312,7 @@ async def update_payment_status_by_id(
         status=status,
         admin_id=admin_id,
         remarks=remarks,
+        admin_name=admin_name,
     )
     return payment is not None
 

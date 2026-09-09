@@ -731,7 +731,7 @@ async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,
 async def get_payment(owner_id,payment_id): return await c(PAYMENTS).find_one({"owner_id":owner_id,"payment_id":payment_id})
 async def pending_payments(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":"pending"}).sort("created_at",-1).to_list(length=50)
 async def payment_history(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":{"$in":["approved","rejected"]}}).sort("updated_at",-1).to_list(length=50)
-async def set_payment_status(owner_id,payment_id,status,admin_id):
+async def set_payment_status(owner_id,payment_id,status,admin_id,admin_name=None):
     now=datetime.now(timezone.utc)
     r=await c(PAYMENTS).update_one(
         {
@@ -743,6 +743,7 @@ async def set_payment_status(owner_id,payment_id,status,admin_id):
             "$set":{
                 "status":status,
                 "admin_id":admin_id,
+                "processed_by_name":admin_name,
                 "processed_at":now,
                 "updated_at":now,
             }
@@ -751,7 +752,7 @@ async def set_payment_status(owner_id,payment_id,status,admin_id):
     return r.modified_count>0
 
 
-async def claim_payment_for_processing(owner_id,payment_id,admin_id):
+async def claim_payment_for_processing(owner_id,payment_id,admin_id,admin_name=None):
     now=datetime.now(timezone.utc)
     r=await c(PAYMENTS).update_one(
         {
@@ -763,6 +764,7 @@ async def claim_payment_for_processing(owner_id,payment_id,admin_id):
             "$set":{
                 "status":"processing",
                 "processing_admin_id":admin_id,
+                "processing_admin_name":admin_name,
                 "processing_started_at":now,
                 "updated_at":now,
             }
@@ -771,7 +773,7 @@ async def claim_payment_for_processing(owner_id,payment_id,admin_id):
     return r.modified_count>0
 
 
-async def finalize_processed_payment(owner_id,payment_id,status,admin_id):
+async def finalize_processed_payment(owner_id,payment_id,status,admin_id,admin_name=None):
     now=datetime.now(timezone.utc)
     r=await c(PAYMENTS).update_one(
         {
@@ -783,11 +785,13 @@ async def finalize_processed_payment(owner_id,payment_id,status,admin_id):
             "$set":{
                 "status":status,
                 "admin_id":admin_id,
+                "processed_by_name":admin_name,
                 "processed_at":now,
                 "updated_at":now,
             },
             "$unset":{
                 "processing_admin_id":"",
+                "processing_admin_name":"",
                 "processing_started_at":"",
                 "processing_error":"",
             },
@@ -812,6 +816,7 @@ async def release_processing_payment(owner_id,payment_id,error_message=""):
             },
             "$unset":{
                 "processing_admin_id":"",
+                "processing_admin_name":"",
                 "processing_started_at":"",
             },
         },
