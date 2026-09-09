@@ -623,6 +623,13 @@ async def forced_join_editor_callback(update, context):
         await forced_join_message_editor(q, context, access_chat_id)
         return True
 
+    # Back from the per-group editor returns to the connected group/channel
+    # selector.  This keeps the direct-editor flow intact and does not jump
+    # back into Group Manager or another group's settings.
+    if a == "fj_editor_back":
+        context.user_data.pop("fj_editor_input", None)
+        return await forced_join_editor_targets_page(q, context)
+
     access_chat_id = int(context.user_data.get("fj_editor_chat_id") or 0)
     if not access_chat_id:
         await forced_join_editor_targets_page(q, context)
