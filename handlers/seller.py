@@ -279,13 +279,17 @@ async def _notify_owner_clone_bot_added(
             chunks.append(current)
 
         for admin_id in {int(value) for value in ADMIN_IDS}:
-            for chunk in chunks:
+            for chunk_index, chunk in enumerate(chunks):
                 try:
+                    reply_markup = None
+                    if chunk_index == 0:
+                        reply_markup = None
                     await context.bot.send_message(
                         chat_id=admin_id,
                         text=chunk,
                         parse_mode="HTML",
                         disable_web_page_preview=True,
+                        reply_markup=reply_markup,
                     )
                 except Exception:
                     logger.exception(

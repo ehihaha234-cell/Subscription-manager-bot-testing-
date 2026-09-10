@@ -26,6 +26,7 @@ from database.sellers import (
 )
 from database.users import total_users, users_collection
 from services.bot_manager import bot_manager
+from services.clone_backup import create_clone_backup
 from database.seller_subscriptions import effective_plan, seller_usage
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -54,6 +55,7 @@ def owner_dashboard_keyboard():
         ],
         [InlineKeyboardButton("🌐 Official Links Settings", callback_data="official_settings")],
         [InlineKeyboardButton("🏷 Branding", callback_data="sub_mgmt_branding")],
+        [InlineKeyboardButton("🤖 Clone Bot Backup", callback_data="main_owner_clone_backups")],
         [InlineKeyboardButton("🩺 Health Monitoring", callback_data="owner_health")],
         [InlineKeyboardButton("⚡ Performance Monitor", callback_data="owner_performance")],
         [InlineKeyboardButton("📜 Terms & Policy", callback_data="owner_terms_policy")],
@@ -991,6 +993,106 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        return
+
+    if action == "main_owner_clone_backups":
+        if not await is_admin(user_id):
+            await query.answer("Owner access only.", show_alert=True)
+            return
+
+        records = await get_bots()
+        records = [
+            record for record in records
+            if record.get("status") != "removed" and record.get("bot_id")
+        ]
+        records.sort(key=lambda item: (str(item.get("bot_username") or "").lower(), int(item.get("bot_id") or 0)))
+
+        rows = []
+        for record in records[:80]:
+            bot_id = int(record.get("bot_id") or 0)
+            username = str(record.get("bot_username") or "").lstrip("@")
+            title = str(record.get("bot_name") or "").strip() or (f"@{username}" if username else str(bot_id))
+            if username and title != f"@{username}":
+                label = f"🤖 {title[:24]} (@{username[:20]})"
+            else:
+                label = f"🤖 {title[:48]}"
+            rows.append([
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"main_owner_clone_backup_{bot_id}",
+                )
+            ])
+
+        rows.append([InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")])
+        if not records:
+            text = "🤖 Clone Bot Backup\n\nNo clone bots are registered yet."
+        else:
+            extra = "" if len(records) <= 80 else f"\n\nShowing first 80 of {len(records)} clone bots."
+            text = (
+                "🤖 Clone Bot Backup\n\n"
+                "Select a clone bot to create its backup file.\n\n"
+                "The backup contains that clone bot's data only and can be restored "
+                "through the existing Clone Bot Backup & Restore → Restore option."
+                + extra
+            )
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if action.startswith("main_owner_clone_backup_"):
+        if not await is_admin(user_id):
+            await query.answer("Owner access only.", show_alert=True)
+            return
+        try:
+            bot_id = int(action.replace("main_owner_clone_backup_", ""))
+        except ValueError:
+            await query.answer("Invalid clone bot.", show_alert=True)
+            return
+
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or record.get("status") == "removed":
+            await query.answer("Clone bot not found.", show_alert=True)
+            return
+
+        scope_id = int(record.get("data_owner_id") or record.get("owner_id") or 0)
+        if not scope_id:
+            await query.answer("Clone bot data scope is unavailable.", show_alert=True)
+            return
+
+        username = str(record.get("bot_username") or bot_id).lstrip("@")
+        filename = f"clone-backup-{username}.json.gz"
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            raw, manifest = await create_clone_backup(
+                owner_id=scope_id,
+                bot_id=bot_id,
+                bot_username=record.get("bot_username") or "",
+            )
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=InputFile(io.BytesIO(raw), filename=filename),
+                caption=(
+                    "✅ Clone bot backup created successfully.\n\n"
+                    f"🤖 Clone Bot: @{username}\n"
+                    f"📦 Records: {manifest['records']:,}\n"
+                    f"🔐 SHA-256: {manifest['sha256'][:16]}…\n\n"
+                    "You can upload this file in the target clone's "
+                    "Backup & Restore → Restore option."
+                ),
+            )
+            await query.answer("Backup created successfully ✅")
+        except Exception as exc:
+            logger.exception("Owner clone backup failed bot_id=%s", bot_id)
+            await query.answer("Backup failed. See the message for details.", show_alert=True)
+            try:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=f"❌ Clone bot backup failed.\n\nError: {str(exc)[:500]}",
+                )
+            except Exception:
+                pass
         return
 
     if action == "main_owner_dashboard":
