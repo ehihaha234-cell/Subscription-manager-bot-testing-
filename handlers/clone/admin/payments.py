@@ -327,7 +327,46 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 status_text = f'ℹ️ Your subscription was already active.\nYour new payment has been added to your existing subscription.\n\n📅 Previous Expiry: {self.format_dt(previous_expiry)}\n📅 New Expiry: {expiry_text}\n\n🔗 A fresh private invite link has been generated for you.'
             else:
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
-            await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
+            # Keep the existing approval/fulfillment flow unchanged. Only enrich
+            # the user-facing manual approval message with payment audit details.
+            approved_user = await get_user(owner, int(p['user_id'])) or {}
+            approved_name = " ".join(
+                value for value in [
+                    approved_user.get("first_name"),
+                    approved_user.get("last_name"),
+                ] if value
+            ).strip() or "Unknown"
+            approved_username = (
+                f"@{approved_user.get('username')}"
+                if approved_user.get("username")
+                else "Not set"
+            )
+            submitted_text = self.format_dt(p.get("created_at"))
+            approved_at_text = self.format_dt(
+                p.get("approved_at") or p.get("processed_at")
+            )
+
+            await context.bot.send_message(
+                p['user_id'],
+                f"✅ Payment approved manually\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Purchased Plan: {p['plan']}\n"
+                f"💰 Amount: ₹{float(p.get('amount') or 0):g}\n"
+                f"🧾 Payment ID: {pid}\n"
+                f"⌛ Added Duration: {p.get('duration_text') or '-'}\n"
+                f"🧾 Receipt/Invoice: {invoice['invoice_no']}\n"
+                f"\n"
+                f"👤 User ID: {p.get('user_id')}\n"
+                f"👤 User: {approved_name}\n"
+                f"🔗 Username: {approved_username}\n"
+                f"📅 Submitted: {submitted_text}\n"
+                f"✅ Approved At: {approved_at_text}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"\n{status_text}\n"
+                f"\nJoin using your private invite link(s):\n\n"
+                + '\n\n'.join(links),
+                disable_web_page_preview=True,
+            )
             p = await get_payment(owner, pid) or p
             approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=q.from_user.id)
             await _update_payment_notification_messages(
