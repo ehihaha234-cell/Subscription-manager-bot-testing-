@@ -5,7 +5,7 @@ import hashlib
 import io
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from database.mongo import get_database
 
@@ -98,20 +98,36 @@ def _fingerprint(doc: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical(clean)).hexdigest()
 
 
-async def create_clone_backup(*, owner_id: int, bot_id: int, bot_username: str = "") -> tuple[bytes, dict[str, Any]]:
+async def create_clone_backup(*, owner_id: int, bot_id: int, bot_username: str = "", progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None) -> tuple[bytes, dict[str, Any]]:
     db = get_database()
     scope = int(owner_id)
     collections: dict[str, list[dict[str, Any]]] = {}
     total = 0
     names = sorted(n for n in await db.list_collection_names() if n not in EXCLUDED and not n.startswith("system."))
+
+    # Count first so the UI can show an accurate processed/total meter.
+    counts: dict[str, int] = {}
+    expected_total = 0
     for name in names:
+        count = await db[name].count_documents({"$or": [{"owner_id": scope}, {"data_owner_id": scope}]})
+        if count:
+            counts[name] = int(count)
+            expected_total += int(count)
+    if expected_total > MAX_RECORDS:
+        raise ValueError(f"Backup exceeds {MAX_RECORDS:,} records")
+    if progress_callback:
+        await progress_callback(0, expected_total, "Preparing backup…")
+
+    for name in names:
+        if not counts.get(name):
+            continue
         docs = []
         cursor = db[name].find({"$or": [{"owner_id": scope}, {"data_owner_id": scope}]})
         async for doc in cursor:
             docs.append(doc)
             total += 1
-            if total > MAX_RECORDS:
-                raise ValueError(f"Backup exceeds {MAX_RECORDS:,} records")
+            if progress_callback and (total == 1 or total % 5 == 0 or total == expected_total):
+                await progress_callback(total, expected_total, name)
         if docs:
             collections[name] = docs
     payload = {
@@ -174,7 +190,7 @@ def parse_clone_backup(raw: bytes) -> tuple[dict[str, list[dict[str, Any]]], dic
     return clean, manifest, source
 
 
-async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str) -> dict[str, int]:
+async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str, progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None) -> dict[str, int]:
     collections, manifest, source = parse_clone_backup(raw)
     source_scope = int(source["scope_id"])
     target_scope = int(target_scope)
@@ -183,6 +199,10 @@ async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str) -> d
         pass
     db = get_database()
     result = {"records": int(manifest["records"]), "inserted": 0, "existing": 0, "replaced": 0, "skipped": 0}
+    expected = int(manifest["records"])
+    processed = 0
+    if progress_callback:
+        await progress_callback(0, expected, "Preparing restore…")
     for name, records in collections.items():
         transformed = [_transform(d, source_scope, target_scope) for d in records]
         if mode == "replace":
@@ -194,6 +214,9 @@ async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str) -> d
                 try:
                     write = await db[name].insert_many(transformed, ordered=False)
                     result["inserted"] += len(write.inserted_ids)
+                    processed += len(transformed)
+                    if progress_callback:
+                        await progress_callback(processed, expected, name)
                 except Exception:
                     # Insert individually so one legacy unique/index conflict
                     # cannot prevent the rest of the restore.
@@ -203,6 +226,9 @@ async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str) -> d
                             result["inserted"] += 1
                         except Exception:
                             result["skipped"] += 1
+                        processed += 1
+                        if progress_callback and (processed == 1 or processed % 5 == 0 or processed == expected):
+                            await progress_callback(processed, expected, name)
             continue
 
         for doc in transformed:
@@ -227,4 +253,7 @@ async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str) -> d
                 result["inserted"] += 1
             except Exception:
                 result["existing"] += 1
+            processed += 1
+            if progress_callback and (processed == 1 or processed % 5 == 0 or processed == expected):
+                await progress_callback(processed, expected, name)
     return result
