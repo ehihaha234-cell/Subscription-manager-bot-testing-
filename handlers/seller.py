@@ -1,10 +1,11 @@
 import asyncio
 import logging
+import io
 from html import escape
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.error import InvalidToken, TelegramError
-from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from uuid import uuid4
@@ -61,6 +62,7 @@ from database.users import get_user as get_platform_user
 from database.payment_gateways import SUPPORTED_GATEWAYS, get_gateway_config, create_gateway_transaction
 from services.payment_gateways import create_checkout, GatewayError
 from utils.crypto import encrypt_secret, decrypt_secret
+from services.clone_backup import create_clone_backup, parse_clone_backup, restore_clone_backup
 
 
 logger = logging.getLogger(__name__)
@@ -586,6 +588,7 @@ def selected_bot_markup(record):
         [InlineKeyboardButton("🗑 Remove Bot", callback_data=f"seller_remove_{bot_id}")],
         [InlineKeyboardButton("📊 Statistics", callback_data=f"seller_selected_stats_{bot_id}")],
         [InlineKeyboardButton("🤝 Seller Referral", callback_data=f"seller_selected_referral_{bot_id}")],
+        [InlineKeyboardButton("💾 Backup & Restore", callback_data=f"seller_selected_backup_{bot_id}")],
         [InlineKeyboardButton("📜 Terms & Policy", callback_data=f"seller_selected_terms_{bot_id}")],
         [InlineKeyboardButton("🆘 Help & Commands", callback_data=f"seller_selected_help_{bot_id}")],
         [InlineKeyboardButton("⬅ Clone Bot List", callback_data="seller_bots_list")],
@@ -877,11 +880,186 @@ async def _business_log_out_account(record: dict) -> None:
         await client.disconnect()
 
 
+
+def _backup_menu(bot_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Backup", callback_data=f"seller_backup_create_{int(bot_id)}")],
+        [InlineKeyboardButton("♻️ Restore", callback_data=f"seller_backup_restore_{int(bot_id)}")],
+        [InlineKeyboardButton("⬅ Back", callback_data=f"seller_select_{int(bot_id)}")],
+    ])
+
+
+def _backup_help(bot_id: int) -> str:
+    return (
+        "💾 Backup & Restore\n\n"
+        "Backup and restore your clone bot data.\n\n"
+        "📦 Backup\n"
+        "Create a backup file of this clone bot.\n\n"
+        "♻️ Restore\n"
+        "Send a backup file from another clone bot to restore its data here.\n\n"
+        "💡 Example:\n\n"
+        "Bot A\n"
+        "↓\n"
+        "📦 Create Backup\n"
+        "↓\n"
+        "backup_BotA.json.gz\n"
+        "↓\n"
+        "Bot B\n"
+        "↓\n"
+        "♻️ Restore → Send backup file\n\n"
+        "After the file is received, choose /replace or /merge."
+    )
+
+
+async def _backup_restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = context.user_data.get("seller_backup_raw")
+    bot_id = int(context.user_data.get("seller_backup_target_bot_id") or 0)
+    if not raw or not bot_id:
+        await update.effective_message.reply_text("❌ No backup restore is waiting for confirmation.")
+        return
+    command = (update.effective_message.text or "").split()[0].lower()
+    mode = "merge" if command == "/merge" else "replace" if command == "/replace" else None
+    if mode is None:
+        await update.effective_message.reply_text("Use /replace or /merge.")
+        return
+    owner_id = int(update.effective_user.id)
+    record = await get_bot_by_bot_id(bot_id)
+    if not record or int(record.get("owner_id", 0)) != owner_id:
+        context.user_data.pop("seller_backup_raw", None)
+        await update.effective_message.reply_text("❌ Clone bot not found.")
+        return
+    scope_id = int(record.get("data_owner_id") or owner_id)
+    context.user_data.pop("seller_backup_raw", None)
+    context.user_data.pop("seller_backup_target_bot_id", None)
+    context.user_data.pop("seller_backup_waiting_file", None)
+    try:
+        result = await restore_clone_backup(raw, target_scope=scope_id, mode=mode)
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ Restore failed: {exc}")
+        return
+    if mode == "merge":
+        text = (
+            "✅ Backup merged successfully.\n\n"
+            f"📥 Backup records: {result['records']:,}\n"
+            f"➕ Added: {result['inserted']:,}\n"
+            f"↔️ Already existed: {result['existing']:,}\n"
+            f"⚠️ Skipped: {result['skipped']:,}"
+        )
+    else:
+        text = (
+            "✅ Backup restored successfully.\n\n"
+            f"📥 Backup records: {result['records']:,}\n"
+            f"➕ Restored: {result['inserted']:,}\n"
+            f"🗑️ Replaced existing records: {result['replaced']:,}\n"
+            f"⚠️ Skipped: {result['skipped']:,}"
+        )
+    await update.effective_message.reply_text(text, reply_markup=selected_back(bot_id))
+
+
+async def _receive_clone_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("seller_backup_waiting_file"):
+        return
+    bot_id = int(context.user_data.get("seller_backup_target_bot_id") or 0)
+    owner_id = int(update.effective_user.id)
+    record = await get_bot_by_bot_id(bot_id)
+    if not record or int(record.get("owner_id", 0)) != owner_id:
+        context.user_data.clear()
+        await update.effective_message.reply_text("❌ Clone bot not found.")
+        return
+    document = update.effective_message.document
+    if not document:
+        return
+    name = (document.file_name or "").lower()
+    if not (name.endswith(".json.gz") or name.endswith(".gz") or name.endswith(".json")):
+        await update.effective_message.reply_text("❌ Please send a valid backup file (.json.gz).")
+        return
+    if document.file_size and document.file_size > 20 * 1024 * 1024:
+        await update.effective_message.reply_text("❌ Backup file is too large.")
+        return
+    tg_file = await document.get_file()
+    data = bytes(await tg_file.download_as_bytearray())
+    try:
+        _, manifest, source = parse_clone_backup(data)
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ Invalid backup file: {exc}")
+        return
+    context.user_data["seller_backup_waiting_file"] = False
+    context.user_data["seller_backup_raw"] = data
+    source_name = str(source.get("bot_username") or source.get("bot_id") or "Unknown")
+    await update.effective_message.reply_text(
+        "♻️ Restore Backup\n\n"
+        "Backup file received successfully.\n\n"
+        f"Source Bot: @{source_name.lstrip('@')}\n"
+        f"Records: {int(manifest.get('records', 0)):,}\n\n"
+        "Choose how you want to restore this backup:\n\n"
+        "/replace — Replace current bot data with backup data.\n\n"
+        "/merge — Merge backup data with current bot data.\n\n"
+        "⚠️ Replace removes the current bot's existing data.\n"
+        "✅ Merge keeps current data and adds backup data."
+    )
+
+
 async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     owner_id = int(q.from_user.id)
     action = q.data
+
+    if action.startswith("seller_selected_backup_"):
+        bot_id = int(action.rsplit("_", 1)[1])
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or int(record.get("owner_id", 0)) != owner_id:
+            await q.answer("Clone bot not found.", show_alert=True)
+            return
+        context.user_data["selected_clone_bot_id"] = bot_id
+        context.user_data["seller_backup_target_bot_id"] = bot_id
+        await q.edit_message_text(_backup_help(bot_id), reply_markup=_backup_menu(bot_id))
+        return
+
+    if action.startswith("seller_backup_create_"):
+        bot_id = int(action.rsplit("_", 1)[1])
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or int(record.get("owner_id", 0)) != owner_id:
+            await q.answer("Clone bot not found.", show_alert=True)
+            return
+        scope_id = int(record.get("data_owner_id") or owner_id)
+        try:
+            raw, manifest = await create_clone_backup(
+                owner_id=scope_id,
+                bot_id=bot_id,
+                bot_username=record.get("bot_username") or "",
+            )
+            filename = f"clone-backup-{str(record.get('bot_username') or bot_id).lstrip('@')}.json.gz"
+            await context.bot.send_document(
+                q.message.chat_id,
+                InputFile(io.BytesIO(raw), filename=filename),
+                caption=f"✅ Backup created successfully.\nRecords: {manifest['records']:,}\nSHA-256: {manifest['sha256'][:16]}…",
+            )
+            await q.edit_message_text(
+                "✅ Backup created successfully.\n\nKeep the backup file safe. You can use it in another clone bot's Restore option.",
+                reply_markup=_backup_menu(bot_id),
+            )
+        except Exception as exc:
+            await q.edit_message_text(f"❌ Backup failed: {exc}", reply_markup=_backup_menu(bot_id))
+        return
+
+    if action.startswith("seller_backup_restore_"):
+        bot_id = int(action.rsplit("_", 1)[1])
+        record = await get_bot_by_bot_id(bot_id)
+        if not record or int(record.get("owner_id", 0)) != owner_id:
+            await q.answer("Clone bot not found.", show_alert=True)
+            return
+        context.user_data["selected_clone_bot_id"] = bot_id
+        context.user_data["seller_backup_target_bot_id"] = bot_id
+        context.user_data["seller_backup_waiting_file"] = True
+        context.user_data.pop("seller_backup_raw", None)
+        await q.edit_message_text(
+            "♻️ Restore Backup\n\n"
+            "Please send the backup file from another clone bot.\n\n"
+            "After the file is received, you will choose /replace or /merge.",
+            reply_markup=selected_back(bot_id),
+        )
+        return
 
     # Normalize legacy single-clone dashboard callbacks to the selected clone.
     # New multi-clone callbacks already carry the bot_id suffix.
@@ -2562,7 +2740,10 @@ def _decision_result_text(purchase: dict) -> str:
 
 def seller_handlers():
     return [
-        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
+        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?|backup(?:_.*)?)$"),
+        CommandHandler("replace", _backup_restore_command),
+        CommandHandler("merge", _backup_restore_command),
+        MessageHandler(filters.Document.ALL, _receive_clone_backup),
         MessageHandler(filters.PHOTO | filters.VIDEO, receive_seller_qr),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_seller_token),
     ]
