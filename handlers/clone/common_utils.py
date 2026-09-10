@@ -6,20 +6,50 @@ from handlers.common.clone_context import *
 class CloneCommonUtilsMixin:
     @staticmethod
     def parse_duration(value:str)->int:
-        value=value.strip().lower(); n=int(value[:-1]); unit=value[-1]
-        if n<=0: raise ValueError("Duration must be positive")
-        if unit=="m": return n
-        if unit=="h": return n*60
-        if unit=="d": return n*1440
-        raise ValueError("Use m, h or d")
+        value = value.strip().lower()
+        if value.endswith("mo"):
+            unit = "mo"
+            number = value[:-2]
+            multiplier = 30 * 1440
+        elif value.endswith("m"):
+            unit = "m"
+            number = value[:-1]
+            multiplier = 1
+        elif value.endswith("h"):
+            unit = "h"
+            number = value[:-1]
+            multiplier = 60
+        elif value.endswith("d"):
+            unit = "d"
+            number = value[:-1]
+            multiplier = 1440
+        elif value.endswith("y"):
+            unit = "y"
+            number = value[:-1]
+            multiplier = 365 * 1440
+        else:
+            raise ValueError("Use m, h, d, mo or y")
+
+        try:
+            n = int(number)
+        except (TypeError, ValueError):
+            raise ValueError("Use m, h, d, mo or y")
+        if n <= 0:
+            raise ValueError("Duration must be positive")
+        return n * multiplier
 
     @classmethod
     def parse_plan(cls,text:str):
         p=[x.strip() for x in text.split("|")]
         if len(p)!=4: raise ValueError("Use: Plan Name | Duration | Price | Stars")
-        stars=int(p[3])
-        if stars < 0 or stars > 2500: raise ValueError("Stars must be between 0 and 2500")
-        return p[0],p[1].lower(),cls.parse_duration(p[1]),float(p[2]),stars
+        try:
+            price = float(p[2])
+            stars = int(p[3])
+        except (TypeError, ValueError):
+            raise ValueError("Price and Stars must be valid numbers")
+        if price < 0: raise ValueError("Price cannot be negative")
+        if stars < 0: raise ValueError("Stars cannot be negative")
+        return p[0],p[1].lower(),cls.parse_duration(p[1]),price,stars
 
     def owner(self,context):
         # owner() is the clone-specific persistent data scope. Seller identity
