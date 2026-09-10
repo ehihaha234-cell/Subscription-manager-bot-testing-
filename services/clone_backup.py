@@ -194,66 +194,87 @@ async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str, prog
     collections, manifest, source = parse_clone_backup(raw)
     source_scope = int(source["scope_id"])
     target_scope = int(target_scope)
-    if source_scope == target_scope and mode == "merge":
-        # Same-bot merge is safe but intentionally does not overwrite records.
-        pass
+    if mode not in {"merge", "replace"}:
+        raise ValueError("Invalid restore mode")
+
     db = get_database()
-    result = {"records": int(manifest["records"]), "inserted": 0, "existing": 0, "replaced": 0, "skipped": 0}
+    result = {
+        "records": int(manifest["records"]),
+        "inserted": 0,
+        "existing": 0,
+        "replaced": 0,
+        "skipped": 0,
+    }
     expected = int(manifest["records"])
     processed = 0
     if progress_callback:
         await progress_callback(0, expected, "Preparing restore…")
+
     for name, records in collections.items():
         transformed = [_transform(d, source_scope, target_scope) for d in records]
+
         if mode == "replace":
-            deleted = await db[name].delete_many({"$or": [{"owner_id": target_scope}, {"data_owner_id": target_scope}]})
+            deleted = await db[name].delete_many(
+                {"$or": [{"owner_id": target_scope}, {"data_owner_id": target_scope}]}
+            )
             result["replaced"] += int(deleted.deleted_count or 0)
-            if transformed:
-                # Avoid duplicate _id conflicts and let the collection's normal
-                # unique indexes enforce its natural identity.
+
+            # Insert in small batches so the progress meter reflects real work
+            # instead of jumping directly from 0% to 100% for a large collection.
+            batch_size = 50
+            for start in range(0, len(transformed), batch_size):
+                batch = transformed[start:start + batch_size]
                 try:
-                    write = await db[name].insert_many(transformed, ordered=False)
+                    write = await db[name].insert_many(batch, ordered=False)
                     result["inserted"] += len(write.inserted_ids)
-                    processed += len(transformed)
-                    if progress_callback:
-                        await progress_callback(processed, expected, name)
                 except Exception:
-                    # Insert individually so one legacy unique/index conflict
-                    # cannot prevent the rest of the restore.
-                    for doc in transformed:
+                    # Fall back to individual inserts so one legacy unique/index
+                    # conflict cannot stop the rest of the restore.
+                    for doc in batch:
                         try:
                             await db[name].insert_one(doc)
                             result["inserted"] += 1
                         except Exception:
                             result["skipped"] += 1
-                        processed += 1
-                        if progress_callback and (processed == 1 or processed % 5 == 0 or processed == expected):
-                            await progress_callback(processed, expected, name)
+                processed += len(batch)
+                if progress_callback:
+                    await progress_callback(processed, expected, name)
             continue
 
+        # Merge: keep every current target record and add only missing backup
+        # records. Progress counts every source record, including existing and
+        # skipped records, so the meter always reaches 100% accurately.
         for doc in transformed:
             query = _identity_query(name, doc)
             if query and "_backup_fingerprint" in query:
                 fp = query.pop("_backup_fingerprint")
-                query = {"owner_id": target_scope, "$expr": {"$eq": [{"$literal": fp}, fp]}}
-                # The fingerprint branch cannot be expressed against an absent
-                # field; use a direct small candidate scan below instead.
-                candidates = await db[name].find({"owner_id": target_scope}).to_list(length=1000)
+                candidates = await db[name].find(
+                    {"owner_id": target_scope}
+                ).to_list(length=1000)
                 if any(_fingerprint(c) == fp for c in candidates):
                     result["existing"] += 1
+                    processed += 1
+                    if progress_callback:
+                        await progress_callback(processed, expected, name)
                     continue
                 query = None
+
             if query:
                 existing = await db[name].find_one(query)
                 if existing:
                     result["existing"] += 1
+                    processed += 1
+                    if progress_callback:
+                        await progress_callback(processed, expected, name)
                     continue
+
             try:
                 await db[name].insert_one(doc)
                 result["inserted"] += 1
             except Exception:
                 result["existing"] += 1
             processed += 1
-            if progress_callback and (processed == 1 or processed % 5 == 0 or processed == expected):
+            if progress_callback:
                 await progress_callback(processed, expected, name)
+
     return result
