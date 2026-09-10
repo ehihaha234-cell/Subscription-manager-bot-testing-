@@ -1,6 +1,7 @@
 import os
 import asyncio
 import io
+import logging
 from html import escape
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -33,6 +34,8 @@ from zoneinfo import ZoneInfo
 from database.mongo import get_database
 from utils.performance import performance_runtime
 
+logger = logging.getLogger(__name__)
+
 
 def home_button():
     return [InlineKeyboardButton("⬅ Main Menu", callback_data="main_home")]
@@ -55,7 +58,6 @@ def owner_dashboard_keyboard():
         ],
         [InlineKeyboardButton("🌐 Official Links Settings", callback_data="official_settings")],
         [InlineKeyboardButton("🏷 Branding", callback_data="sub_mgmt_branding")],
-        [InlineKeyboardButton("🤖 Clone Bot Backup", callback_data="main_owner_clone_backups")],
         [InlineKeyboardButton("🩺 Health Monitoring", callback_data="owner_health")],
         [InlineKeyboardButton("⚡ Performance Monitor", callback_data="owner_performance")],
         [InlineKeyboardButton("📜 Terms & Policy", callback_data="owner_terms_policy")],
@@ -1000,18 +1002,31 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Owner access only.", show_alert=True)
             return
 
-        records = await get_bots()
-        records = [
-            record for record in records
-            if record.get("status") != "removed" and record.get("bot_id")
-        ]
-        records.sort(key=lambda item: (str(item.get("bot_username") or "").lower(), int(item.get("bot_id") or 0)))
+        # get_bots() is seller-scoped, so collect all registered clone bots
+        # through the platform's seller records.
+        records = []
+        for seller in await get_all_sellers():
+            seller_id = int(seller.get("owner_id") or seller.get("user_id") or 0)
+            if not seller_id:
+                continue
+            for record in await get_bots(seller_id):
+                if record.get("status") != "removed" and record.get("bot_id"):
+                    records.append(record)
+
+        records.sort(
+            key=lambda item: (
+                str(item.get("bot_username") or "").lower(),
+                int(item.get("bot_id") or 0),
+            )
+        )
 
         rows = []
         for record in records[:80]:
             bot_id = int(record.get("bot_id") or 0)
             username = str(record.get("bot_username") or "").lstrip("@")
-            title = str(record.get("bot_name") or "").strip() or (f"@{username}" if username else str(bot_id))
+            title = str(record.get("bot_name") or "").strip() or (
+                f"@{username}" if username else str(bot_id)
+            )
             if username and title != f"@{username}":
                 label = f"🤖 {title[:24]} (@{username[:20]})"
             else:
@@ -1032,7 +1047,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🤖 Clone Bot Backup\n\n"
                 "Select a clone bot to create its backup file.\n\n"
                 "The backup contains that clone bot's data only and can be restored "
-                "through the existing Clone Bot Backup & Restore → Restore option."
+                "through the existing Backup & Restore → Restore option."
                 + extra
             )
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
