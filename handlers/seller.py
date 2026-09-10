@@ -937,22 +937,24 @@ async def _backup_restore_command(update: Update, context: ContextTypes.DEFAULT_
         "♻️ <b>Restoring Backup</b>\n\n"
         "[░░░░░░░░░░] 0%\n\n"
         "Processed: 0 / 0\n"
-        f"Mode: {mode.upper()}\n\n"
+        f"Mode: {mode.upper()}\n"
+        "Current: Preparing restore…\n\n"
         "Please wait…",
         parse_mode="HTML",
     )
-    progress_state = {"last": 0.0, "done": -1}
+    progress_state = {"last_done": -1, "step": 1}
 
     async def _restore_progress(done: int, total: int, current: str):
-        now = time.monotonic()
-        if done != total and done != 0 and now - progress_state["last"] < 0.8:
+        if total > 0:
+            progress_state["step"] = max(1, (total + 19) // 20)
+        step = progress_state["step"]
+        if done != total and done != 0 and done - progress_state["last_done"] < step:
             return
-        if done == progress_state["done"] and done != total:
+        if done == progress_state["last_done"] and done != total:
             return
-        progress_state["last"] = now
-        progress_state["done"] = done
+        progress_state["last_done"] = done
         percent = 100 if total <= 0 else min(100, int((done / total) * 100))
-        filled = min(10, int(round(percent / 10)))
+        filled = min(10, int((percent + 5) // 10))
         bar = "█" * filled + "░" * (10 - filled)
         try:
             await progress_message.edit_text(
@@ -1060,21 +1062,31 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Clone bot not found.", show_alert=True)
             return
         scope_id = int(record.get("data_owner_id") or owner_id)
-        progress_state = {"last": 0.0, "done": -1}
+        await q.answer("Backup started…", show_alert=False)
+        progress_message = await q.message.reply_text(
+            "📦 <b>Creating Clone Bot Backup</b>\n\n"
+            "[░░░░░░░░░░] 0%\n\n"
+            "Backed up: 0 / 0\n"
+            "Current: Preparing backup…\n\n"
+            "Please wait…",
+            parse_mode="HTML",
+        )
+        progress_state = {"last_done": -1, "step": 1}
 
         async def _backup_progress(done: int, total: int, current: str):
-            now = time.monotonic()
-            if done != total and done != 0 and now - progress_state["last"] < 0.8:
+            if total > 0:
+                progress_state["step"] = max(1, (total + 19) // 20)
+            step = progress_state["step"]
+            if done != total and done != 0 and done - progress_state["last_done"] < step:
                 return
-            if done == progress_state["done"] and done != total:
+            if done == progress_state["last_done"] and done != total:
                 return
-            progress_state["last"] = now
-            progress_state["done"] = done
+            progress_state["last_done"] = done
             percent = 100 if total <= 0 else min(100, int((done / total) * 100))
-            filled = min(10, int(round(percent / 10)))
+            filled = min(10, int((percent + 5) // 10))
             bar = "█" * filled + "░" * (10 - filled)
             try:
-                await q.edit_message_text(
+                await progress_message.edit_text(
                     "📦 <b>Creating Clone Bot Backup</b>\n\n"
                     f"[{bar}] {percent}%\n\n"
                     f"Backed up: {done:,} / {total:,}\n"
@@ -1098,12 +1110,19 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InputFile(io.BytesIO(raw), filename=filename),
                 caption=f"✅ Backup created successfully.\nRecords: {manifest['records']:,}\nSHA-256: {manifest['sha256'][:16]}…",
             )
-            await q.edit_message_text(
-                "✅ Backup created successfully.\n\nKeep the backup file safe. You can use it in another clone bot's Restore option.",
+            await progress_message.edit_text(
+                "✅ <b>Backup created successfully.</b>\n\n"
+                f"📦 Records: {manifest['records']:,}\n"
+                "The backup file has been sent above.",
+                parse_mode="HTML",
                 reply_markup=_backup_menu(bot_id),
             )
         except Exception as exc:
-            await q.edit_message_text(f"❌ Backup failed: {exc}", reply_markup=_backup_menu(bot_id))
+            await progress_message.edit_text(
+                f"❌ Backup failed: {escape(str(exc))}",
+                parse_mode="HTML",
+                reply_markup=_backup_menu(bot_id),
+            )
         return
 
     if action.startswith("seller_backup_restore_"):

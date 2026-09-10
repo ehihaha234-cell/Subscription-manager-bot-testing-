@@ -1251,26 +1251,40 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         username = str(record.get("bot_username") or bot_id).lstrip("@")
         filename = f"clone-backup-{username}.json.gz"
+
+        # Acknowledge immediately. Do not call query.answer() again after the
+        # backup finishes; long backups can outlive Telegram's callback-query
+        # lifetime and otherwise trigger the generic temporary-error message.
+        await query.answer("Backup started…", show_alert=False)
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-        progress_state = {"last": 0.0, "done": -1}
+        progress_message = await query.message.reply_text(
+            "🤖 <b>Clone Bot Backup</b>\n\n"
+            "[░░░░░░░░░░] 0%\n\n"
+            "Backed up: 0 / 0\n"
+            "Current: Preparing backup…\n\n"
+            "Please wait…",
+            parse_mode="HTML",
+        )
+        progress_state = {"last_done": -1, "step": 1}
 
         async def _owner_backup_progress(done: int, total: int, current: str):
-            now = time.monotonic()
-            if done != total and done != 0 and now - progress_state["last"] < 0.8:
+            if total > 0:
+                progress_state["step"] = max(1, (total + 19) // 20)
+            step = progress_state["step"]
+            if done != total and done != 0 and done - progress_state["last_done"] < step:
                 return
-            if done == progress_state["done"] and done != total:
+            if done == progress_state["last_done"] and done != total:
                 return
-            progress_state["last"] = now
-            progress_state["done"] = done
+            progress_state["last_done"] = done
             percent = 100 if total <= 0 else min(100, int((done / total) * 100))
-            filled = min(10, int(round(percent / 10)))
+            filled = min(10, int((percent + 5) // 10))
             bar = "█" * filled + "░" * (10 - filled)
             try:
-                await query.edit_message_text(
+                await progress_message.edit_text(
                     "🤖 <b>Clone Bot Backup</b>\n\n"
                     f"[{bar}] {percent}%\n\n"
                     f"Backed up: {done:,} / {total:,}\n"
@@ -1299,12 +1313,19 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "You can upload this file in the target clone's Backup & Restore → Restore option."
                 ),
             )
-            await query.answer("Backup created successfully ✅")
+            await progress_message.edit_text(
+                "✅ <b>Clone bot backup created successfully.</b>\n\n"
+                f"📦 Records: {manifest['records']:,}\n"
+                "The backup file has been sent above.",
+                parse_mode="HTML",
+            )
         except Exception as exc:
             logger.exception("Owner clone backup failed bot_id=%s", bot_id)
-            await query.answer("Backup failed. See the message for details.", show_alert=True)
             try:
-                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Clone bot backup failed.\n\nError: {str(exc)[:500]}")
+                await progress_message.edit_text(
+                    f"❌ Clone bot backup failed.\n\nError: {escape(str(exc)[:500])}",
+                    parse_mode="HTML",
+                )
             except Exception:
                 pass
         return
