@@ -1023,6 +1023,104 @@ async def active_subscriptions(owner_id, limit=5000):
 
 async def expired_subscriptions(owner_id):
     now=datetime.now(timezone.utc); return await c(SUBS).find({"owner_id":owner_id,"active":True,"expiry_date":{"$lte":now}}).to_list(length=500)
+
+
+async def active_expiry_reminder_subscriptions(owner_id, reminder_days: int, limit=5000):
+    """Return active subscriptions whose expiry is inside the configured reminder window."""
+    days = max(0, int(reminder_days or 0))
+    if days <= 0:
+        return []
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=days)
+    return await c(SUBS).find({
+        "owner_id": int(owner_id),
+        "active": True,
+        "expiry_date": {"$gt": now, "$lte": end},
+    }).to_list(length=limit)
+
+
+async def claim_expiry_reminder(owner_id: int, user_id: int, expiry_date, stale_after_seconds=600):
+    """Atomically claim one reminder for a specific subscription expiry."""
+    now = datetime.now(timezone.utc)
+    if expiry_date and expiry_date.tzinfo is None:
+        expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+    key = expiry_date.isoformat() if expiry_date else ""
+    if not key:
+        return None
+    stale_before = now - timedelta(seconds=int(stale_after_seconds))
+    token = uuid4().hex
+    result = await c(SUBS).find_one_and_update(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "active": True,
+            "expiry_date": expiry_date,
+            "$or": [
+                {"expiry_reminder_sent_for": {"$ne": key}},
+                {"expiry_reminder_sent_for": {"$exists": False}},
+            ],
+            "$and": [
+                {
+                    "$or": [
+                        {"expiry_reminder_claimed_at": {"$lt": stale_before}},
+                        {"expiry_reminder_claimed_at": {"$exists": False}},
+                    ]
+                }
+            ],
+        },
+        {
+            "$set": {
+                "expiry_reminder_claim_token": token,
+                "expiry_reminder_claimed_at": now,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    return token if result else None
+
+
+async def complete_expiry_reminder(owner_id: int, user_id: int, token: str, expiry_date) -> bool:
+    now = datetime.now(timezone.utc)
+    if expiry_date and expiry_date.tzinfo is None:
+        expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+    key = expiry_date.isoformat() if expiry_date else ""
+    result = await c(SUBS).update_one(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "expiry_reminder_claim_token": str(token),
+            "expiry_date": expiry_date,
+        },
+        {
+            "$set": {
+                "expiry_reminder_sent_for": key,
+                "expiry_reminder_sent_at": now,
+            },
+            "$unset": {
+                "expiry_reminder_claim_token": "",
+                "expiry_reminder_claimed_at": "",
+            },
+        },
+    )
+    return result.modified_count > 0
+
+
+async def release_expiry_reminder(owner_id: int, user_id: int, token: str):
+    await c(SUBS).update_one(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "expiry_reminder_claim_token": str(token),
+        },
+        {
+            "$unset": {
+                "expiry_reminder_claim_token": "",
+                "expiry_reminder_claimed_at": "",
+            }
+        },
+    )
+
+
 async def mark_expired(owner_id,user_id): await c(SUBS).update_one({"owner_id":owner_id,"user_id":user_id},{"$set":{"active":False,"updated_at":datetime.now(timezone.utc)}})
 
 
