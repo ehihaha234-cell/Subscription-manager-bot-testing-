@@ -320,6 +320,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
             finalized = await finalize_processed_payment(owner, pid, 'approved', q.from_user.id, _actor_name(q.from_user))
             if not finalized:
                 raise RuntimeError('Could not finalize payment status')
+            # Reload after finalization so the user-facing audit details use
+            # the actual approval timestamp written to MongoDB.
+            p = await get_payment(owner, pid) or p
             expiry_text = self.format_dt(expiry)
             invoice = await create_invoice(owner, p['user_id'], p, (await get_seller_settings(owner)).get('bot_name', 'Seller'))
             await audit('child_payment_approved', owner, owner, {'payment_id': pid, 'invoice_no': invoice['invoice_no']})
