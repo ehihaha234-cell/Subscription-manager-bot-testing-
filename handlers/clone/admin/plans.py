@@ -18,7 +18,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         context.user_data['wait_plan_add'] = True
         settings = await get_seller_settings(owner)
         code = normalize_currency(settings.get('currency')) or 'INR'
-        await q.edit_message_text(f'➕ Add Subscription Plan\n\nCurrency: {currency_symbol(code)} {code} — {currency_name(code)}\n\nSend: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99\n\nPrice uses the current bot currency. Changing currency later changes the label, not the numeric price.', reply_markup=self.back('a_plans'))
+        await q.edit_message_text(f'➕ Add Subscription Plan\n\nCurrency: {currency_symbol(code)} {code} — {currency_name(code)}\n\nSend: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99\n\nDuration: m = minutes, h = hours, d = days, mo = months, y = years\n\nPrice uses the current bot currency. Changing currency later changes the label, not the numeric price.', reply_markup=self.back('a_plans'))
         return True
     if a == 'a_plan_list':
         plans = await get_plans(owner)
@@ -38,7 +38,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         context.user_data['wait_plan_edit'] = a.replace('a_plan_edit_', '')
         settings = await get_seller_settings(owner)
         code = normalize_currency(settings.get('currency')) or 'INR'
-        await q.edit_message_text(f'✏️ Edit Subscription Plan\n\nCurrency: {currency_symbol(code)} {code}\n\nSend new: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99', reply_markup=self.back('a_plan_list'))
+        await q.edit_message_text(f'✏️ Edit Subscription Plan\n\nCurrency: {currency_symbol(code)} {code}\n\nSend new: Plan Name | Duration | Price | Stars\nExample: Premium | 30d | 199 | 99\n\nDuration: m = minutes, h = hours, d = days, mo = months, y = years', reply_markup=self.back('a_plan_list'))
         return True
     if a.startswith('a_plan_del_'):
         await delete_plan(owner, a.replace('a_plan_del_', ''))
