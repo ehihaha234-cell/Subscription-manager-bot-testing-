@@ -916,9 +916,17 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
 
 
 async def _owner_clone_backup_form(record):
-    """Build the registered-clone report shown after an owner searches for a clone."""
+    """Build a live snapshot of the selected registered clone.
+
+    Seller-level plan/limits come from the current seller subscription, while
+    clone-specific usage/channels are read from the clone's current data scope.
+    Telegram get_me() is used when possible so the displayed bot name/username
+    is also current instead of relying only on the registration snapshot.
+    """
     bot_id = int(record.get("bot_id") or 0)
     seller_id = int(record.get("owner_id") or record.get("seller_account_id") or 0)
+    data_scope_id = int(record.get("data_owner_id") or record.get("owner_id") or 0)
+
     seller = (await get_seller(seller_id)) if seller_id else {}
     seller = seller or {}
     platform_user = {}
@@ -928,17 +936,27 @@ async def _owner_clone_backup_form(record):
     except Exception:
         platform_user = {}
 
+    # Current seller plan and seller-wide clone count/limits.
     try:
-        plan_data = await effective_plan(seller_id)
-        plan, assignment = plan_data
+        plan, assignment = await effective_plan(seller_id)
     except Exception:
-        plan, assignment = ({"name": "Free", "bot_limit": 1, "active_subscriber_limit": 25, "channel_limit": 1, "plan_limit": 2}, {})
+        plan, assignment = ({
+            "name": "Free", "bot_limit": 1, "active_subscriber_limit": 25,
+            "channel_limit": 1, "plan_limit": 2,
+        }, {})
     try:
-        usage = await seller_usage(seller_id)
+        seller_usage_live = await seller_usage(seller_id)
     except Exception:
-        usage = {}
+        seller_usage_live = {}
+
+    # Current clone-specific data.  This is intentionally scoped by
+    # data_owner_id so one clone cannot show another clone's users/channels.
     try:
-        channels = await get_seller_channels(int(record.get("data_owner_id") or record.get("owner_id") or 0))
+        clone_stats = await seller_stats(data_scope_id) if data_scope_id else {}
+    except Exception:
+        clone_stats = {}
+    try:
+        channels = await get_seller_channels(data_scope_id) if data_scope_id else []
     except Exception:
         channels = []
 
@@ -957,24 +975,56 @@ async def _owner_clone_backup_form(record):
             value = int(value if value is not None else default)
         except Exception:
             value = default
-        return "Unlimited" if value < 0 else str(value)
+        return "Unlimited" if value < 0 else f"{value:,}"
 
-    seller_name = " ".join(str(x) for x in [seller.get("first_name"), seller.get("last_name")] if x).strip() or "Unknown"
-    seller_username = f"@{str(seller.get('username') or '').lstrip('@')}" if seller.get("username") else "Not set"
-    seller_mention = f'<a href="tg://user?id={seller_id}">{escape(seller_name)}</a>' if seller_id else escape(seller_name)
+    seller_name = " ".join(
+        str(x) for x in [seller.get("first_name"), seller.get("last_name")] if x
+    ).strip() or "Unknown"
+    seller_username = (
+        f"@{str(seller.get('username') or '').lstrip('@')}"
+        if seller.get("username") else "Not set"
+    )
+    seller_mention = (
+        f'<a href="tg://user?id={seller_id}">{escape(seller_name)}</a>'
+        if seller_id else escape(seller_name)
+    )
+
     expiry = (assignment or {}).get("expiry_date")
-    status = "Active"
-    if expiry:
+    plan_status = "Active"
+    if seller.get("suspended"):
+        plan_status = "Suspended"
+    elif expiry:
         try:
             exp = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
             if exp <= datetime.now(timezone.utc):
-                status = "Expired / Free fallback"
+                plan_status = "Expired / Free fallback"
         except Exception:
             pass
+
+    # Refresh bot identity from Telegram when the current token is valid.
+    bot_name = str(record.get("bot_name") or "Unknown")
     bot_username = str(record.get("bot_username") or "").lstrip("@")
-    bot_username_text = f"@{escape(bot_username)}" if bot_username else "Not set"
-    bot_link = f'<a href="https://t.me/{escape(bot_username)}">{bot_username_text}</a>' if bot_username else bot_username_text
     token = await get_decrypted_bot_token(bot_id) or "Unavailable"
+    if token != "Unavailable":
+        try:
+            live_me = await Bot(token=token).get_me()
+            bot_name = live_me.first_name or bot_name
+            bot_username = (live_me.username or bot_username).lstrip("@")
+        except Exception:
+            pass
+
+    bot_username_text = f"@{escape(bot_username)}" if bot_username else "Not set"
+    bot_link = (
+        f'<a href="https://t.me/{escape(bot_username)}">{bot_username_text}</a>'
+        if bot_username else bot_username_text
+    )
+
+    # The registration form's plan-limit fields are seller-wide, but the
+    # usage values below are LIVE for this selected clone.
+    clone_active_subscribers = int(clone_stats.get("active_subscribers", 0) or 0)
+    clone_channel_count = len(channels)
+    clone_plan_count = int(clone_stats.get("plans", 0) or 0)
+    clone_user_count = int(clone_stats.get("users", clone_stats.get("total_users", 0)) or 0)
 
     lines = [
         "🆕 <b>New Clone Bot Registered</b>", "",
@@ -986,29 +1036,43 @@ async def _owner_clone_backup_form(record):
         f"• Platform Joining Date: {fmt_dt(platform_user.get('joined_at') or seller.get('created_at'))}", "",
         "💎 <b>Seller Plan & Limits</b>",
         f"• Plan: {escape(str(plan.get('name') or 'Free'))}",
-        f"• Status: {escape(status)}",
+        f"• Status: {escape(plan_status)}",
         f"• Expiry: {fmt_dt(expiry) if expiry else 'No expiry'}",
-        f"• Clone Bots: {usage.get('bot_count', 0):,} / {lim(plan.get('bot_limit'), 1)}",
-        f"• Active Subscribers: {usage.get('active_subscriber_count', 0):,} / {lim(plan.get('active_subscriber_limit'), 25)}",
-        f"• Channels/Groups: {usage.get('channel_count', 0):,} / {lim(plan.get('channel_limit'), 1)}",
-        f"• Subscription Plans: {usage.get('plan_count', 0):,} / {lim(plan.get('plan_limit'), 2)}", "",
+        f"• Clone Bots: {seller_usage_live.get('bot_count', 0):,} / {lim(plan.get('bot_limit'), 1)}",
+        f"• Active Subscribers: {clone_active_subscribers:,} / {lim(plan.get('active_subscriber_limit'), 25)}",
+        f"• Channels/Groups: {clone_channel_count:,} / {lim(plan.get('channel_limit'), 1)}",
+        f"• Subscription Plans: {clone_plan_count:,} / {lim(plan.get('plan_limit'), 2)}", "",
         "🤖 <b>Clone Bot Details</b>",
-        f"• Name: {escape(str(record.get('bot_name') or 'Unknown'))}",
+        f"• Name: {escape(bot_name)}",
         f"• Username: {bot_link}",
         f"• Bot ID: <code>{bot_id}</code>", "",
         "🔑 <b>Bot Token</b>",
         f"<code>{escape(str(token))}</code>", "",
         "📢 <b>Connected Channels/Groups</b>",
     ]
+
     if channels:
         for idx, channel in enumerate(channels, 1):
-            lines.append(f"{idx}. {escape(str(channel.get('title') or 'Unnamed'))} ({escape(str(channel.get('chat_type') or 'unknown'))}) — <code>{int(channel.get('chat_id', 0))}</code>")
+            lines.append(
+                f"{idx}. {escape(str(channel.get('title') or 'Unnamed'))} "
+                f"({escape(str(channel.get('chat_type') or 'unknown'))}) — "
+                f"<code>{int(channel.get('chat_id', 0))}</code>"
+            )
     else:
         lines.append("• None connected yet")
-    lines.extend(["", f"🕒 Registered: {fmt_dt(record.get('created_at'))}", "", "Select <b>💾 Create Backup</b> below to generate this clone bot's backup file."])
+
+    lines.extend([
+        "",
+        f"🧑‍💻 Current Users: {clone_user_count:,}",
+        f"🕒 Registered: {fmt_dt(record.get('created_at'))}",
+        "",
+        "Select <b>💾 Create Backup</b> below to generate this clone bot's backup file.",
+    ])
+
     text = "\n".join(lines)
     if len(text) > 3900:
         text = text[:3850] + "\n…\n\nSelect <b>💾 Create Backup</b> below."
+
     markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("💾 Create Backup", callback_data=f"main_owner_clone_backup_create_{bot_id}")],
         [InlineKeyboardButton("🔍 Search Another Clone", callback_data="main_owner_clone_backups")],
