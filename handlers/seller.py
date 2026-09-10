@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import io
+import time
 from html import escape
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
@@ -279,17 +280,13 @@ async def _notify_owner_clone_bot_added(
             chunks.append(current)
 
         for admin_id in {int(value) for value in ADMIN_IDS}:
-            for chunk_index, chunk in enumerate(chunks):
+            for chunk in chunks:
                 try:
-                    reply_markup = None
-                    if chunk_index == 0:
-                        reply_markup = None
                     await context.bot.send_message(
                         chat_id=admin_id,
                         text=chunk,
                         parse_mode="HTML",
                         disable_web_page_preview=True,
-                        reply_markup=reply_markup,
                     )
                 except Exception:
                     logger.exception(
@@ -936,10 +933,46 @@ async def _backup_restore_command(update: Update, context: ContextTypes.DEFAULT_
     context.user_data.pop("seller_backup_raw", None)
     context.user_data.pop("seller_backup_target_bot_id", None)
     context.user_data.pop("seller_backup_waiting_file", None)
+    progress_message = await update.effective_message.reply_text(
+        "♻️ <b>Restoring Backup</b>\n\n"
+        "[░░░░░░░░░░] 0%\n\n"
+        "Processed: 0 / 0\n"
+        f"Mode: {mode.upper()}\n\n"
+        "Please wait…",
+        parse_mode="HTML",
+    )
+    progress_state = {"last": 0.0, "done": -1}
+
+    async def _restore_progress(done: int, total: int, current: str):
+        now = time.monotonic()
+        if done != total and done != 0 and now - progress_state["last"] < 0.8:
+            return
+        if done == progress_state["done"] and done != total:
+            return
+        progress_state["last"] = now
+        progress_state["done"] = done
+        percent = 100 if total <= 0 else min(100, int((done / total) * 100))
+        filled = min(10, int(round(percent / 10)))
+        bar = "█" * filled + "░" * (10 - filled)
+        try:
+            await progress_message.edit_text(
+                "♻️ <b>Restoring Backup</b>\n\n"
+                f"[{bar}] {percent}%\n\n"
+                f"Processed: {done:,} / {total:,}\n"
+                f"Mode: {mode.upper()}\n"
+                f"Current: {escape(str(current))}\n\n"
+                "Please wait…",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
     try:
-        result = await restore_clone_backup(raw, target_scope=scope_id, mode=mode)
+        result = await restore_clone_backup(
+            raw, target_scope=scope_id, mode=mode, progress_callback=_restore_progress
+        )
     except Exception as exc:
-        await update.effective_message.reply_text(f"❌ Restore failed: {exc}")
+        await progress_message.edit_text(f"❌ Restore failed: {escape(str(exc))}", parse_mode="HTML")
         return
     if mode == "merge":
         text = (
@@ -957,7 +990,7 @@ async def _backup_restore_command(update: Update, context: ContextTypes.DEFAULT_
             f"🗑️ Replaced existing records: {result['replaced']:,}\n"
             f"⚠️ Skipped: {result['skipped']:,}"
         )
-    await update.effective_message.reply_text(text, reply_markup=selected_back(bot_id))
+    await progress_message.edit_text(text, reply_markup=selected_back(bot_id))
 
 
 async def _receive_clone_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1027,11 +1060,37 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Clone bot not found.", show_alert=True)
             return
         scope_id = int(record.get("data_owner_id") or owner_id)
+        progress_state = {"last": 0.0, "done": -1}
+
+        async def _backup_progress(done: int, total: int, current: str):
+            now = time.monotonic()
+            if done != total and done != 0 and now - progress_state["last"] < 0.8:
+                return
+            if done == progress_state["done"] and done != total:
+                return
+            progress_state["last"] = now
+            progress_state["done"] = done
+            percent = 100 if total <= 0 else min(100, int((done / total) * 100))
+            filled = min(10, int(round(percent / 10)))
+            bar = "█" * filled + "░" * (10 - filled)
+            try:
+                await q.edit_message_text(
+                    "📦 <b>Creating Clone Bot Backup</b>\n\n"
+                    f"[{bar}] {percent}%\n\n"
+                    f"Backed up: {done:,} / {total:,}\n"
+                    f"Current: {escape(str(current))}\n\n"
+                    "Please wait…",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
         try:
             raw, manifest = await create_clone_backup(
                 owner_id=scope_id,
                 bot_id=bot_id,
                 bot_username=record.get("bot_username") or "",
+                progress_callback=_backup_progress,
             )
             filename = f"clone-backup-{str(record.get('bot_username') or bot_id).lstrip('@')}.json.gz"
             await context.bot.send_document(

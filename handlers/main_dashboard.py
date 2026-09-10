@@ -2,6 +2,7 @@ import os
 import asyncio
 import io
 import logging
+import time
 from html import escape
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -1254,8 +1255,39 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+
+        progress_state = {"last": 0.0, "done": -1}
+
+        async def _owner_backup_progress(done: int, total: int, current: str):
+            now = time.monotonic()
+            if done != total and done != 0 and now - progress_state["last"] < 0.8:
+                return
+            if done == progress_state["done"] and done != total:
+                return
+            progress_state["last"] = now
+            progress_state["done"] = done
+            percent = 100 if total <= 0 else min(100, int((done / total) * 100))
+            filled = min(10, int(round(percent / 10)))
+            bar = "█" * filled + "░" * (10 - filled)
+            try:
+                await query.edit_message_text(
+                    "🤖 <b>Clone Bot Backup</b>\n\n"
+                    f"[{bar}] {percent}%\n\n"
+                    f"Backed up: {done:,} / {total:,}\n"
+                    f"Current: {escape(str(current))}\n\n"
+                    "Please wait…",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
         try:
-            raw, manifest = await create_clone_backup(owner_id=scope_id, bot_id=bot_id, bot_username=record.get("bot_username") or "")
+            raw, manifest = await create_clone_backup(
+                owner_id=scope_id,
+                bot_id=bot_id,
+                bot_username=record.get("bot_username") or "",
+                progress_callback=_owner_backup_progress,
+            )
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
                 document=InputFile(io.BytesIO(raw), filename=filename),
