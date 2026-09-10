@@ -310,7 +310,15 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     await release_referral_reward(owner, p['user_id'], str(exc), payment_id=pid)
                     logger.exception('Referral reward processing failed owner=%s referred=%s payment=%s', owner, p['user_id'], pid)
             links = []
-            for ch in await get_channels(owner):
+            # Manual approval must respect the per-channel Auto Invite setting.
+            # Only chats explicitly enabled for automatic invite delivery receive
+            # a fresh invite link. The first connected chat defaults to enabled;
+            # subsequent chats default to disabled and can be enabled manually.
+            enabled_channels = [
+                ch for ch in await get_channels(owner)
+                if ch.get('auto_invite_enabled', True) is not False
+            ]
+            for ch in enabled_channels:
                 try:
                     inv = await context.bot.create_chat_invite_link(ch['chat_id'], member_limit=1)
                     await save_invite(owner, p['user_id'], ch['chat_id'], inv.invite_link)
