@@ -9,7 +9,7 @@ from telegram.error import RetryAfter, TelegramError
 
 from database.admins import is_admin, get_all_admins
 from database.payments import count_pending_payments, total_revenue
-from database.seller_bots import get_bot, get_bots, get_bot_by_bot_id, total_bots, set_bot_active, get_decrypted_bot_token
+from database.seller_bots import get_bot, get_bots, get_bot_by_bot_id, get_all_active_bots, total_bots, set_bot_active, get_decrypted_bot_token
 from database.seller_data import (
     stats as seller_stats,
     get_channels as get_seller_channels,
@@ -1002,16 +1002,13 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Owner access only.", show_alert=True)
             return
 
-        # get_bots() is seller-scoped, so collect all registered clone bots
-        # through the platform's seller records.
+        # Owner backup must read the clone registry directly. Seller profile
+        # documents are not required for a clone to be registered, and legacy
+        # records can exist without a matching seller document.
         records = []
-        for seller in await get_all_sellers():
-            seller_id = int(seller.get("owner_id") or seller.get("user_id") or 0)
-            if not seller_id:
-                continue
-            for record in await get_bots(seller_id):
-                if record.get("status") != "removed" and record.get("bot_id"):
-                    records.append(record)
+        for record in await get_all_active_bots():
+            if record.get("status") != "removed" and record.get("bot_id"):
+                records.append(record)
 
         records.sort(
             key=lambda item: (
