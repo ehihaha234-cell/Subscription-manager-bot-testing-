@@ -58,6 +58,7 @@ def owner_dashboard_keyboard():
         ],
         [InlineKeyboardButton("🌐 Official Links Settings", callback_data="official_settings")],
         [InlineKeyboardButton("🏷 Branding", callback_data="sub_mgmt_branding")],
+        [InlineKeyboardButton("🤖 Clone Bot Backup", callback_data="main_owner_clone_backups")],
         [InlineKeyboardButton("🩺 Health Monitoring", callback_data="owner_health")],
         [InlineKeyboardButton("⚡ Performance Monitor", callback_data="owner_performance")],
         [InlineKeyboardButton("📜 Terms & Policy", callback_data="owner_terms_policy")],
