@@ -769,6 +769,45 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
             context.user_data.pop("owner_message_seller_id", None)
         raise ApplicationHandlerStop
 
+    if context.user_data.get("owner_clone_backup_search"):
+        raw = (update.effective_message.text or "").strip()
+        if not raw:
+            await update.effective_message.reply_text(
+                "❌ Send a Clone Bot username, Bot ID, or bot name.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")]]),
+            )
+            raise ApplicationHandlerStop
+
+        needle = raw.lstrip("@").strip().casefold()
+        record = None
+        # Read the registry directly so every registered clone is searchable.
+        for candidate in await get_all_active_bots():
+            if candidate.get("status") == "removed" or not candidate.get("bot_id"):
+                continue
+            bot_id = str(candidate.get("bot_id") or "").strip()
+            username = str(candidate.get("bot_username") or "").lstrip("@").strip()
+            bot_name = str(candidate.get("bot_name") or "").strip()
+            if needle in {bot_id.casefold(), username.casefold(), bot_name.casefold()}:
+                record = candidate
+                break
+
+        if not record:
+            await update.effective_message.reply_text(
+                "❌ Clone Bot not found.\\n\\nSend the registered Clone Bot username, Bot ID, or exact bot name and try again.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Search Again", callback_data="main_owner_clone_backups")],
+                    [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
+                ]),
+            )
+            raise ApplicationHandlerStop
+
+        context.user_data.clear()
+        text, markup = await _owner_clone_backup_form(record)
+        await update.effective_message.reply_text(
+            text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
+        )
+        raise ApplicationHandlerStop
+
     if context.user_data.get("owner_seller_search"):
         raw=(update.effective_message.text or "").strip()
         seller=await find_seller_by_identifier(raw)
@@ -874,6 +913,108 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
         context.user_data.pop("owner_broadcast_target",None)
     raise ApplicationHandlerStop
 
+
+
+async def _owner_clone_backup_form(record):
+    """Build the registered-clone report shown after an owner searches for a clone."""
+    bot_id = int(record.get("bot_id") or 0)
+    seller_id = int(record.get("owner_id") or record.get("seller_account_id") or 0)
+    seller = (await get_seller(seller_id)) if seller_id else {}
+    seller = seller or {}
+    platform_user = {}
+    try:
+        from database.users import get_platform_user
+        platform_user = (await get_platform_user(seller_id)) or {}
+    except Exception:
+        platform_user = {}
+
+    try:
+        plan_data = await effective_plan(seller_id)
+        plan, assignment = plan_data
+    except Exception:
+        plan, assignment = ({"name": "Free", "bot_limit": 1, "active_subscriber_limit": 25, "channel_limit": 1, "plan_limit": 2}, {})
+    try:
+        usage = await seller_usage(seller_id)
+    except Exception:
+        usage = {}
+    try:
+        channels = await get_seller_channels(int(record.get("data_owner_id") or record.get("owner_id") or 0))
+    except Exception:
+        channels = []
+
+    def fmt_dt(value):
+        if not value:
+            return "-"
+        try:
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M %p IST")
+        except Exception:
+            return str(value)
+
+    def lim(value, default):
+        try:
+            value = int(value if value is not None else default)
+        except Exception:
+            value = default
+        return "Unlimited" if value < 0 else str(value)
+
+    seller_name = " ".join(str(x) for x in [seller.get("first_name"), seller.get("last_name")] if x).strip() or "Unknown"
+    seller_username = f"@{str(seller.get('username') or '').lstrip('@')}" if seller.get("username") else "Not set"
+    seller_mention = f'<a href="tg://user?id={seller_id}">{escape(seller_name)}</a>' if seller_id else escape(seller_name)
+    expiry = (assignment or {}).get("expiry_date")
+    status = "Active"
+    if expiry:
+        try:
+            exp = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
+            if exp <= datetime.now(timezone.utc):
+                status = "Expired / Free fallback"
+        except Exception:
+            pass
+    bot_username = str(record.get("bot_username") or "").lstrip("@")
+    bot_username_text = f"@{escape(bot_username)}" if bot_username else "Not set"
+    bot_link = f'<a href="https://t.me/{escape(bot_username)}">{bot_username_text}</a>' if bot_username else bot_username_text
+    token = await get_decrypted_bot_token(bot_id) or "Unavailable"
+
+    lines = [
+        "🆕 <b>New Clone Bot Registered</b>", "",
+        "👤 <b>Seller Details</b>",
+        f"• Name: {escape(seller_name)}",
+        f"• Mention: {seller_mention}",
+        f"• Username: {escape(seller_username)}",
+        f"• Seller ID: <code>{seller_id}</code>",
+        f"• Platform Joining Date: {fmt_dt(platform_user.get('joined_at') or seller.get('created_at'))}", "",
+        "💎 <b>Seller Plan & Limits</b>",
+        f"• Plan: {escape(str(plan.get('name') or 'Free'))}",
+        f"• Status: {escape(status)}",
+        f"• Expiry: {fmt_dt(expiry) if expiry else 'No expiry'}",
+        f"• Clone Bots: {usage.get('bot_count', 0):,} / {lim(plan.get('bot_limit'), 1)}",
+        f"• Active Subscribers: {usage.get('active_subscriber_count', 0):,} / {lim(plan.get('active_subscriber_limit'), 25)}",
+        f"• Channels/Groups: {usage.get('channel_count', 0):,} / {lim(plan.get('channel_limit'), 1)}",
+        f"• Subscription Plans: {usage.get('plan_count', 0):,} / {lim(plan.get('plan_limit'), 2)}", "",
+        "🤖 <b>Clone Bot Details</b>",
+        f"• Name: {escape(str(record.get('bot_name') or 'Unknown'))}",
+        f"• Username: {bot_link}",
+        f"• Bot ID: <code>{bot_id}</code>", "",
+        "🔑 <b>Bot Token</b>",
+        f"<code>{escape(str(token))}</code>", "",
+        "📢 <b>Connected Channels/Groups</b>",
+    ]
+    if channels:
+        for idx, channel in enumerate(channels, 1):
+            lines.append(f"{idx}. {escape(str(channel.get('title') or 'Unnamed'))} ({escape(str(channel.get('chat_type') or 'unknown'))}) — <code>{int(channel.get('chat_id', 0))}</code>")
+    else:
+        lines.append("• None connected yet")
+    lines.extend(["", f"🕒 Registered: {fmt_dt(record.get('created_at'))}", "", "Select <b>💾 Create Backup</b> below to generate this clone bot's backup file."])
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3850] + "\n…\n\nSelect <b>💾 Create Backup</b> below."
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💾 Create Backup", callback_data=f"main_owner_clone_backup_create_{bot_id}")],
+        [InlineKeyboardButton("🔍 Search Another Clone", callback_data="main_owner_clone_backups")],
+        [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
+    ])
+    return text, markup
 
 async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1002,53 +1143,16 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_admin(user_id):
             await query.answer("Owner access only.", show_alert=True)
             return
-
-        # Owner backup must read the clone registry directly. Seller profile
-        # documents are not required for a clone to be registered, and legacy
-        # records can exist without a matching seller document.
-        records = []
-        for record in await get_all_active_bots():
-            if record.get("status") != "removed" and record.get("bot_id"):
-                records.append(record)
-
-        records.sort(
-            key=lambda item: (
-                str(item.get("bot_username") or "").lower(),
-                int(item.get("bot_id") or 0),
-            )
+        context.user_data.clear()
+        context.user_data["owner_clone_backup_search"] = True
+        await query.edit_message_text(
+            "🤖 <b>Clone Bot Backup</b>\n\n"
+            "Search for the registered Clone Bot you want to back up.\n\n"
+            "Send the Clone Bot <b>username</b>, <b>Bot ID</b>, or <b>bot name</b>.\n\n"
+            "Example: <code>@MyCloneBot</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")]]),
         )
-
-        rows = []
-        for record in records[:80]:
-            bot_id = int(record.get("bot_id") or 0)
-            username = str(record.get("bot_username") or "").lstrip("@")
-            title = str(record.get("bot_name") or "").strip() or (
-                f"@{username}" if username else str(bot_id)
-            )
-            if username and title != f"@{username}":
-                label = f"🤖 {title[:24]} (@{username[:20]})"
-            else:
-                label = f"🤖 {title[:48]}"
-            rows.append([
-                InlineKeyboardButton(
-                    label,
-                    callback_data=f"main_owner_clone_backup_{bot_id}",
-                )
-            ])
-
-        rows.append([InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")])
-        if not records:
-            text = "🤖 Clone Bot Backup\n\nNo clone bots are registered yet."
-        else:
-            extra = "" if len(records) <= 80 else f"\n\nShowing first 80 of {len(records)} clone bots."
-            text = (
-                "🤖 Clone Bot Backup\n\n"
-                "Select a clone bot to create its backup file.\n\n"
-                "The backup contains that clone bot's data only and can be restored "
-                "through the existing Backup & Restore → Restore option."
-                + extra
-            )
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if action.startswith("main_owner_clone_backup_"):
@@ -1056,7 +1160,8 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Owner access only.", show_alert=True)
             return
         try:
-            bot_id = int(action.replace("main_owner_clone_backup_", ""))
+            raw_bot_id = action.replace("main_owner_clone_backup_create_", "", 1) if action.startswith("main_owner_clone_backup_create_") else action.replace("main_owner_clone_backup_", "", 1)
+            bot_id = int(raw_bot_id)
         except ValueError:
             await query.answer("Invalid clone bot.", show_alert=True)
             return
@@ -1066,11 +1171,19 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Clone bot not found.", show_alert=True)
             return
 
+        # Directly show the registered-clone report after a clone is selected/search-matched.
+        if action.startswith("main_owner_clone_backup_") and not action.startswith("main_owner_clone_backup_create_"):
+            text, markup = await _owner_clone_backup_form(record)
+            await query.edit_message_text(
+                text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
+            )
+            return
+
+        # Second step: create the backup only after explicit confirmation.
         scope_id = int(record.get("data_owner_id") or record.get("owner_id") or 0)
         if not scope_id:
             await query.answer("Clone bot data scope is unavailable.", show_alert=True)
             return
-
         username = str(record.get("bot_username") or bot_id).lstrip("@")
         filename = f"clone-backup-{username}.json.gz"
         try:
@@ -1078,11 +1191,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         try:
-            raw, manifest = await create_clone_backup(
-                owner_id=scope_id,
-                bot_id=bot_id,
-                bot_username=record.get("bot_username") or "",
-            )
+            raw, manifest = await create_clone_backup(owner_id=scope_id, bot_id=bot_id, bot_username=record.get("bot_username") or "")
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
                 document=InputFile(io.BytesIO(raw), filename=filename),
@@ -1091,8 +1200,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🤖 Clone Bot: @{username}\n"
                     f"📦 Records: {manifest['records']:,}\n"
                     f"🔐 SHA-256: {manifest['sha256'][:16]}…\n\n"
-                    "You can upload this file in the target clone's "
-                    "Backup & Restore → Restore option."
+                    "You can upload this file in the target clone's Backup & Restore → Restore option."
                 ),
             )
             await query.answer("Backup created successfully ✅")
@@ -1100,10 +1208,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception("Owner clone backup failed bot_id=%s", bot_id)
             await query.answer("Backup failed. See the message for details.", show_alert=True)
             try:
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=f"❌ Clone bot backup failed.\n\nError: {str(exc)[:500]}",
-                )
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Clone bot backup failed.\n\nError: {str(exc)[:500]}")
             except Exception:
                 pass
         return
