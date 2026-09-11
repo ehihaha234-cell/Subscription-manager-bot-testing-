@@ -2,6 +2,7 @@ import os
 import asyncio
 import io
 import logging
+import re
 import time
 from html import escape
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
@@ -781,16 +782,80 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
 
         needle = raw.lstrip("@").strip().casefold()
         record = None
-        # Read the registry directly so every registered clone is searchable.
-        for candidate in await get_all_active_bots():
-            if candidate.get("status") == "removed" or not candidate.get("bot_id"):
-                continue
-            bot_id = str(candidate.get("bot_id") or "").strip()
-            username = str(candidate.get("bot_username") or "").lstrip("@").strip()
-            bot_name = str(candidate.get("bot_name") or "").strip()
-            if needle in {bot_id.casefold(), username.casefold(), bot_name.casefold()}:
-                record = candidate
-                break
+        db = get_database()
+
+        # First try direct indexed-style lookups.  This handles numeric Bot IDs
+        # reliably and does not depend on the clone being active.
+        try:
+            if needle.isdigit():
+                numeric_id = int(needle)
+                record = await db["seller_bots"].find_one({"bot_id": numeric_id})
+        except Exception:
+            record = None
+
+        if not record:
+            # Username/name lookup is case-insensitive through the normalized
+            # username field and exact stored name.
+            try:
+                record = await db["seller_bots"].find_one({
+                    "$or": [
+                        {"bot_username_normalized": needle},
+                        {"bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+                        {"bot_name": {"$regex": f"^{re.escape(raw.strip())}$", "$options": "i"}},
+                    ]
+                })
+            except Exception:
+                record = None
+
+        # Final fallback: search every non-system collection for a document
+        # carrying the Bot ID/username/name.  This is important for old/deleted
+        # clones when the seller_bots registry entry was removed but the clone's
+        # database scope is still preserved.  If a matching data document is
+        # found, recover its owner/data_owner scope and build a backup record.
+        if not record:
+            try:
+                collection_names = [
+                    name for name in await db.list_collection_names()
+                    if not name.startswith("system.")
+                ]
+                numeric_id = int(needle) if needle.isdigit() else None
+                for name in collection_names:
+                    if name == "seller_bots":
+                        continue
+                    query_parts = []
+                    if numeric_id is not None:
+                        query_parts.extend([
+                            {"bot_id": numeric_id},
+                            {"bot_id": str(numeric_id)},
+                        ])
+                    query_parts.extend([
+                        {"bot_username_normalized": needle},
+                        {"bot_username": {"$regex": f"^{re.escape(needle)}$", "$options": "i"}},
+                        {"bot_name": {"$regex": f"^{re.escape(raw.strip())}$", "$options": "i"}},
+                    ])
+                    if not query_parts:
+                        continue
+                    candidate = await db[name].find_one({"$or": query_parts})
+                    if not candidate:
+                        continue
+                    candidate_bot_id = candidate.get("bot_id") or numeric_id
+                    scope = candidate.get("data_owner_id") or candidate.get("owner_id")
+                    if candidate_bot_id and scope:
+                        record = {
+                            "bot_id": int(candidate_bot_id),
+                            "bot_name": candidate.get("bot_name") or raw.strip(),
+                            "bot_username": candidate.get("bot_username") or (raw.lstrip("@").strip() if not needle.isdigit() else ""),
+                            "owner_id": int(candidate.get("owner_id") or candidate.get("seller_account_id") or scope),
+                            "seller_account_id": int(candidate.get("seller_account_id") or candidate.get("owner_id") or scope),
+                            "data_owner_id": int(scope),
+                            "created_at": candidate.get("created_at"),
+                            "active": bool(candidate.get("active", False)),
+                            "status": candidate.get("status") or "removed",
+                            "_recovered_from_collection": name,
+                        }
+                        break
+            except Exception:
+                logger.exception("Owner clone backup database-wide search failed for %s", raw)
 
         if not record:
             await update.effective_message.reply_text(
@@ -1038,6 +1103,7 @@ async def _owner_clone_backup_form(record):
         "💎 <b>Seller Plan & Limits</b>",
         f"• Plan: {escape(str(plan.get('name') or 'Free'))}",
         f"• Status: {escape(plan_status)}",
+        f"• Clone Bot Status: {'Deleted / Disconnected' if str(record.get('status') or '').lower() == 'removed' else 'Connected'}",
         f"• Expiry: {fmt_dt(expiry) if expiry else 'No expiry'}",
         f"• Clone Bots: {seller_usage_live.get('bot_count', 0):,} / {lim(plan.get('bot_limit'), 1)}",
         f"• Active Subscribers: {clone_active_subscribers:,} / {lim(plan.get('active_subscriber_limit'), 25)}",
@@ -1232,11 +1298,12 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         record = await get_bot_by_bot_id(bot_id)
-        if not record or record.get("status") == "removed":
+        if not record:
             await query.answer("Clone bot not found.", show_alert=True)
             return
 
         # Directly show the registered-clone report after a clone is selected/search-matched.
+        # This also works for soft-deleted clones whose registry/data scope was preserved.
         if action.startswith("main_owner_clone_backup_") and not action.startswith("main_owner_clone_backup_create_"):
             text, markup = await _owner_clone_backup_form(record)
             await query.edit_message_text(
