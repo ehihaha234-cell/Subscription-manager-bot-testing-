@@ -60,7 +60,7 @@ class SellerBotManager(
     def __init__(self):
         self._running: Dict[int, RunningSellerBot] = {}
         self._bot_locks: Dict[int, asyncio.Lock] = {}
-        self._restore_semaphore = asyncio.Semaphore(3)
+        self._restore_semaphore = asyncio.Semaphore(10)
         self._watchdog_lock = asyncio.Lock()
         self._recovery_attempts: Dict[int, int] = {}
         self._recovery_totals: Dict[int, int] = {}
