@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from telegram import Bot
 from telethon import Button, TelegramClient, events, utils
+from telethon.errors import FloodWaitError, RPCError
 from telethon.tl import types
 from telethon.sessions import StringSession
 
