@@ -3,13 +3,6 @@
 from handlers.common.clone_context import *
 
 
-def _actor_name(user):
-    return " ".join(
-        value for value in [getattr(user, "first_name", None), getattr(user, "last_name", None)]
-        if value
-    ).strip() or (f"@{user.username}" if getattr(user, "username", None) else "Unknown")
-
-
 async def _clone_qr_file_id(context, owner: int) -> str:
     bot_id = int(context.application.bot_data.get("seller_bot_id") or 0)
     qr = await get_bot_payment_qr(bot_id) if bot_id else ""
@@ -21,32 +14,16 @@ async def _clone_qr_file_id(context, owner: int) -> str:
     return str(settings.get("upi_qr_file_id") or "")
 
 async def _update_payment_notification_messages(context, owner, payment_id, caption, current_message=None):
-    """Reliably replace every pending-payment notification with its final status."""
+    """Edit every pending-payment notification for this payment."""
     refs = list(await get_payment_notification_messages(owner, payment_id) or [])
-
-    # The callback message is the most important one. Edit the Message object
-    # directly first; this works even for older payments whose DB notification
-    # references were never stored.
+    # Always include the message whose Approve/Reject button was pressed. This
+    # also repairs legacy payments whose reference was not stored.
     if current_message is not None:
         try:
-            await current_message.edit_caption(caption=caption, reply_markup=None)
             refs.append({
                 "chat_id": int(current_message.chat_id),
                 "message_id": int(current_message.message_id),
             })
-        except TelegramError as exc:
-            logger.warning(
-                "Direct payment notification edit failed owner=%s payment=%s: %s",
-                owner, payment_id, exc,
-            )
-            try:
-                await current_message.edit_text(text=caption, reply_markup=None)
-                refs.append({
-                    "chat_id": int(current_message.chat_id),
-                    "message_id": int(current_message.message_id),
-                })
-            except TelegramError:
-                pass
         except (TypeError, ValueError, AttributeError):
             pass
 
@@ -62,25 +39,22 @@ async def _update_payment_notification_messages(context, owner, payment_id, capt
         if key in seen:
             continue
         seen.add(key)
-
-        # The current callback message may already have been edited above.
-        # Telegram will reject a second identical edit; skip it quietly.
-        if current_message is not None and key == (int(current_message.chat_id), int(current_message.message_id)):
-            updated += 1
-            continue
-
         try:
             await context.bot.edit_message_caption(
-                chat_id=chat_id, message_id=message_id,
-                caption=caption, reply_markup=None,
+                chat_id=chat_id,
+                message_id=message_id,
+                caption=caption,
+                reply_markup=None,
             )
             updated += 1
-            continue
         except TelegramError as exc:
+            # Legacy/text notifications are handled as a fallback.
             try:
                 await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=message_id,
-                    text=caption, reply_markup=None,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=caption,
+                    reply_markup=None,
                 )
                 updated += 1
                 continue
@@ -89,7 +63,6 @@ async def _update_payment_notification_messages(context, owner, payment_id, capt
                     "Could not update payment notification owner=%s payment=%s chat=%s message=%s: %s",
                     owner, payment_id, chat_id, message_id, exc,
                 )
-
     logger.info(
         "Payment notification status update owner=%s payment=%s updated=%s total_refs=%s",
         owner, payment_id, updated, len(seen),
@@ -233,39 +206,17 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer(f'Already {current_status}', show_alert=True)
             return True
         if not approve:
-            changed = await set_payment_status(owner, pid, 'rejected', q.from_user.id, _actor_name(q.from_user))
+            changed = await set_payment_status(owner, pid, 'rejected', owner)
             if not changed:
                 await q.answer('Payment is already being processed', show_alert=True)
                 return True
-            p = await get_payment(owner, pid) or p
-            rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=q.from_user.id)
-            # The decision is already committed. Update the staff message first
-            # so the callback feels immediate; user notification follows.
+            await context.bot.send_message(p['user_id'], '❌ Payment rejected')
+            rejected_caption = await self.payment_details_caption(owner, p, status='rejected', processed_by=owner)
             await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), rejected_caption, current_message=q.message
             )
-            try:
-                await context.bot.send_message(p['user_id'], '❌ Payment rejected')
-            except Exception:
-                logger.exception('Rejected-payment user notification failed owner=%s payment=%s', owner, pid)
             return True
         claimed = await claim_payment_for_processing(owner, pid, owner)
-        if claimed:
-            # Remove the buttons and immediately acknowledge the callback in the
-            # staff chat while the existing fulfillment flow continues unchanged.
-            try:
-                processing_caption = await self.payment_details_caption(
-                    owner, p, status='pending'
-                )
-                await q.edit_message_caption(
-                    caption=processing_caption + '\n\n⏳ Approval is being processed...',
-                    reply_markup=None,
-                )
-            except Exception:
-                logger.debug(
-                    'Could not show payment processing state owner=%s payment=%s',
-                    owner, pid, exc_info=True,
-                )
         if not claimed:
             latest = await get_payment(owner, pid)
             latest_status = (latest or {}).get('status', 'unknown')
@@ -310,27 +261,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     await release_referral_reward(owner, p['user_id'], str(exc), payment_id=pid)
                     logger.exception('Referral reward processing failed owner=%s referred=%s payment=%s', owner, p['user_id'], pid)
             links = []
-            # Manual approval must respect the per-channel Auto Invite setting.
-            # Only chats explicitly enabled for automatic invite delivery receive
-            # a fresh invite link. The first connected chat defaults to enabled;
-            # subsequent chats default to disabled and can be enabled manually.
-            enabled_channels = [
-                ch for ch in await get_channels(owner)
-                if ch.get('auto_invite_enabled', True) is not False
-            ]
-            for ch in enabled_channels:
+            for ch in await get_channels(owner):
                 try:
                     inv = await context.bot.create_chat_invite_link(ch['chat_id'], member_limit=1)
                     await save_invite(owner, p['user_id'], ch['chat_id'], inv.invite_link)
                     links.append(f"{ch.get('title')}: {inv.invite_link}")
                 except Exception as exc:
                     links.append(f"{ch.get('title')}: invite failed ({exc})")
-            finalized = await finalize_processed_payment(owner, pid, 'approved', q.from_user.id, _actor_name(q.from_user))
+            finalized = await finalize_processed_payment(owner, pid, 'approved', owner)
             if not finalized:
                 raise RuntimeError('Could not finalize payment status')
-            # Reload after finalization so the user-facing audit details use
-            # the actual approval timestamp written to MongoDB.
-            p = await get_payment(owner, pid) or p
             expiry_text = self.format_dt(expiry)
             invoice = await create_invoice(owner, p['user_id'], p, (await get_seller_settings(owner)).get('bot_name', 'Seller'))
             await audit('child_payment_approved', owner, owner, {'payment_id': pid, 'invoice_no': invoice['invoice_no']})
@@ -338,48 +278,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 status_text = f'ℹ️ Your subscription was already active.\nYour new payment has been added to your existing subscription.\n\n📅 Previous Expiry: {self.format_dt(previous_expiry)}\n📅 New Expiry: {expiry_text}\n\n🔗 A fresh private invite link has been generated for you.'
             else:
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
-            # Keep the existing approval/fulfillment flow unchanged. Only enrich
-            # the user-facing manual approval message with payment audit details.
-            approved_user = await get_user(owner, int(p['user_id'])) or {}
-            approved_name = " ".join(
-                value for value in [
-                    approved_user.get("first_name"),
-                    approved_user.get("last_name"),
-                ] if value
-            ).strip() or "Unknown"
-            approved_username = (
-                f"@{approved_user.get('username')}"
-                if approved_user.get("username")
-                else "Not set"
-            )
-            submitted_text = self.format_dt(p.get("created_at"))
-            approved_at_text = self.format_dt(
-                p.get("approved_at") or p.get("processed_at")
-            )
-
-            await context.bot.send_message(
-                p['user_id'],
-                f"✅ Payment approved manually\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📦 Purchased Plan: {p['plan']}\n"
-                f"💰 Amount: ₹{float(p.get('amount') or 0):g}\n"
-                f"🧾 Payment ID: {pid}\n"
-                f"⌛ Added Duration: {p.get('duration_text') or '-'}\n"
-                f"🧾 Receipt/Invoice: {invoice['invoice_no']}\n"
-                f"\n"
-                f"👤 User ID: {p.get('user_id')}\n"
-                f"👤 User: {approved_name}\n"
-                f"🔗 Username: {approved_username}\n"
-                f"📅 Submitted: {submitted_text}\n"
-                f"✅ Approved At: {approved_at_text}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"\n{status_text}\n"
-                f"\nJoin using your private invite link(s):\n\n"
-                + '\n\n'.join(links),
-                disable_web_page_preview=True,
-            )
-            p = await get_payment(owner, pid) or p
-            approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=q.from_user.id)
+            await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
+            approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
             await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), approved_caption, current_message=q.message
             )
