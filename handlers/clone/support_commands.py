@@ -1,6 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+import re
 
 
 class CloneSupportCommandsMixin:
@@ -10,6 +11,61 @@ class CloneSupportCommandsMixin:
             return
         owner=self.owner(context); support=await get_live_support_settings(owner)
         command=message.text.split()[0].split("@",1)[0].lstrip("/").lower()
+
+        # /details is a Live Support topic command, not a configurable
+        # template command.  It must work even for older support topics whose
+        # MongoDB topic mapping was created before the current mapping fields
+        # were introduced.
+        if command == "details":
+            if (
+                support.get("enabled")
+                and support.get("mode") == "topic"
+                and support.get("support_group_id")
+                and int(chat.id) == int(support["support_group_id"])
+                and message.message_thread_id
+            ):
+                topic = await get_topic_by_thread(owner, chat.id, message.message_thread_id)
+                target_user_id = int(topic["user_id"]) if topic and topic.get("user_id") else None
+
+                # Legacy/fallback: support topic names are created as
+                # "👤 <name> | <telegram_user_id>".  Recover the user ID from
+                # the thread's first/title message when the DB mapping is
+                # missing.  The ID is validated against the seller's user
+                # record before showing any details.
+                if not target_user_id:
+                    try:
+                        candidates = []
+                        for candidate in (
+                            getattr(message, "reply_to_message", None),
+                            getattr(message, "forum_topic_created", None),
+                        ):
+                            if candidate:
+                                candidates.append(getattr(candidate, "name", "") or getattr(candidate, "text", ""))
+                        for value in candidates:
+                            match = re.search(r"(?:\||\b)(\d{5,15})\s*$", str(value or ""))
+                            if match:
+                                candidate_id = int(match.group(1))
+                                if await get_user(owner, candidate_id):
+                                    target_user_id = candidate_id
+                                    break
+                    except Exception:
+                        logger.exception("Legacy support /details topic resolution failed owner=%s thread=%s", owner, message.message_thread_id)
+
+                if target_user_id:
+                    text = await self.support_user_details_text(owner, target_user_id)
+                    await message.reply_text(
+                        text,
+                        parse_mode="HTML",
+                        reply_markup=self.support_topic_keyboard(
+                            target_user_id,
+                            bool(await is_support_blocked(owner, target_user_id)),
+                        ),
+                        disable_web_page_preview=True,
+                    )
+                    raise ApplicationHandlerStop
+            # Never treat /details as a normal configurable support template.
+            return
+
         template=await get_support_template(owner,command)
         if not template or template.get("enabled", True) is False:
             return
