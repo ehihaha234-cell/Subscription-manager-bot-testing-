@@ -32,6 +32,8 @@ from database.business_automation import (
 )
 from database.seller_data import (
     claim_business_welcome,
+    active_subscriptions,
+    get_user as get_seller_user,
     get_business_accounts,
     get_seller_settings,
     increment_business_account_stat,
@@ -314,6 +316,128 @@ class BusinessAutomationRuntime:
             return [int(getattr(message, "id", 0) or 0)] if int(getattr(message, "id", 0) or 0) > 0 else []
         message = await client.send_message(peer_id, rendered_text or "Welcome!", buttons=buttons)
         return [int(getattr(message, "id", 0) or 0)] if int(getattr(message, "id", 0) or 0) > 0 else []
+
+    def is_account_connected(self, owner_id: int, account_user_id: int) -> bool:
+        client = self._clients.get((int(owner_id), int(account_user_id)))
+        return bool(client and client.is_connected())
+
+    async def _get_running_client(self, owner_id: int, account_user_id: int):
+        key = (int(owner_id), int(account_user_id))
+        client = self._clients.get(key)
+        if not client or not client.is_connected():
+            started = await self.start_account(int(owner_id), int(account_user_id))
+            client = self._clients.get(key) if started else None
+        return client if client and client.is_connected() else None
+
+    async def _invite_link(self, owner_id: int) -> str:
+        bot_record = await get_bot_by_data_owner_id(int(owner_id))
+        username = str((bot_record or {}).get("bot_username") or "").lstrip("@").strip()
+        if not username:
+            return ""
+        return f"https://t.me/{username}?start=migration"
+
+    async def broadcast_invite(self, owner_id: int, account_user_id: int) -> dict:
+        """Send the clone-bot migration link to private users already present in the connected account's dialogs.
+
+        Telegram may refuse some recipients (privacy, deleted/bot accounts, flood limits, etc.).
+        Those recipients are skipped so one failure cannot stop the campaign.
+        """
+        client = await self._get_running_client(owner_id, account_user_id)
+        if client is None:
+            return {"ok": False, "reason": "not_connected", "sent": 0, "failed": 0, "total": 0}
+        link = await self._invite_link(owner_id)
+        if not link:
+            return {"ok": False, "reason": "bot_link_missing", "sent": 0, "failed": 0, "total": 0}
+
+        text = (
+            "🔗 Bot Migration Update\n\n"
+            "Please use the link below to open the new bot and continue your active subscription.\n\n"
+            f"{link}"
+        )
+        sent = failed = total = 0
+        try:
+            me = await client.get_me()
+            my_id = int(getattr(me, "id", 0) or 0)
+            async for dialog in client.iter_dialogs():
+                if not getattr(dialog, "is_user", False):
+                    continue
+                user = dialog.entity
+                if not user or getattr(user, "bot", False) or getattr(user, "deleted", False):
+                    continue
+                peer_id = int(getattr(user, "id", 0) or 0)
+                if not peer_id or peer_id == my_id:
+                    continue
+                total += 1
+                try:
+                    await client.send_message(user, text, link_preview=False)
+                    sent += 1
+                    await asyncio.sleep(1.2)
+                except FloodWaitError as exc:
+                    logger.warning("Business invite broadcast flood wait owner=%s account=%s seconds=%s", owner_id, account_user_id, exc.seconds)
+                    break
+                except (RPCError, ValueError, TypeError):
+                    failed += 1
+                except Exception:
+                    failed += 1
+                    logger.exception("Business invite broadcast recipient failed owner=%s account=%s user=%s", owner_id, account_user_id, peer_id)
+        except Exception:
+            logger.exception("Business invite broadcast failed owner=%s account=%s", owner_id, account_user_id)
+            return {"ok": False, "reason": "runtime_error", "sent": sent, "failed": failed, "total": total}
+        return {"ok": True, "sent": sent, "failed": failed, "total": total}
+
+    async def resend_invite_to_active_subscribers(self, owner_id: int, account_user_id: int) -> dict:
+        """Attempt migration-link delivery to every currently active seller subscription.
+
+        Existing chats are not required. Telegram entity resolution still has to succeed;
+        if an ID/username is unavailable to the connected account, that recipient is skipped.
+        """
+        client = await self._get_running_client(owner_id, account_user_id)
+        if client is None:
+            return {"ok": False, "reason": "not_connected", "sent": 0, "failed": 0, "total": 0, "skipped": 0}
+        link = await self._invite_link(owner_id)
+        if not link:
+            return {"ok": False, "reason": "bot_link_missing", "sent": 0, "failed": 0, "total": 0, "skipped": 0}
+        subscriptions = await active_subscriptions(int(owner_id), limit=None)
+        text = (
+            "🔗 Your Active Subscription Has Moved\n\n"
+            "Please open the new bot using the link below to continue your active subscription.\n\n"
+            f"{link}"
+        )
+        sent = failed = skipped = 0
+        total = len(subscriptions)
+        for subscription in subscriptions:
+            user_id = int(subscription.get("user_id") or 0)
+            if not user_id:
+                skipped += 1
+                continue
+            entity = None
+            try:
+                entity = await client.get_input_entity(user_id)
+            except Exception:
+                try:
+                    seller_user = await get_seller_user(int(owner_id), user_id)
+                    username = str((seller_user or {}).get("username") or "").lstrip("@").strip()
+                    if username:
+                        entity = await client.get_input_entity(username)
+                except Exception:
+                    entity = None
+            if entity is None:
+                skipped += 1
+                continue
+            try:
+                await client.send_message(entity, text, link_preview=False)
+                sent += 1
+                await asyncio.sleep(1.2)
+            except FloodWaitError as exc:
+                logger.warning("Active-subscriber invite flood wait owner=%s account=%s seconds=%s", owner_id, account_user_id, exc.seconds)
+                failed += max(0, total - sent - failed - skipped)
+                break
+            except (RPCError, ValueError, TypeError):
+                failed += 1
+            except Exception:
+                failed += 1
+                logger.exception("Active-subscriber invite failed owner=%s account=%s user=%s", owner_id, account_user_id, user_id)
+        return {"ok": True, "sent": sent, "failed": failed, "total": total, "skipped": skipped}
 
     async def send_text_to_contact(
         self, owner_id: int, account_user_id: int, peer_id: int, text: str
