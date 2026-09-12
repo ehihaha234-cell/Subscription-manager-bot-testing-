@@ -377,7 +377,6 @@ def _home_keyboard(enabled: bool):
             InlineKeyboardButton("💬 Auto Reply", callback_data="ba_auto"),
             InlineKeyboardButton("📝 Reply Templates", callback_data="ba_templates"),
         ],
-        [InlineKeyboardButton("📢 Broadcast / Send Invite Link", callback_data="ba_broadcast")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="ba_settings")],
         [InlineKeyboardButton("📊 Statistics", callback_data="ba_stats")],
         [InlineKeyboardButton("⬅ Admin Panel", callback_data="a_home")],
@@ -401,49 +400,6 @@ async def _home(owner: int):
         "After connecting, you can configure and control Welcome Message, Auto Reply, and Reply Templates from here. You can also manage Settings and view Statistics."
     )
     return text, _home_keyboard(enabled)
-
-
-def _broadcast_keyboard(accounts: list[dict]):
-    rows = []
-    if not accounts:
-        rows.append([InlineKeyboardButton("👤 Connect MTProto Account", callback_data="ba_connect_normal")])
-    elif len(accounts) == 1:
-        account = accounts[0]
-        account_id = int(account.get("account_user_id") or 0)
-        rows.extend([
-            [InlineKeyboardButton("📢 Broadcast / Send Invite Link", callback_data=f"ba_broadcast_run_{account_id}")],
-            [InlineKeyboardButton("🔗 Resend Invite Links to Active Subscribers", callback_data=f"ba_resend_active_run_{account_id}")],
-        ])
-    else:
-        rows.append([InlineKeyboardButton("📢 Broadcast / Send Invite Link", callback_data="ba_broadcast_select")])
-        rows.append([InlineKeyboardButton("🔗 Resend Invite Links to Active Subscribers", callback_data="ba_resend_active_select")])
-    rows.extend([
-        [InlineKeyboardButton("🔄 Refresh Account Status", callback_data="ba_broadcast")],
-        [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
-    ])
-    return _kb(rows)
-
-
-def _broadcast_text(accounts: list[dict]) -> str:
-    if not accounts:
-        status = "🔴 Not Connected"
-        account_line = "Account: None"
-    else:
-        status = "🟢 Connected"
-        names = []
-        for account in accounts:
-            username = str(account.get("username") or "").strip()
-            first_name = str(account.get("first_name") or "").strip()
-            account_id = int(account.get("account_user_id") or 0)
-            label = f"@{username.lstrip('@')}" if username else (first_name or str(account_id))
-            names.append(label)
-        account_line = "Account: " + ", ".join(names)
-    return (
-        "📢 Broadcast / Send Invite Link\n\n"
-        f"MTProto Account: {status}\n"
-        f"{account_line}\n\n"
-        "Use the options below to send the new bot invite link through the connected Telegram account."
-    )
 
 
 async def _editor_state(owner: int) -> tuple[dict, dict, list[dict]]:
@@ -681,86 +637,21 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     if action == "ba_home":
         text, markup = await _home(owner); await q.edit_message_text(text, reply_markup=markup); return True
 
-    if action == "ba_broadcast":
-        accounts = await get_business_accounts(owner, active_only=True)
-        await q.edit_message_text(_broadcast_text(accounts), reply_markup=_broadcast_keyboard(accounts))
+    # Broadcast / Invite Link inside Business Automation has been removed.
+    # Redirect stale callbacks from older messages back to the Business Automation home.
+    if (
+        action == "ba_broadcast"
+        or action in {"ba_broadcast_select", "ba_resend_active_select"}
+        or action.startswith("ba_broadcast_run_")
+        or action.startswith("ba_resend_active_run_")
+    ):
+        await q.answer("Broadcast / Invite Link is no longer available in Business Automation.", show_alert=True)
+        text, markup = await _home(owner)
+        await q.edit_message_text(text, reply_markup=markup)
         return True
 
-    if action in {"ba_broadcast_select", "ba_resend_active_select"}:
-        accounts = await get_business_accounts(owner, active_only=True)
-        if not accounts:
-            await q.edit_message_text(
-                _broadcast_text(accounts),
-                reply_markup=_broadcast_keyboard(accounts),
-            )
-            return True
-        prefix = "ba_broadcast_run" if action == "ba_broadcast_select" else "ba_resend_active_run"
-        rows = []
-        for account in accounts:
-            account_id = int(account.get("account_user_id") or 0)
-            username = str(account.get("username") or "").strip()
-            first_name = str(account.get("first_name") or "").strip()
-            label = f"@{username.lstrip('@')}" if username else (first_name or str(account_id))
-            rows.append([InlineKeyboardButton(f"👤 {label}", callback_data=f"{prefix}_{account_id}")])
-        rows.append([InlineKeyboardButton("⬅ Broadcast / Send Invite Link", callback_data="ba_broadcast")])
-        title = (
-            "📢 Select account for Broadcast / Send Invite Link"
-            if action == "ba_broadcast_select"
-            else "🔗 Select account for Active Subscriber Resend"
-        )
-        await q.edit_message_text(title, reply_markup=_kb(rows))
-        return True
-
-    if action.startswith("ba_broadcast_run_") or action.startswith("ba_resend_active_run_"):
-        try:
-            account_id = int(action.rsplit("_", 1)[1])
-        except (TypeError, ValueError):
-            await q.answer("Invalid account.", show_alert=True)
-            return True
-        account = await get_business_account(owner, account_id)
-        if not account or not account.get("active"):
-            await q.answer("MTProto account is not connected.", show_alert=True)
-            accounts = await get_business_accounts(owner, active_only=True)
-            await q.edit_message_text(_broadcast_text(accounts), reply_markup=_broadcast_keyboard(accounts))
-            return True
-
-        is_active_resend = action.startswith("ba_resend_active_run_")
-        title = "🔗 Resend Invite Links to Active Subscribers" if is_active_resend else "📢 Broadcast / Send Invite Link"
-        await q.edit_message_text(
-            f"{title}\n\n⏳ Sending...\n\nPlease wait. Telegram limits and recipient restrictions are handled automatically."
-        )
-        try:
-            if is_active_resend:
-                result = await business_automation_runtime.resend_invite_to_active_subscribers(owner, account_id)
-            else:
-                result = await business_automation_runtime.broadcast_invite(owner, account_id)
-        except Exception:
-            logger.exception("Business invite operation failed owner=%s account=%s", owner, account_id)
-            result = {"ok": False, "reason": "runtime_error", "sent": 0, "failed": 0, "total": 0, "skipped": 0}
-
-        if not result.get("ok"):
-            reason = str(result.get("reason") or "unknown_error").replace("_", " ").title()
-            text = (
-                f"{title}\n\n"
-                f"❌ Operation could not be completed.\n"
-                f"Reason: {reason}\n\n"
-                f"Sent: {int(result.get('sent', 0))}"
-            )
-        else:
-            text = (
-                f"{title}\n\n"
-                "✅ Operation completed.\n\n"
-                f"📨 Sent: {int(result.get('sent', 0))}\n"
-                f"❌ Failed: {int(result.get('failed', 0))}\n"
-                f"⏭ Skipped: {int(result.get('skipped', 0))}\n"
-                f"👥 Total: {int(result.get('total', 0))}"
-            )
-        await q.edit_message_text(text, reply_markup=_kb([
-            [InlineKeyboardButton("⬅ Broadcast / Send Invite Link", callback_data="ba_broadcast")],
-            [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
-        ]))
-        return True
     if action == "ba_accounts":
+
         accounts = await get_business_accounts(owner)
         lines = [
             "📱 Connected Accounts",
