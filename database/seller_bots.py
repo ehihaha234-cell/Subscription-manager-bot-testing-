@@ -79,6 +79,55 @@ async def get_bots(owner_id: int):
     ).sort("created_at", 1).to_list(length=None)
 
 
+async def get_management_bots(owner_id: int):
+    """Return all non-removed clone bots for owner-management screens.
+
+    Paused clones must remain visible so the owner can resume them. This is
+    intentionally separate from get_bots(), which continues to represent only
+    active/connected clones for quota and normal seller UI logic.
+    """
+    return await seller_bots_collection().find(
+        {"owner_id": int(owner_id), "status": {"$ne": "removed"}}
+    ).sort("created_at", 1).to_list(length=None)
+
+
+async def mark_bot_suspended(bot_id: int, was_active: bool):
+    """Pause a clone because its seller was suspended, remembering prior state."""
+    await seller_bots_collection().update_one(
+        {"bot_id": int(bot_id)},
+        {"$set": {
+            "active": False,
+            "status": "seller_suspended",
+            "runtime_status": "seller_suspended",
+            "pre_suspend_active": bool(was_active),
+            "updated_at": datetime.now(timezone.utc),
+        }}
+    )
+
+
+async def restore_bot_from_suspension(bot_id: int) -> bool:
+    """Restore only clones that were active before seller suspension."""
+    result = await seller_bots_collection().update_one(
+        {"bot_id": int(bot_id), "status": "seller_suspended", "pre_suspend_active": True},
+        {"$set": {
+            "active": True,
+            "status": "active",
+            "runtime_status": "stopped",
+            "updated_at": datetime.now(timezone.utc),
+        }, "$unset": {"pre_suspend_active": ""}}
+    )
+    return bool(result.modified_count)
+
+
+async def clear_bot_suspension_marker(bot_id: int):
+    """Clear suspension state for clones that were already paused."""
+    await seller_bots_collection().update_one(
+        {"bot_id": int(bot_id)},
+        {"$set": {"status": "paused", "runtime_status": "paused", "updated_at": datetime.now(timezone.utc)},
+         "$unset": {"pre_suspend_active": ""}}
+    )
+
+
 async def count_owner_bots(owner_id: int):
     return await seller_bots_collection().count_documents(
         {"owner_id": int(owner_id), "active": True, "status": {"$ne": "removed"}}
