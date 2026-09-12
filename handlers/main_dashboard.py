@@ -586,7 +586,6 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         "🤖 Clone Bot Breakdown\n" + ("\n\n".join(bot_lines) if bot_lines else "No clone bots connected.")
     )
 
-    first_bot = bots[0] if bots else None
     keyboard = [
         [InlineKeyboardButton("⏳ Extend Subscription", callback_data=f"sub_mgmt_extend_{owner_id}")],
         [InlineKeyboardButton("✅ Unsuspend Seller" if suspended else "🚫 Suspend Seller",
@@ -596,10 +595,31 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         [InlineKeyboardButton("📜 Subscription History", callback_data=f"sub_mgmt_history_{owner_id}")],
         [InlineKeyboardButton("💰 Seller Revenue", callback_data="sub_mgmt_revenue")],
     ]
-    if first_bot:
-        keyboard.append([InlineKeyboardButton("⏸ Pause First Clone Bot" if first_bot.get("active") else "▶ Resume First Clone Bot",
-            callback_data=f"main_seller_pausebot_{owner_id}_{int(first_bot.get('bot_id') or 0)}" if first_bot.get("active") else f"main_seller_resumebot_{owner_id}_{int(first_bot.get('bot_id') or 0)}")])
-        keyboard.append([InlineKeyboardButton("⏹ Stop First Bot Runtime", callback_data=f"main_seller_stopbot_{owner_id}_{int(first_bot.get('bot_id') or 0)}")])
+
+    # Give every clone bot its own Pause/Resume control.  The control state is
+    # persisted in seller_bots.active, so it survives dashboard refreshes and
+    # process restarts.  Do not expose the old "Stop Runtime" control here.
+    for index, bot in enumerate(bots, start=1):
+        bot_id = int(bot.get("bot_id") or 0)
+        if not bot_id:
+            continue
+        bot_name = str(bot.get("bot_name") or bot.get("bot_username") or f"Clone Bot {index}")
+        label = bot_name[:42]
+        if bot.get("active"):
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"⏸ Pause ({label})",
+                    callback_data=f"main_seller_pausebot_{owner_id}_{bot_id}",
+                )
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"▶ Resume ({label})",
+                    callback_data=f"main_seller_resumebot_{owner_id}_{bot_id}",
+                )
+            ])
+
     keyboard += [
         [InlineKeyboardButton("⬅ Sellers", callback_data="main_owner_sellers")],
         [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
@@ -1589,21 +1609,15 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id_text, bot_id_text = action.replace("main_seller_resumebot_", "", 1).split("_", 1)
         seller_id, bot_id = int(seller_id_text), int(bot_id_text)
+        seller = await get_seller(seller_id)
+        if seller and (bool(seller.get("suspended")) or seller.get("active") is False):
+            await query.answer("Seller is suspended. Unsuspend the seller first.", show_alert=True)
+            await seller_owner_view(query, seller_id)
+            return
         await set_bot_active(bot_id,True)
         await bot_manager.start_bot(bot_id)
         await seller_owner_view(query,seller_id)
         return
-
-    if action.startswith("main_seller_stopbot_"):
-        if not await is_admin(user_id):
-            await query.edit_message_text("❌ Owner access only.")
-            return
-        seller_id_text, bot_id_text = action.replace("main_seller_stopbot_", "", 1).split("_", 1)
-        seller_id, bot_id = int(seller_id_text), int(bot_id_text)
-        await bot_manager.stop_bot(bot_id, "stopped_by_owner")
-        await seller_owner_view(query, seller_id)
-        return
-
 
 def main_dashboard_handlers():
     return [
