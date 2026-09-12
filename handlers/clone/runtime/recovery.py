@@ -36,6 +36,14 @@ class CloneRuntimeRecoveryMixin:
         record = await get_bot_by_bot_id(bot_id)
         if not record:
             return False
+
+        seller = await get_seller(int(record.get("owner_id") or 0))
+        if seller and (
+            bool(seller.get("suspended"))
+            or seller.get("active") is False
+        ):
+            return False
+
         if str(record.get("runtime_status") or "").lower() in {
             "invalid_token",
             "token_missing",
