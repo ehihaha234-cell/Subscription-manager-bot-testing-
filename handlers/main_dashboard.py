@@ -1617,10 +1617,38 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Seller is suspended. Unsuspend the seller first.", show_alert=True)
             await seller_owner_view(query, seller_id)
             return
+        # Mark active only for the startup attempt. If Telegram/runtime rejects
+        # the start, roll the DB state back to paused so the owner keeps a
+        # reliable Resume button instead of a misleading Pause button.
         await set_bot_active(bot_id, True)
-        started = await bot_manager.start_bot(bot_id)
+        try:
+            started = await bot_manager.start_bot(bot_id)
+        except Exception as exc:
+            started = False
+            logger.exception("Owner resume failed bot_id=%s seller_id=%s", bot_id, seller_id)
+            error_text = str(exc)
+        else:
+            error_text = ""
+
         if not started:
-            await query.answer("⚠️ Clone bot could not be resumed.", show_alert=True)
+            await set_bot_active(bot_id, False)
+            record = await get_bot_by_bot_id(bot_id)
+            runtime_error = str((record or {}).get("runtime_error") or error_text or "").strip()
+            if runtime_error:
+                # Keep the alert short and hide any sensitive token-like text.
+                runtime_error = re.sub(r"(?i)(bot\d+:[A-Za-z0-9_-]+)", "[redacted]", runtime_error)
+                runtime_error = runtime_error[:220]
+                await query.answer(
+                    f"⚠️ Clone bot could not be resumed.\n\n{runtime_error}",
+                    show_alert=True,
+                )
+            else:
+                await query.answer(
+                    "⚠️ Clone bot could not be resumed. Please check the bot token, seller plan, and runtime status.",
+                    show_alert=True,
+                )
+        else:
+            await query.answer("✅ Clone bot resumed.", show_alert=False)
         await seller_owner_view(query, seller_id)
         return
 
