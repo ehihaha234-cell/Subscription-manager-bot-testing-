@@ -1,7 +1,6 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
-from database.sellers import get_seller
 
 
 class CloneRuntimeLifecycleMixin:
@@ -24,22 +23,9 @@ class CloneRuntimeLifecycleMixin:
 
             bot_id = int(record["bot_id"])
             seller_account_id = int(record["owner_id"])
-
-            # Owner suspension is a hard runtime block.  The seller document is
-            # the source of truth for the owner-level suspension action.  This
-            # check is intentionally before plan/token startup so watchdog,
-            # recovery, manual resume, and process restart cannot bring a
-            # suspended seller's clone back online.
             seller = await get_seller(seller_account_id)
-            if seller and (
-                bool(seller.get("suspended"))
-                or seller.get("active") is False
-            ):
-                await set_runtime_status(
-                    bot_id,
-                    "seller_suspended",
-                    "Seller is suspended by the platform owner",
-                )
+            if seller and seller.get("suspended"):
+                await set_runtime_status(bot_id, "seller_suspended", "Seller account is suspended")
                 return False
             allowed, quota = await bot_runtime_allowed(seller_account_id, bot_id)
             if not allowed:
