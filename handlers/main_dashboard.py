@@ -11,7 +11,11 @@ from telegram.error import RetryAfter, TelegramError
 
 from database.admins import is_admin, get_all_admins
 from database.payments import count_pending_payments, total_revenue
-from database.seller_bots import get_bot, get_bots, get_bot_by_bot_id, get_all_active_bots, total_bots, set_bot_active, get_decrypted_bot_token
+from database.seller_bots import (
+    get_bot, get_bots, get_management_bots, get_bot_by_bot_id, get_all_active_bots,
+    total_bots, set_bot_active, get_decrypted_bot_token, mark_bot_suspended,
+    restore_bot_from_suspension, clear_bot_suspension_marker,
+)
 from database.seller_data import (
     stats as seller_stats,
     get_channels as get_seller_channels,
@@ -426,7 +430,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     if not seller:
         return None, None
 
-    bots = await get_bots(owner_id)
+    bots = await get_management_bots(owner_id)
     if selected_bot_id is not None:
         bots = [b for b in bots if int(b.get("bot_id") or 0) == int(selected_bot_id)]
         if not bots:
@@ -595,31 +599,18 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         [InlineKeyboardButton("📜 Subscription History", callback_data=f"sub_mgmt_history_{owner_id}")],
         [InlineKeyboardButton("💰 Seller Revenue", callback_data="sub_mgmt_revenue")],
     ]
-
-    # Give every clone bot its own Pause/Resume control.  The control state is
-    # persisted in seller_bots.active, so it survives dashboard refreshes and
-    # process restarts.  Do not expose the old "Stop Runtime" control here.
-    for index, bot in enumerate(bots, start=1):
+    for bot in bots:
         bot_id = int(bot.get("bot_id") or 0)
         if not bot_id:
             continue
-        bot_name = str(bot.get("bot_name") or bot.get("bot_username") or f"Clone Bot {index}")
-        label = bot_name[:42]
+        bot_name = str(bot.get("bot_name") or bot.get("bot_username") or f"Bot {bot_id}")
         if bot.get("active"):
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"⏸ Pause ({label})",
-                    callback_data=f"main_seller_pausebot_{owner_id}_{bot_id}",
-                )
-            ])
+            label = f"⏸ Pause ({bot_name})"
+            callback = f"main_seller_pausebot_{owner_id}_{bot_id}"
         else:
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"▶ Resume ({label})",
-                    callback_data=f"main_seller_resumebot_{owner_id}_{bot_id}",
-                )
-            ])
-
+            label = f"▶ Resume ({bot_name})"
+            callback = f"main_seller_resumebot_{owner_id}_{bot_id}"
+        keyboard.append([InlineKeyboardButton(label[:64], callback_data=callback)])
     keyboard += [
         [InlineKeyboardButton("⬅ Sellers", callback_data="main_owner_sellers")],
         [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
@@ -1574,9 +1565,14 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id = int(action.replace("main_seller_suspend_", ""))
         await suspend_seller(seller_id)
-        for record in await get_bots(seller_id):
-            if record.get("bot_id"):
-                await bot_manager.stop_bot(int(record["bot_id"]), "seller_suspended")
+        for record in await get_management_bots(seller_id):
+            bot_id = int(record.get("bot_id") or 0)
+            if not bot_id:
+                continue
+            was_active = bool(record.get("active"))
+            await mark_bot_suspended(bot_id, was_active)
+            if was_active:
+                await bot_manager.stop_bot(bot_id, "seller_suspended")
         await seller_owner_view(query, seller_id)
         return
 
@@ -1586,9 +1582,16 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         seller_id = int(action.replace("main_seller_unsuspend_", ""))
         await unsuspend_seller(seller_id)
-        for record in await get_bots(seller_id):
-            if record.get("active") and record.get("bot_id"):
-                await bot_manager.start_bot(int(record["bot_id"]))
+        for record in await get_management_bots(seller_id):
+            bot_id = int(record.get("bot_id") or 0)
+            if not bot_id:
+                continue
+            restored = await restore_bot_from_suspension(bot_id)
+            if restored:
+                await bot_manager.start_bot(bot_id)
+            elif record.get("status") == "seller_suspended":
+                # This clone was already paused before suspension; keep it paused.
+                await clear_bot_suspension_marker(bot_id)
         await seller_owner_view(query, seller_id)
         return
 
@@ -1610,14 +1613,17 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seller_id_text, bot_id_text = action.replace("main_seller_resumebot_", "", 1).split("_", 1)
         seller_id, bot_id = int(seller_id_text), int(bot_id_text)
         seller = await get_seller(seller_id)
-        if seller and (bool(seller.get("suspended")) or seller.get("active") is False):
-            await query.answer("Seller is suspended. Unsuspend the seller first.", show_alert=True)
+        if seller and seller.get("suspended"):
+            await query.answer("❌ Seller is suspended. Unsuspend the seller first.", show_alert=True)
             await seller_owner_view(query, seller_id)
             return
-        await set_bot_active(bot_id,True)
-        await bot_manager.start_bot(bot_id)
-        await seller_owner_view(query,seller_id)
+        await set_bot_active(bot_id, True)
+        started = await bot_manager.start_bot(bot_id)
+        if not started:
+            await query.answer("⚠️ Clone bot could not be resumed.", show_alert=True)
+        await seller_owner_view(query, seller_id)
         return
+
 
 def main_dashboard_handlers():
     return [
