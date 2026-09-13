@@ -658,7 +658,19 @@ async def expire_razorpay_qr_transactions_job() -> int:
                         bot = owned_bot
                 if bot:
                     if expired.get("payment_message_type") == "photo":
-                        await bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="\n".join(lines), reply_markup=markup)
+                        # Telegram cannot convert a photo message into a text-only
+                        # message. Delete the expired QR photo and send the expired
+                        # notice + the same plan menu as a fresh text message.
+                        try:
+                            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+                        except Exception:
+                            pass
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="\n".join(lines),
+                            reply_markup=markup,
+                            disable_web_page_preview=True,
+                        )
                     else:
                         await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(lines), reply_markup=markup)
                 if owned_bot:
