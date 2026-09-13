@@ -534,6 +534,45 @@ async def recoverable_gateway_transactions(limit: int = 100) -> list[dict]:
     return await _transactions().find(query).sort("updated_at", 1).limit(size).to_list(length=size)
 
 
+async def expire_due_razorpay_qr_transactions(limit: int = 100) -> list[dict]:
+    """Claim Razorpay UPI QR transactions whose configured close time has passed.
+
+    Only unpaid local transactions are returned. Payment webhooks remain
+    authoritative; a transaction that was already marked paid/fulfilled is
+    never expired here.
+    """
+    now = datetime.now(timezone.utc)
+    rows = await _transactions().find({
+        "gateway": "razorpay",
+        "status": {"$in": ["created", "pending", "verification_pending"]},
+        "checkout_mode": "upi_qr",
+        "qr_close_by": {"$lte": int(now.timestamp())},
+        "fulfilled_at": {"$exists": False},
+    }).sort("qr_close_by", 1).limit(max(1, min(int(limit), 500))).to_list(length=max(1, min(int(limit), 500)))
+    return rows
+
+
+async def mark_transaction_expired(transaction_id: str) -> dict | None:
+    now = datetime.now(timezone.utc)
+    return await _transactions().find_one_and_update(
+        {
+            "transaction_id": str(transaction_id),
+            "status": {"$in": ["created", "pending", "verification_pending"]},
+            "fulfilled_at": {"$exists": False},
+        },
+        {
+            "$set": {
+                "status": "expired",
+                "expired_at": now,
+                "failure_reason": "Razorpay UPI QR expired before payment",
+                "updated_at": now,
+            },
+            "$unset": {"next_gateway_recovery_at": ""},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+
+
 async def gateway_transaction_stats(scope: str, owner_id: int) -> dict:
     pipeline = [
         {"$match": {"scope": scope, "owner_id": int(owner_id)}},
