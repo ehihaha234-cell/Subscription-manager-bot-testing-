@@ -173,6 +173,7 @@ def _seller_razorpay_text(g: dict) -> str:
         f"Key ID: {'Added' if g.get('key_id') else 'Not added'}\n"
         f"Key Secret: {'Added' if g.get('key_secret') else 'Not added'}\n"
         f"Webhook URL: {'Generated ✅' if PUBLIC_BASE_URL else 'Not available ❌'}\n"
+        "Payment Mode: UPI QR (30 minutes)\n"
         f"Webhook Secret: {'Added ✅' if g.get('webhook_secret') else 'Not added ❌'}"
     )
 
@@ -210,7 +211,7 @@ def _seller_webhook_guide_text() -> str:
         "3. Tap Add New Webhook.\n"
         "4. Copy the URL shown on the Webhook Setup page and paste it in Razorpay.\n"
         "5. Create a strong Webhook Secret.\n"
-        "6. Select payment.captured, order.paid and payment_link.paid.\n"
+        "6. Select payment.captured, order.paid, payment_link.paid and qr_code.credited.\n"
         "7. Save the webhook.\n"
         "8. Return to the Razorpay page in this bot.\n"
         "9. Tap Set Webhook Secret and paste the same secret.\n"
