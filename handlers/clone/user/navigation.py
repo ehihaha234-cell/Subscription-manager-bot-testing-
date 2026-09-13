@@ -159,9 +159,17 @@ async def handle(self, update, context, q, owner, action):
         await self.send_welcome(q.message, context, settings, q.from_user)
         return True
     if action == 'c_plans':
-        await self.show_plans(q, owner, True, context)
+        payment_photo = bool(
+            getattr(q.message, 'photo', None)
+            and 'razorpay upi payment' in str(getattr(q.message, 'caption', '') or '').lower()
+        )
+        await self.show_plans(q, owner, True, context, force_new_message=payment_photo)
         return True
     if action in {'c_buy', 'c_renew'}:
-        await self.show_plans(q, owner, True, context)
+        payment_photo = bool(
+            getattr(q.message, 'photo', None)
+            and 'razorpay upi payment' in str(getattr(q.message, 'caption', '') or '').lower()
+        )
+        await self.show_plans(q, owner, True, context, force_new_message=payment_photo)
         return True
     return False

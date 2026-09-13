@@ -4,7 +4,6 @@ from handlers.common.clone_context import *
 from database.payment_gateways import update_gateway_transaction
 from handlers.common.feature_navigation import feature_back_callback
 import io
-import aiohttp
 
 
 async def handle(self, update, context, q, owner, action):
@@ -52,11 +51,6 @@ async def handle(self, update, context, q, owner, action):
                     image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
                     if not image_url:
                         raise GatewayError('Razorpay QR image URL was not returned')
-                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-                        async with session.get(image_url) as response:
-                            if response.status >= 400:
-                                raise GatewayError(f'Unable to load Razorpay QR image (HTTP {response.status})')
-                            image_bytes = await response.read()
                     close_by = int(checkout.get('qr_close_by') or 0)
                     remaining = max(1, int((close_by - __import__('time').time() + 59) // 60)) if close_by else 30
                     text = (
@@ -198,7 +192,7 @@ async def handle(self, update, context, q, owner, action):
                 except TelegramError:
                     pass
                 sent = await context.bot.send_photo(
-                    chat_id=q.message.chat_id, photo=io.BytesIO(image_bytes), caption=text,
+                    chat_id=q.message.chat_id, photo=image_url, caption=text,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                 )
                 await update_gateway_transaction(
