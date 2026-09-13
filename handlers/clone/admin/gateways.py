@@ -25,16 +25,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled'))))
             return True
         details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}"
-        mode_text = '🔗 Cashfree Checkout (QR available)'
-        await q.edit_message_text(
-            f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}\nPayment Mode: {mode_text}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')],
-                [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')],
-                [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')],
-                [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')],
-            ])
-        )
+        await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
         return True
     if a.startswith('a_pg_toggle_'):
         gateway = a.replace('a_pg_toggle_', '')
@@ -51,16 +42,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled'))))
             return True
         details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}"
-        mode_text = '🔗 Cashfree Checkout (QR available)'
-        await q.edit_message_text(
-            f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}\nPayment Mode: {mode_text}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')],
-                [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')],
-                [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')],
-                [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')],
-            ])
-        )
+        await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
         return True
     if a == 'a_pg_webhook_secret':
         context.user_data.clear()
