@@ -143,6 +143,7 @@ async def find_seller_by_identifier(identifier):
         return await collection.find_one({"owner_id": owner_id})
 
     # 1) Direct seller collection lookup. Support integer/string legacy IDs.
+    # If the numeric identifier is actually a clone Bot ID, resolve its owner/seller.
     if raw.lstrip("+").isdigit():
         try:
             numeric_id = int(raw)
@@ -162,6 +163,26 @@ async def find_seller_by_identifier(identifier):
             })
             if seller:
                 return seller
+
+            # Clone Bot ID lookup. A seller can therefore be found by any of
+            # their registered clone Bot IDs from Owner > Seller Management.
+            bot_record = await db["seller_bots"].find_one({"bot_id": {"$in": id_variants}})
+            if bot_record:
+                owner_candidate = (
+                    bot_record.get("owner_id")
+                    or bot_record.get("seller_account_id")
+                    or bot_record.get("seller_id")
+                )
+                try:
+                    owner_candidate = int(owner_candidate)
+                except (TypeError, ValueError):
+                    owner_candidate = None
+                if owner_candidate is not None:
+                    seller = await collection.find_one({"owner_id": owner_candidate})
+                    if seller:
+                        return seller
+                    profile = await db["users"].find_one({"user_id": owner_candidate}) or {}
+                    return await _repair_missing_seller(owner_candidate, profile)
 
             # Legacy/missing seller document: seller_bots is authoritative proof
             # that this Telegram user is a seller.
@@ -190,7 +211,32 @@ async def find_seller_by_identifier(identifier):
         if seller:
             return seller
 
-        # 3) Fallback through platform users, but only accept it when that user
+        # 3) Clone Bot username lookup. This lets Owner search a seller by any
+        # registered clone bot username, regardless of which bot belongs to them.
+        bot_record = await db["seller_bots"].find_one({
+            "$or": [
+                {"bot_username_normalized": username.lower()},
+                {"bot_username": at_exact},
+            ]
+        })
+        if bot_record:
+            owner_candidate = (
+                bot_record.get("owner_id")
+                or bot_record.get("seller_account_id")
+                or bot_record.get("seller_id")
+            )
+            try:
+                owner_candidate = int(owner_candidate)
+            except (TypeError, ValueError):
+                owner_candidate = None
+            if owner_candidate is not None:
+                seller = await collection.find_one({"owner_id": owner_candidate})
+                if seller:
+                    return seller
+                profile = await db["users"].find_one({"user_id": owner_candidate}) or {}
+                return await _repair_missing_seller(owner_candidate, profile)
+
+        # 4) Fallback through platform users, but only accept it when that user
         # actually owns a clone bot. This prevents ordinary users matching Seller
         # Management search by accident.
         user = await db["users"].find_one({"username": at_exact})
