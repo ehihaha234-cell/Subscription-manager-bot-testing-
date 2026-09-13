@@ -3,6 +3,33 @@
 from handlers.common.clone_context import *
 from database.payment_gateways import update_gateway_transaction
 from handlers.common.feature_navigation import feature_back_callback
+import io
+import time
+import qrcode
+
+
+def _razorpay_qr_photo(checkout: dict):
+    """Build the QR locally from Razorpay's UPI payload to avoid downloading
+    Razorpay's hosted image URL. This removes the extra network hop that can
+    make the QR take several seconds to appear in Telegram.
+    """
+    content = str(checkout.get("qr_image_content") or "").strip()
+    if not content:
+        return None
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(content)
+    qr.make(fit=True)
+    image = qr.make_image()
+    stream = io.BytesIO()
+    image.save(stream, format="PNG", optimize=True)
+    stream.seek(0)
+    stream.name = "razorpay_qr.png"
+    return stream
 
 
 async def handle(self, update, context, q, owner, action):
@@ -48,10 +75,13 @@ async def handle(self, update, context, q, owner, action):
                 checkout = await create_checkout(tx)
                 if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
                     image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
-                    if not image_url:
-                        raise GatewayError('Razorpay QR image URL was not returned')
+                    if not image_url and not checkout.get('qr_image_content'):
+                        raise GatewayError('Razorpay QR data was not returned')
                     close_by = int(checkout.get('qr_close_by') or 0)
-                    remaining = max(1, int((close_by - __import__('time').time() + 59) // 60)) if close_by else 30
+                    remaining = max(1, int((close_by - time.time() + 59) // 60)) if close_by else 30
+                    qr_photo = _razorpay_qr_photo(checkout)
+                    if qr_photo is None and not image_url:
+                        raise GatewayError('Razorpay QR image was not returned')
                     text = (
                         f"💳 Razorpay UPI Payment\n\n"
                         f"Plan: {plan['name']}\n"
@@ -66,13 +96,9 @@ async def handle(self, update, context, q, owner, action):
                         await q.message.delete()
                     except TelegramError:
                         pass
-                    # Razorpay already returns a Telegram-loadable image URL.
-                    # Pass the URL directly to Telegram instead of downloading
-                    # the image through the bot server first. This removes an
-                    # unnecessary network round-trip and makes QR display much faster.
                     sent = await context.bot.send_photo(
                         chat_id=q.message.chat_id,
-                        photo=image_url,
+                        photo=qr_photo if qr_photo is not None else image_url,
                         caption=text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                     )
@@ -174,13 +200,13 @@ async def handle(self, update, context, q, owner, action):
             checkout = await create_checkout(tx)
             if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
                 image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
-                    async with session.get(image_url) as response:
-                        if response.status >= 400:
-                            raise GatewayError(f'Unable to load Razorpay QR image (HTTP {response.status})')
-                        image_bytes = await response.read()
+                if not image_url and not checkout.get('qr_image_content'):
+                    raise GatewayError('Razorpay QR data was not returned')
+                qr_photo = _razorpay_qr_photo(checkout)
+                if qr_photo is None and not image_url:
+                    raise GatewayError('Razorpay QR image was not returned')
                 close_by = int(checkout.get('qr_close_by') or 0)
-                remaining = max(1, int((close_by - __import__('time').time() + 59) // 60)) if close_by else 30
+                remaining = max(1, int((close_by - time.time() + 59) // 60)) if close_by else 30
                 text = (
                     f"💳 Razorpay UPI Payment\n\nPlan: {plan['name']}\n"
                     f"Amount: {format_currency(currency, plan['price'])}\n"
@@ -195,7 +221,7 @@ async def handle(self, update, context, q, owner, action):
                 except TelegramError:
                     pass
                 sent = await context.bot.send_photo(
-                    chat_id=q.message.chat_id, photo=image_url, caption=text,
+                    chat_id=q.message.chat_id, photo=qr_photo if qr_photo is not None else image_url, caption=text,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                 )
                 await update_gateway_transaction(
