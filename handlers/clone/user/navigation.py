@@ -124,11 +124,29 @@ async def handle(self, update, context, q, owner, action):
             pass
         return True
     if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'}:
-        try:
-            capture_feature_origin(q, context)
-        except Exception:
-            # Back-navigation tracking is optional and must not block the feature itself.
-            pass
+        # Do not replace the original Welcome/previous-page origin when the
+        # user is leaving an active/expired payment screen via Back. Otherwise
+        # the subsequent Plans -> Back navigation can point back to the payment
+        # QR instead of the actual page that opened the purchase flow.
+        payment_screen = False
+        if action in {'c_buy', 'c_plans'}:
+            message = getattr(q, 'message', None)
+            caption = str(getattr(message, 'caption', None) or '').lower()
+            text_value = str(getattr(message, 'text', None) or '').lower()
+            payment_markers = (
+                'razorpay upi payment',
+                'payment qr expired',
+                'cashfree payment',
+                'secure payment',
+                'transaction:',
+            )
+            payment_screen = any(marker in caption or marker in text_value for marker in payment_markers)
+        if not payment_screen:
+            try:
+                capture_feature_origin(q, context)
+            except Exception:
+                # Back-navigation tracking is optional and must not block the feature itself.
+                pass
     back_keyboard = self.back(feature_back_callback(context))
     if action == 'seller_current_plan':
         seller_account_id = self.seller_account(context)

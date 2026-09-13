@@ -3,7 +3,6 @@
 from handlers.common.clone_context import *
 from database.payment_gateways import update_gateway_transaction
 from handlers.common.feature_navigation import feature_back_callback
-import io
 
 
 async def handle(self, update, context, q, owner, action):
@@ -67,9 +66,13 @@ async def handle(self, update, context, q, owner, action):
                         await q.message.delete()
                     except TelegramError:
                         pass
+                    # Razorpay already returns a Telegram-loadable image URL.
+                    # Pass the URL directly to Telegram instead of downloading
+                    # the image through the bot server first. This removes an
+                    # unnecessary network round-trip and makes QR display much faster.
                     sent = await context.bot.send_photo(
                         chat_id=q.message.chat_id,
-                        photo=io.BytesIO(image_bytes),
+                        photo=image_url,
                         caption=text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                     )
