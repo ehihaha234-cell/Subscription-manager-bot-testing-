@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -201,18 +201,56 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
     key_id, key_secret = s.get("key_id"), s.get("key_secret")
     if not key_id or not key_secret:
         raise GatewayError("Razorpay credentials are incomplete")
+
     auth = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
+    amount_paise = int(round(float(tx["amount"]) * 100))
+    if amount_paise <= 0:
+        raise GatewayError("Razorpay amount must be greater than zero")
+
+    metadata = tx.get("metadata") or {}
+    plan_name = str(metadata.get("plan_name") or metadata.get("description") or "Subscription")
+    # Razorpay QR Codes require close_by to be at least 15 minutes in the future.
+    # Keep each subscription QR open for 30 minutes.
+    close_by = int(time.time()) + (30 * 60)
     payload = {
-        "amount": int(round(tx["amount"] * 100)),
-        "currency": tx["currency"],
-        "reference_id": tx["transaction_id"],
-        "description": tx["metadata"].get("description", tx["purpose"]),
-        "callback_url": f"{_base_url()}/payment/return/{tx['transaction_id']}",
-        "callback_method": "get",
-        "notes": {"transaction_id": tx["transaction_id"], "scope": tx["scope"], "owner_id": str(tx["owner_id"])},
+        "type": "upi_qr",
+        "name": plan_name[:100],
+        "usage": "single_use",
+        "fixed_amount": True,
+        "payment_amount": amount_paise,
+        "description": str(metadata.get("description") or tx["purpose"])[:255],
+        "close_by": close_by,
+        "notes": {
+            "transaction_id": tx["transaction_id"],
+            "scope": tx["scope"],
+            "owner_id": str(tx["owner_id"]),
+        },
     }
-    data = await _request("POST", "https://api.razorpay.com/v1/payment_links", headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"}, json=payload)
-    return {"gateway_order_id": data.get("id", ""), "checkout_url": data.get("short_url", ""), "gateway_response": data, "status": "pending"}
+
+    data = await _request(
+        "POST",
+        "https://api.razorpay.com/v1/payments/qr_codes",
+        headers={
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+    )
+    qr_id = str(data.get("id") or "")
+    qr_image_url = str(data.get("image_url") or "")
+    if not qr_id or not qr_image_url:
+        raise GatewayError("Razorpay QR Code was not returned")
+
+    return {
+        "gateway_order_id": qr_id,
+        "razorpay_qr_id": qr_id,
+        "qr_image_url": qr_image_url,
+        "qr_close_by": close_by,
+        "checkout_url": "",
+        "gateway_response": data,
+        "gateway_mode": "live",
+        "status": "pending",
+    }
 
 
 async def _create_cashfree(tx: dict, s: dict) -> dict:
@@ -369,15 +407,54 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
         if not secret or not hmac.compare_digest(expected, headers.get("x-razorpay-signature", "")):
             return False, "invalid signature"
         await mark_valid_webhook_received(scope, owner_id, "razorpay")
-        event = payload.get("event", "")
-        entity = (((payload.get("payload") or {}).get("payment") or {}).get("entity") or {})
+        event = str(payload.get("event") or "")
+        payment_entity = (((payload.get("payload") or {}).get("payment") or {}).get("entity") or {})
         order = (((payload.get("payload") or {}).get("payment_link") or {}).get("entity") or {})
-        txid = (entity.get("notes") or {}).get("transaction_id") or order.get("reference_id")
-        success = event in {"payment.captured", "order.paid", "payment_link.paid"}
-        payment_id = entity.get("id", "")
-        if not payment_id and order.get("payments"):
-            payment_id = order.get("payments", [{}])[-1].get("payment_id", "")
-        event_key = payload.get("account_id", "") + ":" + event + ":" + str(entity.get("id") or order.get("id"))
+        qr = (((payload.get("payload") or {}).get("qr_code") or {}).get("entity") or {})
+
+        if event == "qr_code.credited":
+            # QR payments carry the transaction reference in the QR notes.
+            # Fall back to the QR id so the transaction can still be found
+            # when older/partial webhook payloads omit notes.
+            txid = (qr.get("notes") or {}).get("transaction_id")
+            qr_id = str(qr.get("id") or "")
+            if not txid and qr_id:
+                tx = await get_transaction_by_gateway_order("razorpay", qr_id)
+                txid = tx.get("transaction_id") if tx else None
+
+            payment_id = str(payment_entity.get("id") or "")
+            amount_paise = int(payment_entity.get("amount") or 0)
+            currency_value = str(payment_entity.get("currency") or "").upper()
+            success = (
+                str(payment_entity.get("status") or "").lower() == "captured"
+                and bool(payment_entity.get("captured"))
+            )
+            event_key = (
+                f"{payload.get('account_id', '')}:{event}:{payment_id}:{qr_id}"
+            )
+
+            if not txid:
+                return False, "unknown Razorpay QR transaction"
+
+            # QR is fixed-amount, but verify the actual credited amount and
+            # currency before allowing fulfillment.
+            tx = await get_gateway_transaction(str(txid))
+            if not tx:
+                return False, "unknown transaction"
+            expected_currency = str(tx.get("currency") or "INR").upper()
+            expected_paise = int(round(float(tx.get("amount") or 0) * 100))
+            if currency_value != expected_currency:
+                return False, "Razorpay QR currency mismatch"
+            if amount_paise != expected_paise:
+                return False, "Razorpay QR amount mismatch"
+        else:
+            entity = payment_entity
+            txid = (entity.get("notes") or {}).get("transaction_id") or order.get("reference_id")
+            success = event in {"payment.captured", "order.paid", "payment_link.paid"}
+            payment_id = entity.get("id", "")
+            if not payment_id and order.get("payments"):
+                payment_id = order.get("payments", [{}])[-1].get("payment_id", "")
+            event_key = payload.get("account_id", "") + ":" + event + ":" + str(entity.get("id") or order.get("id"))
     elif gateway == "cashfree":
         timestamp = headers.get("x-webhook-timestamp", "")
         signature = headers.get("x-webhook-signature", "")
