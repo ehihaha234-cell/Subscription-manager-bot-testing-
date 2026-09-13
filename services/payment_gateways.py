@@ -268,36 +268,10 @@ async def _create_cashfree(tx: dict, s: dict) -> dict:
         "checkout_url": checkout,
         "gateway_response": data,
         "gateway_mode": mode,
-        "cashfree_checkout_mode": str(s.get("checkout_mode") or "link").lower(),
         "cashfree_order_expiry_time": data.get("order_expiry_time") or expiry_at.isoformat(),
         "status": "pending",
     }
 
-    # Direct QR mode uses Cashfree's Order Pay API with UPI/qrcode. Cashfree
-    # returns the actual QR image as a data URL; we store that response with
-    # the transaction so Telegram can display the exact order QR.
-    if result["cashfree_checkout_mode"] == "qr":
-        try:
-            qr_response = await _request(
-                "POST",
-                f"{base}/orders/sessions",
-                headers=_cashfree_headers(s, idempotency_key=tx["transaction_id"] + "-qr"),
-                json={
-                    "payment_session_id": session_id,
-                    "payment_method": {"upi": {"channel": "qrcode"}},
-                },
-            )
-        except GatewayError as exc:
-            raise GatewayError(
-                f"Cashfree Direct QR is unavailable. Make sure UPI QR/S2S is enabled on your Cashfree account. {exc}"
-            ) from exc
-        qr_payload = ((qr_response.get("data") or {}).get("payload") or {})
-        qr_data = str(qr_payload.get("qrcode") or "")
-        if not qr_data:
-            raise GatewayError("Cashfree did not return a UPI QR code")
-        result["cashfree_qr_data"] = qr_data
-        result["cashfree_qr_payment_id"] = str(qr_response.get("cf_payment_id") or "")
-        result["cashfree_qr_response"] = qr_response
 
     return result
 
