@@ -1,10 +1,5 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
-import base64
-import io
-
-from telegram import InputFile
-
 from handlers.common.clone_context import *
 from handlers.common.feature_navigation import feature_back_callback
 
@@ -41,33 +36,6 @@ async def handle(self, update, context, q, owner, action):
             try:
                 checkout = await create_checkout(tx)
                 text = f"💳 {gateway.title()} Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nOrder ID: {tx['transaction_id']}\n\nPayment successful hone ke baad plan automatically activate hoga."
-                qr_data = checkout.get('cashfree_qr_data') if gateway == 'cashfree' else None
-                if qr_data:
-                    # Cashfree returns a data:image/png;base64,... payload.
-                    encoded = qr_data.split(',', 1)[1] if ',' in qr_data else qr_data
-                    qr_bytes = base64.b64decode(encoded)
-                    rows.append([InlineKeyboardButton('🔗 Open Payment Page', url=checkout.get('checkout_url'))])
-                    rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
-                    try:
-                        await q.message.delete()
-                    except TelegramError:
-                        pass
-                    await context.bot.send_photo(
-                        q.message.chat_id,
-                        photo=InputFile(io.BytesIO(qr_bytes), filename='cashfree-upi-qr.png'),
-                        caption=(
-                            f"💳 Cashfree Payment\n\n"
-                            f"📦 Plan: {plan['name']}\n"
-                            f"💰 Amount: {format_currency(currency, plan['price'])}\n"
-                            f"🧾 Order ID: {tx['transaction_id']}\n\n"
-                            f"📱 Scan this QR with any UPI app\n"
-                            f"⏱ Payment order expires in 30 minutes\n\n"
-                            f"✅ Payment will be verified automatically.\n"
-                            f"🔗 You can also open the Cashfree payment page below."
-                        ),
-                        reply_markup=InlineKeyboardMarkup(rows),
-                    )
-                    return True
                 rows.append([InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))])
             except (GatewayError, ValueError, TypeError) as exc:
                 text = f'❌ Gateway error: {exc}'
