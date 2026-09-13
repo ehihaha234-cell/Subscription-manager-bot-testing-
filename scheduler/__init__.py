@@ -122,7 +122,7 @@ def _register_core_jobs() -> None:
     _remember_job(
         func=recover_gateway_transactions_job,
         trigger="interval",
-        minutes=2,
+        minutes=1,
         job_id="gateway_transaction_recovery",
         replace_existing=True,
     )
