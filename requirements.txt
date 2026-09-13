@@ -10,3 +10,5 @@ cryptography==44.0.2
 paytmchecksum==1.7.0
 pycryptodome==3.23.0
 Telethon==1.40.0
+qrcode==8.2
+Pillow==11.3.0
