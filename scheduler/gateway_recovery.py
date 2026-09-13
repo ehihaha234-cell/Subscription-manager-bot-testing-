@@ -20,12 +20,20 @@ from services.payment_gateways import (
     GatewayError,
     _verify_cashfree_payment,
     fulfill_transaction,
+    expire_razorpay_qr_transactions_job,
 )
 
 logger = logging.getLogger(__name__)
 
 
 async def recover_gateway_transactions_job() -> None:
+    try:
+        expired_qr = await expire_razorpay_qr_transactions_job()
+        if expired_qr:
+            logger.info("Expired Razorpay QR payment screens count=%s", expired_qr)
+    except Exception:
+        logger.exception("Razorpay QR expiry job failed")
+
     # Historical unpaid orders must not stay in the recovery queue forever.
     expired = await expire_stale_cashfree_transactions(max_age_minutes=30)
     if expired:
