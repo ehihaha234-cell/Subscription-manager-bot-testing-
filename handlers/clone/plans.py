@@ -5,7 +5,7 @@ from handlers.common.feature_navigation import feature_back_callback
 
 
 class ClonePlansMixin:
-    async def show_plans(self, q, owner, select=False, context=None):
+    async def show_plans(self, q, owner, select=False, context=None, force_new_message=False):
         plans=await get_plans(owner,True)
         settings=await get_seller_settings(owner)
         currency=normalize_currency(settings.get("currency")) or "INR"
@@ -41,9 +41,22 @@ class ClonePlansMixin:
             InlineKeyboardButton("⬅ Back", callback_data=back_target)
         ])
 
+        markup = InlineKeyboardMarkup(kb)
+        if force_new_message:
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+            await q.message.chat.send_message(
+                "\n".join(lines),
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+            return
+
         await self.safe_query_message(
             q,
             "\n".join(lines),
-            InlineKeyboardMarkup(kb),
+            markup,
         )
 
