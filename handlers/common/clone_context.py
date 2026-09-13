@@ -167,20 +167,25 @@ def _seller_razorpay_webhook_url(owner_id: int) -> str:
 
 
 def _seller_razorpay_text(g: dict) -> str:
+    mode = str(g.get("checkout_mode") or "upi_qr").lower()
+    mode_text = "UPI QR (30 minutes)" if mode == "upi_qr" else "Payment Link"
     return (
         "💳 Razorpay\n\n"
         f"Status: {'Enabled ✅' if g.get('enabled') else 'Disabled ❌'}\n"
         f"Key ID: {'Added' if g.get('key_id') else 'Not added'}\n"
         f"Key Secret: {'Added' if g.get('key_secret') else 'Not added'}\n"
+        f"Payment Mode: {mode_text}\n"
         f"Webhook URL: {'Generated ✅' if PUBLIC_BASE_URL else 'Not available ❌'}\n"
-        "Payment Mode: UPI QR (30 minutes)\n"
         f"Webhook Secret: {'Added ✅' if g.get('webhook_secret') else 'Not added ❌'}"
     )
 
 
-def _seller_razorpay_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+def _seller_razorpay_keyboard(enabled: bool, checkout_mode: str = "upi_qr") -> InlineKeyboardMarkup:
+    mode = str(checkout_mode or "upi_qr").lower()
+    switch_label = "🔄 Switch to Payment Link" if mode == "upi_qr" else "🔄 Switch to UPI QR (30 min)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⛔ Disable" if enabled else "✅ Enable", callback_data="a_pg_toggle_razorpay")],
+        [InlineKeyboardButton(switch_label, callback_data="a_pg_razorpay_mode")],
         [InlineKeyboardButton("🔑 Set / Replace Credentials", callback_data="a_pg_creds_razorpay")],
         [InlineKeyboardButton("🔐 Set Webhook Secret", callback_data="a_pg_webhook_secret")],
         [InlineKeyboardButton("🔗 Webhook Setup", callback_data="a_pg_webhook_setup")],
