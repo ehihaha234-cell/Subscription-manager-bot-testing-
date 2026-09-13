@@ -35,9 +35,9 @@ async def handle(self, update, context, q, owner, action):
             tx = await create_gateway_transaction(scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway, amount=float(plan['price']), currency=currency, purpose='child_subscription', reference_id=plan['plan_id'], metadata={'plan_id': plan['plan_id'], 'plan_name': plan['name'], 'description': f"{plan['name']} subscription"})
             try:
                 checkout = await create_checkout(tx)
-                text = f"💳 {gateway.title()} Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nOrder ID: {tx['transaction_id']}\n\nPayment successful hone ke baad plan automatically activate hoga."
+                text = f"💳 {gateway.title()} Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment successful hone ke baad plan automatically activate hoga."
                 rows.append([InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))])
-            except (GatewayError, ValueError, TypeError) as exc:
+            except GatewayError as exc:
                 text = f'❌ Gateway error: {exc}'
         stars_price = int(plan.get('stars_price', 0) or 0)
         if stars_enabled and stars_price > 0:
