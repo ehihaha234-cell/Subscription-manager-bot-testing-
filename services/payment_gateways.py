@@ -233,7 +233,7 @@ async def _create_cashfree(tx: dict, s: dict) -> dict:
     # Keep each Cashfree order short-lived so a QR/payment screen cannot be
     # reused indefinitely. Cashfree accepts an explicit order expiry time.
     from datetime import timedelta
-    expiry_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    expiry_at = datetime.now(timezone.utc) + timedelta(minutes=30)
     payload = {
         "order_id": tx["transaction_id"],
         "order_amount": amount,
