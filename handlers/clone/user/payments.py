@@ -1,23 +1,10 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
+from handlers.common.clone_context import *
+from database.payment_gateways import update_gateway_transaction
+from handlers.common.feature_navigation import feature_back_callback
 import io
 import aiohttp
-from telegram import InputFile
-
-from handlers.common.clone_context import *
-
-
-async def _download_razorpay_qr(url: str) -> InputFile:
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, allow_redirects=True) as response:
-            if response.status >= 400:
-                raise RuntimeError(f"QR image HTTP {response.status}")
-            data = await response.read()
-    if not data:
-        raise RuntimeError("Razorpay QR image is empty")
-    return InputFile(io.BytesIO(data), filename="razorpay_qr.png")
-from handlers.common.feature_navigation import feature_back_callback
 
 
 async def handle(self, update, context, q, owner, action):
@@ -48,24 +35,66 @@ async def handle(self, update, context, q, owner, action):
         text = ''
         if enabled:
             gateway = enabled[0]
-            tx = await create_gateway_transaction(scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway, amount=float(plan['price']), currency=currency, purpose='child_subscription', reference_id=plan['plan_id'], metadata={'plan_id': plan['plan_id'], 'plan_name': plan['name'], 'description': f"{plan['name']} subscription"})
+            tx = await create_gateway_transaction(
+                scope='seller', owner_id=owner, payer_user_id=q.from_user.id,
+                gateway=gateway, amount=float(plan['price']), currency=currency,
+                purpose='child_subscription', reference_id=plan['plan_id'],
+                metadata={
+                    'plan_id': plan['plan_id'],
+                    'plan_name': plan['name'],
+                    'description': f"{plan['name']} subscription",
+                    'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
+                },
+            )
             try:
                 checkout = await create_checkout(tx)
-                if gateway == 'razorpay' and checkout.get('qr_image_url'):
+                if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
+                    image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
+                    if not image_url:
+                        raise GatewayError('Razorpay QR image URL was not returned')
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+                        async with session.get(image_url) as response:
+                            if response.status >= 400:
+                                raise GatewayError(f'Unable to load Razorpay QR image (HTTP {response.status})')
+                            image_bytes = await response.read()
+                    close_by = int(checkout.get('qr_close_by') or 0)
+                    remaining = max(1, int((close_by - __import__('time').time() + 59) // 60)) if close_by else 30
                     text = (
-                        "💳 Razorpay UPI Payment\n\n"
+                        f"💳 Razorpay UPI Payment\n\n"
                         f"Plan: {plan['name']}\n"
                         f"Amount: {format_currency(currency, plan['price'])}\n"
                         f"Transaction: {tx['transaction_id']}\n\n"
-                        "📱 Scan this QR with any UPI app.\n"
-                        "⏳ QR is valid for 30 minutes.\n"
-                        "✅ Payment will be verified automatically.\n"
-                        "You do not need to send a payment screenshot."
+                        f"📱 Scan this QR with any UPI app.\n"
+                        f"⏳ QR is valid for {remaining} minutes.\n"
+                        f"✅ Payment will be verified automatically.\n"
+                        f"You do not need to send a payment screenshot."
                     )
-                else:
-                    text = f"💳 {gateway.title()} Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment successful hone ke baad plan automatically activate hoga."
-                    if checkout.get('checkout_url'):
-                        rows.append([InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))])
+                    try:
+                        await q.message.delete()
+                    except TelegramError:
+                        pass
+                    sent = await context.bot.send_photo(
+                        chat_id=q.message.chat_id,
+                        photo=io.BytesIO(image_bytes),
+                        caption=text,
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                    )
+                    await update_gateway_transaction(
+                        tx['transaction_id'],
+                        payment_message_chat_id=int(sent.chat_id),
+                        payment_message_id=int(sent.message_id),
+                        payment_message_type='photo',
+                    )
+                    return True
+
+                text = (
+                    f"💳 {gateway.title()} Payment\n\n"
+                    f"Plan: {plan['name']}\n"
+                    f"Amount: {format_currency(currency, plan['price'])}\n"
+                    f"Transaction: {tx['transaction_id']}\n\n"
+                    f"Payment successful hone ke baad plan automatically activate hoga."
+                )
+                rows.append([InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))])
             except GatewayError as exc:
                 text = f'❌ Gateway error: {exc}'
         stars_price = int(plan.get('stars_price', 0) or 0)
@@ -93,28 +122,6 @@ async def handle(self, update, context, q, owner, action):
             text = '⚠️ No payment method is currently available. Please contact support.'
         rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
         kb = InlineKeyboardMarkup(rows)
-        if enabled and enabled[0] == 'razorpay' and 'checkout' in locals() and checkout.get('qr_image_url'):
-            try:
-                await q.message.delete()
-            except TelegramError:
-                pass
-            try:
-                await context.bot.send_photo(
-                    chat_id=q.message.chat_id,
-                    photo=await _download_razorpay_qr(checkout['qr_image_url']),
-                    caption=text,
-                    reply_markup=kb,
-                )
-            except Exception:
-                await self.safe_query_message(
-                    q,
-                    f"{text}\n\nQR image could not be displayed. Please open it below.",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton('🔗 Open QR', url=checkout['qr_image_url'])],
-                        [InlineKeyboardButton('⬅ Back', callback_data='c_buy')],
-                    ]),
-                )
-            return True
         if qr_file_id and manual_enabled:
             try:
                 await q.message.delete()
@@ -157,57 +164,57 @@ async def handle(self, update, context, q, owner, action):
         if currency != 'INR':
             await self.safe_query_message(q, f'⚠️ {gateway.title()} automatic checkout is currently configured for INR only. Current bot currency is {currency}. Use Manual Payment or change the currency to INR.', back_keyboard)
             return True
-        tx = await create_gateway_transaction(scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway, amount=float(plan['price']), currency=currency, purpose='child_subscription', reference_id=plan_id, metadata={'plan_id': plan_id, 'plan_name': plan['name'], 'description': f"{plan['name']} subscription"})
+        tx = await create_gateway_transaction(
+            scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway,
+            amount=float(plan['price']), currency=currency, purpose='child_subscription',
+            reference_id=plan_id, metadata={
+                'plan_id': plan_id, 'plan_name': plan['name'],
+                'description': f"{plan['name']} subscription",
+                'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
+            },
+        )
         try:
             checkout = await create_checkout(tx)
+            if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
+                image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+                    async with session.get(image_url) as response:
+                        if response.status >= 400:
+                            raise GatewayError(f'Unable to load Razorpay QR image (HTTP {response.status})')
+                        image_bytes = await response.read()
+                close_by = int(checkout.get('qr_close_by') or 0)
+                remaining = max(1, int((close_by - __import__('time').time() + 59) // 60)) if close_by else 30
+                text = (
+                    f"💳 Razorpay UPI Payment\n\nPlan: {plan['name']}\n"
+                    f"Amount: {format_currency(currency, plan['price'])}\n"
+                    f"Transaction: {tx['transaction_id']}\n\n"
+                    f"📱 Scan this QR with any UPI app.\n"
+                    f"⏳ QR is valid for {remaining} minutes.\n"
+                    f"✅ Payment will be verified automatically.\n"
+                    f"You do not need to send a payment screenshot."
+                )
+                try:
+                    await q.message.delete()
+                except TelegramError:
+                    pass
+                sent = await context.bot.send_photo(
+                    chat_id=q.message.chat_id, photo=io.BytesIO(image_bytes), caption=text,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                )
+                await update_gateway_transaction(
+                    tx['transaction_id'], payment_message_chat_id=int(sent.chat_id),
+                    payment_message_id=int(sent.message_id), payment_message_type='photo',
+                )
+                return True
+            await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
+            await update_gateway_transaction(
+                tx['transaction_id'], payment_message_chat_id=int(q.message.chat_id),
+                payment_message_id=int(q.message.message_id), payment_message_type='text',
+            )
         except GatewayError as exc:
             await self.safe_query_message(q, f'❌ Gateway error: {exc}', back_keyboard)
-            return True
-
-        if gateway == 'razorpay' and checkout.get('qr_image_url'):
-            text = (
-                "💳 Razorpay UPI Payment\n\n"
-                f"Plan: {plan['name']}\n"
-                f"Amount: {format_currency(currency, plan['price'])}\n"
-                f"Transaction: {tx['transaction_id']}\n\n"
-                "📱 Scan this QR with any UPI app.\n"
-                "⏳ QR is valid for 30 minutes.\n"
-                "✅ Payment will be verified automatically.\n"
-                "You do not need to send a payment screenshot."
-            )
-            try:
-                await q.message.delete()
-            except TelegramError:
-                pass
-            try:
-                await context.bot.send_photo(
-                    chat_id=q.message.chat_id,
-                    photo=await _download_razorpay_qr(checkout['qr_image_url']),
-                    caption=text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]
-                    ]),
-                )
-            except Exception:
-                await self.safe_query_message(
-                    q,
-                    f"{text}\n\nQR image could not be displayed. Please open the QR link below.",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton('🔗 Open QR', url=checkout['qr_image_url'])],
-                        [InlineKeyboardButton('⬅ Back', callback_data='c_buy')],
-                    ]),
-                )
-            return True
-
-        rows = []
-        if checkout.get('checkout_url'):
-            rows.append([InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))])
-        rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
-        await self.safe_query_message(
-            q,
-            f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.",
-            InlineKeyboardMarkup(rows),
-        )
+        return True
+        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
         return True
     if action == 'c_upload':
         context.user_data['waiting_child_screenshot'] = True
