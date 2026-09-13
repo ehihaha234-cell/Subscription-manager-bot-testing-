@@ -230,10 +230,6 @@ async def _create_cashfree(tx: dict, s: dict) -> dict:
         or f"telegram{tx['payer_user_id']}@example.com"
     ).strip()
 
-    # Keep each Cashfree order short-lived so a QR/payment screen cannot be
-    # reused indefinitely. Cashfree accepts an explicit order expiry time.
-    from datetime import timedelta
-    expiry_at = datetime.now(timezone.utc) + timedelta(minutes=30)
     payload = {
         "order_id": tx["transaction_id"],
         "order_amount": amount,
@@ -247,7 +243,6 @@ async def _create_cashfree(tx: dict, s: dict) -> dict:
             "return_url": f"{_base_url()}/payment/return/{tx['transaction_id']}",
             "notify_url": f"{_base_url()}/webhooks/cashfree/{tx['scope']}/{tx['owner_id']}",
         },
-        "order_expiry_time": expiry_at.isoformat(),
         "order_note": metadata.get("description", tx["purpose"]),
     }
     data = await _request(
@@ -261,19 +256,15 @@ async def _create_cashfree(tx: dict, s: dict) -> dict:
         raise GatewayError("Cashfree payment session was not returned")
 
     checkout = f"{_base_url()}/checkout/cashfree/{tx['transaction_id']}"
-    result = {
+    return {
         "gateway_order_id": tx["transaction_id"],
         "cashfree_cf_order_id": str(data.get("cf_order_id") or ""),
         "payment_session_id": session_id,
         "checkout_url": checkout,
         "gateway_response": data,
         "gateway_mode": mode,
-        "cashfree_order_expiry_time": data.get("order_expiry_time") or expiry_at.isoformat(),
         "status": "pending",
     }
-
-
-    return result
 
 
 async def _phonepe_token(s: dict) -> str:
