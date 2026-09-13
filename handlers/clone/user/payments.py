@@ -61,7 +61,7 @@ async def handle(self, update, context, q, owner, action):
                             f"💰 Amount: {format_currency(currency, plan['price'])}\n"
                             f"🧾 Order ID: {tx['transaction_id']}\n\n"
                             f"📱 Scan this QR with any UPI app\n"
-                            f"⏱ Payment order expires in 5 minutes\n\n"
+                            f"⏱ Payment order expires in 30 minutes\n\n"
                             f"✅ Payment will be verified automatically.\n"
                             f"🔗 You can also open the Cashfree payment page below."
                         ),
