@@ -27,9 +27,12 @@ from database.payment_gateways import (
     reserve_webhook_event,
     mark_valid_webhook_received,
     update_gateway_transaction,
+    expire_due_razorpay_qr_transactions,
+    mark_transaction_expired,
 )
 from database.seller_data import fulfill_subscription_payment, get_plan, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
+from database.seller_bots import get_decrypted_bot_token
 from database.platform_features import create_invoice, audit
 
 
@@ -203,52 +206,67 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
         raise GatewayError("Razorpay credentials are incomplete")
 
     auth = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
-    amount_paise = int(round(float(tx["amount"]) * 100))
-    if amount_paise <= 0:
-        raise GatewayError("Razorpay amount must be greater than zero")
+    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+    mode = str(s.get("checkout_mode") or "upi_qr").lower()
 
-    metadata = tx.get("metadata") or {}
-    plan_name = str(metadata.get("plan_name") or metadata.get("description") or "Subscription")
-    # Razorpay QR Codes require close_by to be at least 15 minutes in the future.
-    # Keep each subscription QR open for 30 minutes.
-    close_by = int(time.time()) + (30 * 60)
+    if mode == "upi_qr":
+        close_by = int((datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp())
+        payload = {
+            "type": "upi_qr",
+            "name": str(tx["metadata"].get("plan_name") or "Subscription Payment")[:100],
+            "usage": "single_use",
+            "fixed_amount": True,
+            "payment_amount": int(round(float(tx["amount"]) * 100)),
+            "description": str(tx["metadata"].get("description") or tx["purpose"])[:255],
+            "close_by": close_by,
+            "notes": {
+                "transaction_id": str(tx["transaction_id"]),
+                "plan_id": str(tx["metadata"].get("plan_id") or tx["reference_id"]),
+                "owner_id": str(tx["owner_id"]),
+            },
+        }
+        data = await _request(
+            "POST",
+            "https://api.razorpay.com/v1/payments/qr_codes",
+            headers=headers,
+            json=payload,
+        )
+        qr_id = str(data.get("id") or "")
+        image_url = str(data.get("image_url") or "")
+        if not qr_id or not image_url:
+            raise GatewayError("Razorpay QR Code was not returned by the API")
+        returned_close_by = int(data.get("close_by") or close_by)
+        return {
+            "gateway_order_id": qr_id,
+            "checkout_url": image_url,
+            "qr_code_id": qr_id,
+            "qr_image_url": image_url,
+            "qr_close_by": returned_close_by,
+            "checkout_mode": "upi_qr",
+            "gateway_response": data,
+            "status": "pending",
+        }
+
     payload = {
-        "type": "upi_qr",
-        "name": plan_name[:100],
-        "usage": "single_use",
-        "fixed_amount": True,
-        "payment_amount": amount_paise,
-        "description": str(metadata.get("description") or tx["purpose"])[:255],
-        "close_by": close_by,
-        "notes": {
-            "transaction_id": tx["transaction_id"],
-            "scope": tx["scope"],
-            "owner_id": str(tx["owner_id"]),
-        },
+        "amount": int(round(tx["amount"] * 100)),
+        "currency": tx["currency"],
+        "reference_id": tx["transaction_id"],
+        "description": tx["metadata"].get("description", tx["purpose"]),
+        "callback_url": f"{_base_url()}/payment/return/{tx['transaction_id']}",
+        "callback_method": "get",
+        "notes": {"transaction_id": tx["transaction_id"], "scope": tx["scope"], "owner_id": str(tx["owner_id"])},
     }
-
     data = await _request(
         "POST",
-        "https://api.razorpay.com/v1/payments/qr_codes",
-        headers={
-            "Authorization": f"Basic {auth}",
-            "Content-Type": "application/json",
-        },
+        "https://api.razorpay.com/v1/payment_links",
+        headers=headers,
         json=payload,
     )
-    qr_id = str(data.get("id") or "")
-    qr_image_url = str(data.get("image_url") or "")
-    if not qr_id or not qr_image_url:
-        raise GatewayError("Razorpay QR Code was not returned")
-
     return {
-        "gateway_order_id": qr_id,
-        "razorpay_qr_id": qr_id,
-        "qr_image_url": qr_image_url,
-        "qr_close_by": close_by,
-        "checkout_url": "",
+        "gateway_order_id": data.get("id", ""),
+        "checkout_url": data.get("short_url", ""),
+        "checkout_mode": "payment_link",
         "gateway_response": data,
-        "gateway_mode": "live",
         "status": "pending",
     }
 
@@ -398,6 +416,35 @@ async def verify_and_fulfill_cashfree_return(transaction_id: str) -> tuple[bool,
     return True, "fulfilled"
 
 
+async def _verify_razorpay_qr_payment(tx: dict, settings: dict) -> tuple[str, dict]:
+    """Fetch the QR's payments and verify the exact expected amount/currency."""
+    key_id, key_secret = settings.get("key_id"), settings.get("key_secret")
+    qr_id = str(tx.get("qr_code_id") or tx.get("gateway_order_id") or "")
+    if not key_id or not key_secret or not qr_id:
+        raise GatewayError("Razorpay QR verification data is incomplete")
+    auth = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}"}
+    data = await _request(
+        "GET",
+        f"https://api.razorpay.com/v1/payments/qr_codes/{qr_id}/payments",
+        headers=headers,
+    )
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise GatewayError("Razorpay QR payment verification response is invalid")
+    expected_amount = int(round(float(tx.get("amount") or 0) * 100))
+    successful = next(
+        (item for item in reversed(items)
+         if str(item.get("status") or "").lower() == "captured"
+         and int(item.get("amount") or 0) == expected_amount
+         and str(item.get("currency") or tx.get("currency") or "INR").upper() == str(tx.get("currency") or "INR").upper()),
+        None,
+    )
+    if not successful or not successful.get("id"):
+        raise GatewayError("No matching captured Razorpay QR payment found")
+    return str(successful["id"]), {"qr": {"id": qr_id}, "payment": successful}
+
+
 async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, headers: dict[str, str], raw_body: bytes, payload: dict) -> tuple[bool, str]:
     cfg = await get_gateway_config(scope, owner_id, decrypt=True)
     s = (cfg.get("gateways") or {}).get(gateway) or {}
@@ -407,54 +454,16 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
         if not secret or not hmac.compare_digest(expected, headers.get("x-razorpay-signature", "")):
             return False, "invalid signature"
         await mark_valid_webhook_received(scope, owner_id, "razorpay")
-        event = str(payload.get("event") or "")
-        payment_entity = (((payload.get("payload") or {}).get("payment") or {}).get("entity") or {})
+        event = payload.get("event", "")
+        entity = (((payload.get("payload") or {}).get("payment") or {}).get("entity") or {})
         order = (((payload.get("payload") or {}).get("payment_link") or {}).get("entity") or {})
-        qr = (((payload.get("payload") or {}).get("qr_code") or {}).get("entity") or {})
-
-        if event == "qr_code.credited":
-            # QR payments carry the transaction reference in the QR notes.
-            # Fall back to the QR id so the transaction can still be found
-            # when older/partial webhook payloads omit notes.
-            txid = (qr.get("notes") or {}).get("transaction_id")
-            qr_id = str(qr.get("id") or "")
-            if not txid and qr_id:
-                tx = await get_transaction_by_gateway_order("razorpay", qr_id)
-                txid = tx.get("transaction_id") if tx else None
-
-            payment_id = str(payment_entity.get("id") or "")
-            amount_paise = int(payment_entity.get("amount") or 0)
-            currency_value = str(payment_entity.get("currency") or "").upper()
-            success = (
-                str(payment_entity.get("status") or "").lower() == "captured"
-                and bool(payment_entity.get("captured"))
-            )
-            event_key = (
-                f"{payload.get('account_id', '')}:{event}:{payment_id}:{qr_id}"
-            )
-
-            if not txid:
-                return False, "unknown Razorpay QR transaction"
-
-            # QR is fixed-amount, but verify the actual credited amount and
-            # currency before allowing fulfillment.
-            tx = await get_gateway_transaction(str(txid))
-            if not tx:
-                return False, "unknown transaction"
-            expected_currency = str(tx.get("currency") or "INR").upper()
-            expected_paise = int(round(float(tx.get("amount") or 0) * 100))
-            if currency_value != expected_currency:
-                return False, "Razorpay QR currency mismatch"
-            if amount_paise != expected_paise:
-                return False, "Razorpay QR amount mismatch"
-        else:
-            entity = payment_entity
-            txid = (entity.get("notes") or {}).get("transaction_id") or order.get("reference_id")
-            success = event in {"payment.captured", "order.paid", "payment_link.paid"}
-            payment_id = entity.get("id", "")
-            if not payment_id and order.get("payments"):
-                payment_id = order.get("payments", [{}])[-1].get("payment_id", "")
-            event_key = payload.get("account_id", "") + ":" + event + ":" + str(entity.get("id") or order.get("id"))
+        qr_entity = (((payload.get("payload") or {}).get("qr_code") or {}).get("entity") or {})
+        txid = (entity.get("notes") or {}).get("transaction_id") or order.get("reference_id") or (qr_entity.get("notes") or {}).get("transaction_id")
+        success = event in {"payment.captured", "order.paid", "payment_link.paid", "qr_code.credited"}
+        payment_id = entity.get("id", "")
+        if not payment_id and order.get("payments"):
+            payment_id = order.get("payments", [{}])[-1].get("payment_id", "")
+        event_key = payload.get("account_id", "") + ":" + event + ":" + str(entity.get("id") or order.get("id") or qr_entity.get("id"))
     elif gateway == "cashfree":
         timestamp = headers.get("x-webhook-timestamp", "")
         signature = headers.get("x-webhook-signature", "")
@@ -515,6 +524,20 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
         return False, "gateway mismatch"
     if tx.get("scope") != scope or int(tx.get("owner_id", -1)) != int(owner_id):
         return False, "payment scope mismatch"
+
+    if gateway == "razorpay" and event == "qr_code.credited" and success:
+        try:
+            verified_payment_id, verified_payload = await _verify_razorpay_qr_payment(tx, s)
+        except GatewayError as exc:
+            await update_gateway_transaction(
+                tx["transaction_id"],
+                status="verification_pending",
+                verification_error=str(exc)[:500],
+                last_gateway_event=payload,
+            )
+            return False, str(exc)
+        payment_id = verified_payment_id
+        payload = {**payload, "server_verification": verified_payload}
 
     if gateway == "cashfree" and success:
         try:
@@ -579,6 +602,93 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
         )
         raise
     return True, "processed"
+
+
+async def expire_razorpay_qr_transactions_job() -> int:
+    """Expire local Razorpay QR screens and replace them with the plan menu."""
+    rows = await expire_due_razorpay_qr_transactions(limit=100)
+    if not rows:
+        return 0
+
+    from database.seller_data import get_plans, get_seller_settings
+    from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+
+    processed = 0
+    for tx in rows:
+        transaction_id = str(tx.get("transaction_id") or "")
+        if not transaction_id:
+            continue
+        # A QR webhook may arrive just before this scheduler tick. Re-check the
+        # transaction before editing the user's payment screen.
+        current = await get_gateway_transaction(transaction_id)
+        if not current or current.get("status") in {"paid", "fulfilled"}:
+            continue
+        expired = await mark_transaction_expired(transaction_id)
+        if not expired:
+            continue
+
+        owner_id = int(expired.get("owner_id") or 0)
+        user_id = int(expired.get("payer_user_id") or 0)
+        plans = await get_plans(owner_id, True)
+        settings = await get_seller_settings(owner_id)
+        currency = str(settings.get("currency") or "INR").upper()
+        lines = ["⏳ Payment QR Expired", "", "This payment QR code has expired.", "Please select a plan again.", ""]
+        rows_kb = []
+        for plan in plans:
+            rows_kb.append([InlineKeyboardButton(
+                f"Buy {plan['name']} - ₹{float(plan['price']):g}",
+                callback_data=f"c_select_{plan['plan_id']}",
+            )])
+        rows_kb.append([InlineKeyboardButton("⬅ Back", callback_data="c_buy")])
+        markup = InlineKeyboardMarkup(rows_kb)
+
+        chat_id = int(expired.get("payment_message_chat_id") or user_id)
+        message_id = int(expired.get("payment_message_id") or 0)
+        if message_id:
+            try:
+                from services.bot_manager import bot_manager
+                running = bot_manager.get_running(int((expired.get("metadata") or {}).get("bot_id") or 0))
+                bot = running.application.bot if running else None
+                owned_bot = None
+                if bot is None:
+                    token = await get_decrypted_bot_token(int((expired.get("metadata") or {}).get("bot_id") or 0))
+                    if token:
+                        owned_bot = Bot(token)
+                        await owned_bot.initialize()
+                        bot = owned_bot
+                if bot:
+                    if expired.get("payment_message_type") == "photo":
+                        await bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="\n".join(lines), reply_markup=markup)
+                    else:
+                        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="\n".join(lines), reply_markup=markup)
+                if owned_bot:
+                    await owned_bot.shutdown()
+            except Exception:
+                logger.exception("Could not replace expired Razorpay QR message transaction_id=%s", transaction_id)
+        processed += 1
+    return processed
+
+
+async def _delete_pending_payment_message(tx: dict) -> None:
+    """Remove the QR/payment screen before the automatic success message."""
+    chat_id = int(tx.get("payment_message_chat_id") or tx.get("payer_user_id") or 0)
+    message_id = int(tx.get("payment_message_id") or 0)
+    if not chat_id or not message_id:
+        return
+    try:
+        from services.bot_manager import bot_manager
+        running = bot_manager.get_running(int(tx.get("owner_id") or 0))
+        if not running:
+            record = await get_bot_by_data_owner_id(int(tx.get("owner_id") or 0))
+            if record:
+                started = await bot_manager.start_bot(int(record.get("bot_id") or 0))
+                running = bot_manager.get_running(int(tx.get("owner_id") or 0)) if started else None
+        if not running:
+            return
+        await running.application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        await update_gateway_transaction(tx["transaction_id"], payment_message_deleted_at=datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("Could not delete pending payment message transaction_id=%s", tx.get("transaction_id"))
 
 
 async def fulfill_transaction(tx: dict) -> None:
@@ -694,6 +804,7 @@ async def fulfill_transaction(tx: dict) -> None:
                 )
         return
     if tx["purpose"] == "child_subscription":
+        await _delete_pending_payment_message(tx)
         seller_id = tx["owner_id"]
         plan = await get_plan(seller_id, tx["metadata"]["plan_id"])
         if not plan:
