@@ -236,11 +236,13 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
         if not qr_id or not image_url:
             raise GatewayError("Razorpay QR Code was not returned by the API")
         returned_close_by = int(data.get("close_by") or close_by)
+        image_content = str(data.get("image_content") or "")
         return {
             "gateway_order_id": qr_id,
             "checkout_url": image_url,
             "qr_code_id": qr_id,
             "qr_image_url": image_url,
+            "qr_image_content": image_content,
             "qr_close_by": returned_close_by,
             "checkout_mode": "upi_qr",
             "gateway_response": data,
