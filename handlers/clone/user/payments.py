@@ -3,6 +3,7 @@
 from handlers.common.clone_context import *
 from database.payment_gateways import update_gateway_transaction
 from handlers.common.feature_navigation import feature_back_callback
+import asyncio
 import io
 import time
 import qrcode
@@ -40,11 +41,16 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('Plan not found', show_alert=True)
             return True
         context.user_data['selected_child_plan'] = plan
-        s = await get_seller_settings(owner)
-        qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get('seller_bot_id') or 0))
-        if not qr_file_id:
-            qr_file_id = str(s.get('upi_qr_file_id') or '')
-        gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
+        # Acknowledge the callback immediately and fetch independent DB reads in parallel.
+        try:
+            await q.answer()
+        except TelegramError:
+            pass
+        s, gateway_cfg = await asyncio.gather(
+            get_seller_settings(owner),
+            get_gateway_config('seller', owner, decrypt=True),
+        )
+        qr_file_id = ''
         gateways = gateway_cfg.get('gateways') or {}
         currency = normalize_currency(s.get('currency')) or 'INR'
         enabled = [g for g in SUPPORTED_GATEWAYS if (gateways.get(g) or {}).get('enabled')]
@@ -92,16 +98,18 @@ async def handle(self, update, context, q, owner, action):
                         f"✅ Payment will be verified automatically.\n"
                         f"You do not need to send a payment screenshot."
                     )
-                    try:
-                        await q.message.delete()
-                    except TelegramError:
-                        pass
+                    # Send the QR first; deleting the old plan message before the upload
+                    # only adds another Telegram round-trip to the critical path.
                     sent = await context.bot.send_photo(
                         chat_id=q.message.chat_id,
                         photo=qr_photo if qr_photo is not None else image_url,
                         caption=text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                     )
+                    try:
+                        await q.message.delete()
+                    except TelegramError:
+                        pass
                     await update_gateway_transaction(
                         tx['transaction_id'],
                         payment_message_chat_id=int(sent.chat_id),
@@ -145,6 +153,10 @@ async def handle(self, update, context, q, owner, action):
             text = '⚠️ No payment method is currently available. Please contact support.'
         rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
         kb = InlineKeyboardMarkup(rows)
+        if manual_enabled:
+            qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get('seller_bot_id') or 0))
+            if not qr_file_id:
+                qr_file_id = str(s.get('upi_qr_file_id') or '')
         if qr_file_id and manual_enabled:
             try:
                 await q.message.delete()
@@ -173,6 +185,10 @@ async def handle(self, update, context, q, owner, action):
         )
         return True
     if action.startswith('c_pg_'):
+        try:
+            await q.answer()
+        except TelegramError:
+            pass
         try:
             _, _, gateway, plan_id = action.split('_', 3)
         except ValueError:
@@ -216,14 +232,14 @@ async def handle(self, update, context, q, owner, action):
                     f"✅ Payment will be verified automatically.\n"
                     f"You do not need to send a payment screenshot."
                 )
-                try:
-                    await q.message.delete()
-                except TelegramError:
-                    pass
                 sent = await context.bot.send_photo(
                     chat_id=q.message.chat_id, photo=qr_photo if qr_photo is not None else image_url, caption=text,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                 )
+                try:
+                    await q.message.delete()
+                except TelegramError:
+                    pass
                 await update_gateway_transaction(
                     tx['transaction_id'], payment_message_chat_id=int(sent.chat_id),
                     payment_message_id=int(sent.message_id), payment_message_type='photo',
