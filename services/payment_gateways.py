@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -54,16 +55,46 @@ async def _request(method: str, url: str, **kwargs) -> dict:
     return data
 
 
+_HTTP_SESSION: aiohttp.ClientSession | None = None
+_HTTP_SESSION_LOOP = None
+
+
+def _get_http_session() -> aiohttp.ClientSession:
+    """Reuse one HTTP/TLS connection pool instead of creating a new session per request."""
+    global _HTTP_SESSION, _HTTP_SESSION_LOOP
+    loop = asyncio.get_running_loop()
+    if _HTTP_SESSION is None or _HTTP_SESSION.closed or _HTTP_SESSION_LOOP is not loop:
+        connector = aiohttp.TCPConnector(
+            limit=50,
+            ttl_dns_cache=300,
+            keepalive_timeout=30,
+            enable_cleanup_closed=True,
+        )
+        _HTTP_SESSION = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
+            connector=connector,
+        )
+        _HTTP_SESSION_LOOP = loop
+    return _HTTP_SESSION
+
+
 async def _request_with_status(method: str, url: str, **kwargs) -> tuple[int, dict]:
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.request(method, url, **kwargs) as response:
-            text = await response.text()
-            try:
-                data = json.loads(text) if text else {}
-            except json.JSONDecodeError:
-                data = {"raw": text}
-            return response.status, data
+    session = _get_http_session()
+    async with session.request(method, url, **kwargs) as response:
+        text = await response.text()
+        try:
+            data = json.loads(text) if text else {}
+        except json.JSONDecodeError:
+            data = {"raw": text}
+        return response.status, data
+
+
+async def close_gateway_http_session() -> None:
+    global _HTTP_SESSION, _HTTP_SESSION_LOOP
+    if _HTTP_SESSION is not None and not _HTTP_SESSION.closed:
+        await _HTTP_SESSION.close()
+    _HTTP_SESSION = None
+    _HTTP_SESSION_LOOP = None
 
 
 def _cashfree_base(mode: str) -> str:
