@@ -688,6 +688,7 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 2) -> int:
                             qr_code_id=str(checkout.get("qr_code_id") or ""),
                             image_url=str(checkout.get("qr_image_url") or ""),
                             image_content=str(checkout.get("qr_image_content") or ""),
+                            telegram_file_id="",
                             qr_close_by=int(checkout.get("qr_close_by") or 0),
                             gateway_response=checkout.get("gateway_response") or {},
                         )
