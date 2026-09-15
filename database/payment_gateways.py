@@ -609,7 +609,7 @@ async def count_available_razorpay_qr_pool(
 
 async def create_razorpay_qr_pool_entry(
     *, owner_id: int, plan_id: str, amount: float, currency: str, qr_code_id: str,
-    image_url: str = "", image_content: str = "", qr_close_by: int, gateway_response: dict | None = None,
+    image_url: str = "", image_content: str = "", telegram_file_id: str = "", qr_close_by: int, gateway_response: dict | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
     doc = {
@@ -620,6 +620,7 @@ async def create_razorpay_qr_pool_entry(
         "qr_code_id": str(qr_code_id),
         "image_url": str(image_url or ""),
         "image_content": str(image_content or ""),
+        "telegram_file_id": str(telegram_file_id or ""),
         "qr_close_by": int(qr_close_by),
         "status": "available",
         "created_at": now,
@@ -654,6 +655,21 @@ async def claim_razorpay_qr_pool_entry(
             "updated_at": datetime.now(timezone.utc),
         }},
         sort=[("qr_close_by", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+async def cache_razorpay_qr_telegram_file_id(qr_code_id: str, telegram_file_id: str) -> dict | None:
+    """Cache the Telegram file_id after the QR image has been uploaded once.
+
+    Telegram file_ids are reusable by the same bot, so subsequent users can
+    receive the already-uploaded QR without another image upload.
+    """
+    if not str(qr_code_id).strip() or not str(telegram_file_id).strip():
+        return None
+    return await _razorpay_qr_pool().find_one_and_update(
+        {"qr_code_id": str(qr_code_id)},
+        {"$set": {"telegram_file_id": str(telegram_file_id), "updated_at": datetime.now(timezone.utc)}},
         return_document=ReturnDocument.AFTER,
     )
 
