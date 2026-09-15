@@ -38,6 +38,7 @@ from database.payment_gateways import (
     delete_razorpay_qr_pool_entry,
     list_available_razorpay_qr_pool_entries,
     cache_razorpay_qr_telegram_file_id,
+    claim_active_razorpay_qr_transaction_for_cancel,
 )
 from database.seller_data import fulfill_subscription_payment, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
@@ -626,6 +627,40 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
     return True, "processed"
 
 
+async def cancel_previous_razorpay_qr_for_same_plan(
+    bot, owner_id: int, payer_user_id: int, bot_id: int, plan_id: str
+) -> int:
+    """Remove the user's previous QR for the same plan before showing a new one.
+
+    Different plans are intentionally untouched. The QR is also closed at
+    Razorpay and its pool record is deleted so it cannot later trigger an
+    unexpected subscription.
+    """
+    txs = await claim_active_razorpay_qr_transaction_for_cancel(
+        int(owner_id), int(payer_user_id), int(bot_id), str(plan_id)
+    )
+    if not txs:
+        return 0
+
+    cfg = await get_gateway_config("seller", int(owner_id), decrypt=True)
+    settings = (cfg.get("gateways") or {}).get("razorpay") or {}
+    removed = 0
+    for tx in txs:
+        chat_id = int(tx.get("payment_message_chat_id") or payer_user_id)
+        message_id = int(tx.get("payment_message_id") or 0)
+        if message_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+        qr_id = str(tx.get("qr_code_id") or tx.get("gateway_order_id") or "")
+        if qr_id:
+            await _close_razorpay_qr(qr_id, settings)
+            await delete_razorpay_qr_pool_entry(qr_id)
+        removed += 1
+    return removed
+
+
 async def _close_razorpay_qr(qr_code_id: str, settings: dict) -> None:
     key_id, key_secret = settings.get("key_id"), settings.get("key_secret")
     if not key_id or not key_secret or not qr_code_id:
@@ -689,7 +724,7 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 2) -> int:
                 for plan in plans:
                     plan_id=str(plan.get("plan_id") or ""); amount=float(plan.get("price") or 0)
                     if not plan_id or amount<=0: continue
-                    available=await count_available_razorpay_qr_pool(owner_id,plan_id,amount,"INR",bot_id=bot_id,minimum_valid_seconds=120)
+                    available=await count_available_razorpay_qr_pool(owner_id,plan_id,amount,"INR",bot_id=bot_id,minimum_valid_seconds=20 * 60)
                     for _ in range(max(0,target-available)):
                         try:
                             fake_tx={"transaction_id":"prewarm_"+uuid4().hex,"owner_id":owner_id,"amount":amount,"currency":"INR","metadata":{"plan_id":plan_id,"plan_name":str(plan.get("name") or "Subscription")[:100],"description":f"{str(plan.get('name') or 'Subscription')} subscription"},"purpose":"child_subscription"}
@@ -698,7 +733,7 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 2) -> int:
                             await _cache_pool_qr_on_telegram(bot,owner_id,row); created+=1
                         except Exception:
                             logger.exception("Razorpay QR prewarm/cache failed owner_id=%s bot_id=%s plan_id=%s",owner_id,bot_id,plan_id); break
-                    rows=await list_available_razorpay_qr_pool_entries(owner_id,bot_id,plan_id,target)
+                    rows=await list_available_razorpay_qr_pool_entries(owner_id,bot_id,plan_id,target,minimum_valid_seconds=20 * 60)
                     for row in rows:
                         if not str(row.get("telegram_file_id") or "").strip():
                             try: await _cache_pool_qr_on_telegram(bot,owner_id,row)
