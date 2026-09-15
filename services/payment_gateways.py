@@ -36,10 +36,12 @@ from database.payment_gateways import (
     create_razorpay_qr_pool_entry,
     get_expired_razorpay_qr_pool_entries,
     delete_razorpay_qr_pool_entry,
+    list_available_razorpay_qr_pool_entries,
+    cache_razorpay_qr_telegram_file_id,
 )
 from database.seller_data import fulfill_subscription_payment, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
-from database.seller_bots import get_decrypted_bot_token
+from database.seller_bots import get_decrypted_bot_token, get_bots
 from database.platform_features import create_invoice, audit
 
 
@@ -220,7 +222,7 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
     mode = str(s.get("checkout_mode") or "upi_qr").lower()
 
     if mode == "upi_qr":
-        close_by = int((datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp())
+        close_by = int((datetime.now(timezone.utc) + timedelta(minutes=20)).timestamp())
         payload = {
             "type": "upi_qr",
             "name": str(tx["metadata"].get("plan_name") or "Subscription Payment")[:100],
@@ -642,62 +644,66 @@ async def _close_razorpay_qr(qr_code_id: str, settings: dict) -> None:
         pass
 
 
-async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 2) -> int:
-    """Keep a tiny pool of ready-to-use Razorpay UPI QRs for every active plan.
+async def _cache_pool_qr_on_telegram(bot, owner_id: int, row: dict) -> str:
+    existing = str(row.get("telegram_file_id") or "").strip()
+    if existing: return existing
+    import io
+    from telegram import InputFile
+    image = None
+    content = str(row.get("image_content") or "").strip()
+    if content:
+        try:
+            import qrcode
+            qr=qrcode.QRCode(version=None,error_correction=qrcode.constants.ERROR_CORRECT_M,box_size=10,border=4)
+            qr.add_data(content); qr.make(fit=True); pil=qr.make_image()
+            image=io.BytesIO(); pil.save(image,format="PNG",optimize=True); image.seek(0); image.name="razorpay_qr.png"
+        except Exception: image=None
+    if image is None and row.get("image_url"):
+        timeout=aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(str(row["image_url"])) as response:
+                if response.status >= 400: raise GatewayError("Unable to pre-cache Razorpay QR image")
+                image=io.BytesIO(await response.read()); image.seek(0); image.name="razorpay_qr.png"
+    if image is None: raise GatewayError("Razorpay QR image is unavailable")
+    sent=await bot.send_photo(chat_id=int(owner_id),photo=InputFile(image,filename="razorpay_qr.png"),caption="")
+    file_id=str(sent.photo[-1].file_id) if getattr(sent,"photo",None) else ""
+    try: await bot.delete_message(chat_id=int(owner_id),message_id=int(sent.message_id))
+    except Exception: pass
+    if not file_id: raise GatewayError("Telegram did not return a QR file_id")
+    await cache_razorpay_qr_telegram_file_id(str(row.get("qr_code_id") or ""),file_id)
+    return file_id
 
-    QRs are created in Razorpay ahead of the user's click, but no image files
-    are stored locally. Only the QR URI/URL and metadata are kept in MongoDB.
-    """
-    created = 0
-    owners = await list_razorpay_qr_pool_owners()
-    target = max(1, min(int(target_per_plan), 5))
+
+async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 2) -> int:
+    created=0; owners=await list_razorpay_qr_pool_owners(); target=max(1,min(int(target_per_plan),3))
+    from services.bot_manager import bot_manager
     for owner_id in owners:
         try:
-            cfg = await get_gateway_config("seller", owner_id, decrypt=True)
-            settings = (cfg.get("gateways") or {}).get("razorpay") or {}
-            if not settings.get("enabled") or str(settings.get("checkout_mode") or "upi_qr").lower() != "upi_qr":
-                continue
-            plans = await get_plans(owner_id, True)
-            for plan in plans:
-                plan_id = str(plan.get("plan_id") or "")
-                if not plan_id:
-                    continue
-                amount = float(plan.get("price") or 0)
-                if amount <= 0:
-                    continue
-                currency = "INR"
-                available = await count_available_razorpay_qr_pool(owner_id, plan_id, amount, currency)
-                needed = max(0, target - available)
-                for _ in range(needed):
-                    try:
-                        fake_tx = {
-                            "transaction_id": "prewarm_" + uuid4().hex,
-                            "owner_id": owner_id,
-                            "amount": amount,
-                            "currency": currency,
-                            "metadata": {
-                                "plan_id": plan_id,
-                                "plan_name": str(plan.get("name") or "Subscription")[:100],
-                                "description": f"{str(plan.get('name') or 'Subscription')} subscription",
-                            },
-                            "purpose": "child_subscription",
-                        }
-                        checkout = await _create_razorpay(fake_tx, settings)
-                        await create_razorpay_qr_pool_entry(
-                            owner_id=owner_id, plan_id=plan_id, amount=amount, currency=currency,
-                            qr_code_id=str(checkout.get("qr_code_id") or ""),
-                            image_url=str(checkout.get("qr_image_url") or ""),
-                            image_content=str(checkout.get("qr_image_content") or ""),
-                            telegram_file_id="",
-                            qr_close_by=int(checkout.get("qr_close_by") or 0),
-                            gateway_response=checkout.get("gateway_response") or {},
-                        )
-                        created += 1
-                    except Exception:
-                        logger.exception("Razorpay QR prewarm failed owner_id=%s plan_id=%s", owner_id, plan_id)
-                        break
-        except Exception:
-            logger.exception("Razorpay QR pool refresh failed owner_id=%s", owner_id)
+            cfg=await get_gateway_config("seller",owner_id,decrypt=True); settings=(cfg.get("gateways") or {}).get("razorpay") or {}
+            if not settings.get("enabled") or str(settings.get("checkout_mode") or "upi_qr").lower()!="upi_qr": continue
+            plans=await get_plans(owner_id,True); bots=await get_bots(owner_id)
+            for br in bots:
+                bot_id=int(br.get("bot_id") or 0); running=bot_manager.get_running(bot_id) if bot_id else None
+                if not running: continue
+                bot=running.application.bot
+                for plan in plans:
+                    plan_id=str(plan.get("plan_id") or ""); amount=float(plan.get("price") or 0)
+                    if not plan_id or amount<=0: continue
+                    available=await count_available_razorpay_qr_pool(owner_id,plan_id,amount,"INR",bot_id=bot_id,minimum_valid_seconds=120)
+                    for _ in range(max(0,target-available)):
+                        try:
+                            fake_tx={"transaction_id":"prewarm_"+uuid4().hex,"owner_id":owner_id,"amount":amount,"currency":"INR","metadata":{"plan_id":plan_id,"plan_name":str(plan.get("name") or "Subscription")[:100],"description":f"{str(plan.get('name') or 'Subscription')} subscription"},"purpose":"child_subscription"}
+                            checkout=await _create_razorpay(fake_tx,settings)
+                            row=await create_razorpay_qr_pool_entry(owner_id=owner_id,bot_id=bot_id,plan_id=plan_id,amount=amount,currency="INR",qr_code_id=str(checkout.get("qr_code_id") or ""),image_url=str(checkout.get("qr_image_url") or ""),image_content=str(checkout.get("qr_image_content") or ""),telegram_file_id="",qr_close_by=int(checkout.get("qr_close_by") or 0),gateway_response=checkout.get("gateway_response") or {})
+                            await _cache_pool_qr_on_telegram(bot,owner_id,row); created+=1
+                        except Exception:
+                            logger.exception("Razorpay QR prewarm/cache failed owner_id=%s bot_id=%s plan_id=%s",owner_id,bot_id,plan_id); break
+                    rows=await list_available_razorpay_qr_pool_entries(owner_id,bot_id,plan_id,target)
+                    for row in rows:
+                        if not str(row.get("telegram_file_id") or "").strip():
+                            try: await _cache_pool_qr_on_telegram(bot,owner_id,row)
+                            except Exception: logger.exception("Razorpay QR Telegram cache backfill failed owner_id=%s bot_id=%s plan_id=%s",owner_id,bot_id,plan_id)
+        except Exception: logger.exception("Razorpay QR pool refresh failed owner_id=%s",owner_id)
     return created
 
 
