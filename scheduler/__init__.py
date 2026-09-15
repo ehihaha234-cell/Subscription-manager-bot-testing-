@@ -13,6 +13,7 @@ from scheduler.gateway_recovery import (
     recover_gateway_transactions_job,
     recover_failed_invite_deliveries_job,
 )
+from services.payment_gateways import prewarm_razorpay_qr_pool_job, cleanup_razorpay_qr_pool_job
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,8 @@ def _register_core_jobs() -> None:
         job_id="gateway_invite_delivery_recovery",
         replace_existing=True,
     )
+    _remember_job(func=prewarm_razorpay_qr_pool_job, trigger="interval", minutes=1, job_id="razorpay_qr_pool_prewarm", replace_existing=True)
+    _remember_job(func=cleanup_razorpay_qr_pool_job, trigger="interval", minutes=1, job_id="razorpay_qr_pool_cleanup", replace_existing=True)
     _restore_registered_jobs()
 
 
