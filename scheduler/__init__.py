@@ -134,7 +134,7 @@ def _register_core_jobs() -> None:
         job_id="gateway_invite_delivery_recovery",
         replace_existing=True,
     )
-    _remember_job(func=prewarm_razorpay_qr_pool_job, trigger="interval", minutes=1, job_id="razorpay_qr_pool_prewarm", replace_existing=True)
+    _remember_job(func=prewarm_razorpay_qr_pool_job, trigger="interval", seconds=15, job_id="razorpay_qr_pool_prewarm", replace_existing=True)
     _remember_job(func=cleanup_razorpay_qr_pool_job, trigger="interval", minutes=1, job_id="razorpay_qr_pool_cleanup", replace_existing=True)
     _restore_registered_jobs()
 
