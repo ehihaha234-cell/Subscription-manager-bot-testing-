@@ -4,6 +4,7 @@ from handlers.common.clone_context import *
 from database.payment_gateways import (
     update_gateway_transaction,
     claim_razorpay_qr_pool_entry,
+    cache_razorpay_qr_telegram_file_id,
 )
 from handlers.common.feature_navigation import feature_back_callback
 import io
@@ -44,6 +45,7 @@ async def _claim_precreated_razorpay_qr(tx: dict, plan: dict, owner: int, curren
         "qr_code_id": str(pool.get("qr_code_id") or ""),
         "qr_image_url": str(pool.get("image_url") or ""),
         "qr_image_content": str(pool.get("image_content") or ""),
+        "telegram_file_id": str(pool.get("telegram_file_id") or ""),
         "qr_close_by": int(pool.get("qr_close_by") or 0),
         "checkout_mode": "upi_qr",
         "gateway_response": pool.get("gateway_response") or {},
@@ -99,10 +101,13 @@ async def handle(self, update, context, q, owner, action):
                 if checkout is None:
                     checkout = await create_checkout(tx)
                 if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
-                    image = _razorpay_qr_photo(checkout)
+                    image = None
                     image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
-                    if image is None and not image_url:
-                        raise GatewayError('Razorpay QR image was not returned')
+                    cached_file_id = str(checkout.get('telegram_file_id') or '').strip()
+                    if not cached_file_id:
+                        image = _razorpay_qr_photo(checkout)
+                        if image is None and not image_url:
+                            raise GatewayError('Razorpay QR image was not returned')
                     close_by = int(checkout.get('qr_close_by') or 0)
                     remaining = max(1, int((close_by - time.time() + 59) // 60)) if close_by else 30
                     text = (
@@ -121,10 +126,18 @@ async def handle(self, update, context, q, owner, action):
                         pass
                     sent = await context.bot.send_photo(
                         chat_id=q.message.chat_id,
-                        photo=image if image is not None else image_url,
+                        photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                         caption=text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                     )
+                    if not cached_file_id and getattr(sent, 'photo', None):
+                        try:
+                            await cache_razorpay_qr_telegram_file_id(
+                                str(checkout.get('qr_code_id') or ''),
+                                str(sent.photo[-1].file_id),
+                            )
+                        except Exception:
+                            pass
                     await update_gateway_transaction(
                         tx['transaction_id'],
                         payment_message_chat_id=int(sent.chat_id),
@@ -222,10 +235,13 @@ async def handle(self, update, context, q, owner, action):
             if checkout is None:
                 checkout = await create_checkout(tx)
             if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
-                image = _razorpay_qr_photo(checkout)
+                image = None
                 image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
-                if image is None and not image_url:
-                    raise GatewayError('Razorpay QR image was not returned')
+                cached_file_id = str(checkout.get('telegram_file_id') or '').strip()
+                if not cached_file_id:
+                    image = _razorpay_qr_photo(checkout)
+                    if image is None and not image_url:
+                        raise GatewayError('Razorpay QR image was not returned')
                 close_by = int(checkout.get('qr_close_by') or 0)
                 remaining = max(1, int((close_by - __import__('time').time() + 59) // 60)) if close_by else 30
                 text = (
@@ -242,9 +258,19 @@ async def handle(self, update, context, q, owner, action):
                 except TelegramError:
                     pass
                 sent = await context.bot.send_photo(
-                    chat_id=q.message.chat_id, photo=image if image is not None else image_url, caption=text,
+                    chat_id=q.message.chat_id,
+                    photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
+                    caption=text,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                 )
+                if not cached_file_id and getattr(sent, 'photo', None):
+                    try:
+                        await cache_razorpay_qr_telegram_file_id(
+                            str(checkout.get('qr_code_id') or ''),
+                            str(sent.photo[-1].file_id),
+                        )
+                    except Exception:
+                        pass
                 await update_gateway_transaction(
                     tx['transaction_id'], payment_message_chat_id=int(sent.chat_id),
                     payment_message_id=int(sent.message_id), payment_message_type='photo',
