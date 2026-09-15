@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 from paytmchecksum import PaytmChecksum
@@ -30,11 +31,19 @@ from database.payment_gateways import (
     update_gateway_transaction,
     expire_due_razorpay_qr_transactions,
     mark_transaction_expired,
+    list_razorpay_qr_pool_owners,
+    count_available_razorpay_qr_pool,
+    create_razorpay_qr_pool_entry,
+    get_expired_razorpay_qr_pool_entries,
+    delete_razorpay_qr_pool_entry,
 )
-from database.seller_data import fulfill_subscription_payment, get_plan, create_automatic_payment, get_subscription
+from database.seller_data import fulfill_subscription_payment, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
 from database.seller_bots import get_decrypted_bot_token
 from database.platform_features import create_invoice, audit
+
+
+logger = logging.getLogger(__name__)
 
 
 class GatewayError(RuntimeError):
@@ -55,46 +64,16 @@ async def _request(method: str, url: str, **kwargs) -> dict:
     return data
 
 
-_HTTP_SESSION: aiohttp.ClientSession | None = None
-_HTTP_SESSION_LOOP = None
-
-
-def _get_http_session() -> aiohttp.ClientSession:
-    """Reuse one HTTP/TLS connection pool instead of creating a new session per request."""
-    global _HTTP_SESSION, _HTTP_SESSION_LOOP
-    loop = asyncio.get_running_loop()
-    if _HTTP_SESSION is None or _HTTP_SESSION.closed or _HTTP_SESSION_LOOP is not loop:
-        connector = aiohttp.TCPConnector(
-            limit=50,
-            ttl_dns_cache=300,
-            keepalive_timeout=30,
-            enable_cleanup_closed=True,
-        )
-        _HTTP_SESSION = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            connector=connector,
-        )
-        _HTTP_SESSION_LOOP = loop
-    return _HTTP_SESSION
-
-
 async def _request_with_status(method: str, url: str, **kwargs) -> tuple[int, dict]:
-    session = _get_http_session()
-    async with session.request(method, url, **kwargs) as response:
-        text = await response.text()
-        try:
-            data = json.loads(text) if text else {}
-        except json.JSONDecodeError:
-            data = {"raw": text}
-        return response.status, data
-
-
-async def close_gateway_http_session() -> None:
-    global _HTTP_SESSION, _HTTP_SESSION_LOOP
-    if _HTTP_SESSION is not None and not _HTTP_SESSION.closed:
-        await _HTTP_SESSION.close()
-    _HTTP_SESSION = None
-    _HTTP_SESSION_LOOP = None
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.request(method, url, **kwargs) as response:
+            text = await response.text()
+            try:
+                data = json.loads(text) if text else {}
+            except json.JSONDecodeError:
+                data = {"raw": text}
+            return response.status, data
 
 
 def _cashfree_base(mode: str) -> str:
@@ -264,10 +243,10 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
         )
         qr_id = str(data.get("id") or "")
         image_url = str(data.get("image_url") or "")
-        if not qr_id or not image_url:
+        image_content = str(data.get("image_content") or "")
+        if not qr_id or (not image_url and not image_content):
             raise GatewayError("Razorpay QR Code was not returned by the API")
         returned_close_by = int(data.get("close_by") or close_by)
-        image_content = str(data.get("image_content") or "")
         return {
             "gateway_order_id": qr_id,
             "checkout_url": image_url,
@@ -491,7 +470,14 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
         entity = (((payload.get("payload") or {}).get("payment") or {}).get("entity") or {})
         order = (((payload.get("payload") or {}).get("payment_link") or {}).get("entity") or {})
         qr_entity = (((payload.get("payload") or {}).get("qr_code") or {}).get("entity") or {})
-        txid = (entity.get("notes") or {}).get("transaction_id") or order.get("reference_id") or (qr_entity.get("notes") or {}).get("transaction_id")
+        qr_id = str(qr_entity.get("id") or "")
+        txid = (
+            qr_id if event == "qr_code.credited" and qr_id
+            else (entity.get("notes") or {}).get("transaction_id")
+            or order.get("reference_id")
+            or (qr_entity.get("notes") or {}).get("transaction_id")
+            or qr_id
+        )
         success = event in {"payment.captured", "order.paid", "payment_link.paid", "qr_code.credited"}
         payment_id = entity.get("id", "")
         if not payment_id and order.get("payments"):
@@ -571,6 +557,7 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
             return False, str(exc)
         payment_id = verified_payment_id
         payload = {**payload, "server_verification": verified_payload}
+        await delete_razorpay_qr_pool_entry(str(tx.get("qr_code_id") or tx.get("gateway_order_id") or qr_id))
 
     if gateway == "cashfree" and success:
         try:
@@ -635,6 +622,102 @@ async def verify_and_process_webhook(gateway: str, scope: str, owner_id: int, he
         )
         raise
     return True, "processed"
+
+
+async def _close_razorpay_qr(qr_code_id: str, settings: dict) -> None:
+    key_id, key_secret = settings.get("key_id"), settings.get("key_secret")
+    if not key_id or not key_secret or not qr_code_id:
+        return
+    auth = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
+    try:
+        await _request(
+            "POST",
+            f"https://api.razorpay.com/v1/payments/qr_codes/{qr_code_id}/close",
+            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
+            json={},
+        )
+    except Exception:
+        # The QR may already be closed by Razorpay. Local cleanup is still
+        # required so expired pool records never accumulate.
+        pass
+
+
+async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 2) -> int:
+    """Keep a tiny pool of ready-to-use Razorpay UPI QRs for every active plan.
+
+    QRs are created in Razorpay ahead of the user's click, but no image files
+    are stored locally. Only the QR URI/URL and metadata are kept in MongoDB.
+    """
+    created = 0
+    owners = await list_razorpay_qr_pool_owners()
+    target = max(1, min(int(target_per_plan), 5))
+    for owner_id in owners:
+        try:
+            cfg = await get_gateway_config("seller", owner_id, decrypt=True)
+            settings = (cfg.get("gateways") or {}).get("razorpay") or {}
+            if not settings.get("enabled") or str(settings.get("checkout_mode") or "upi_qr").lower() != "upi_qr":
+                continue
+            plans = await get_plans(owner_id, True)
+            for plan in plans:
+                plan_id = str(plan.get("plan_id") or "")
+                if not plan_id:
+                    continue
+                amount = float(plan.get("price") or 0)
+                if amount <= 0:
+                    continue
+                currency = "INR"
+                available = await count_available_razorpay_qr_pool(owner_id, plan_id, amount, currency)
+                needed = max(0, target - available)
+                for _ in range(needed):
+                    try:
+                        fake_tx = {
+                            "transaction_id": "prewarm_" + uuid4().hex,
+                            "owner_id": owner_id,
+                            "amount": amount,
+                            "currency": currency,
+                            "metadata": {
+                                "plan_id": plan_id,
+                                "plan_name": str(plan.get("name") or "Subscription")[:100],
+                                "description": f"{str(plan.get('name') or 'Subscription')} subscription",
+                            },
+                            "purpose": "child_subscription",
+                        }
+                        checkout = await _create_razorpay(fake_tx, settings)
+                        await create_razorpay_qr_pool_entry(
+                            owner_id=owner_id, plan_id=plan_id, amount=amount, currency=currency,
+                            qr_code_id=str(checkout.get("qr_code_id") or ""),
+                            image_url=str(checkout.get("qr_image_url") or ""),
+                            image_content=str(checkout.get("qr_image_content") or ""),
+                            qr_close_by=int(checkout.get("qr_close_by") or 0),
+                            gateway_response=checkout.get("gateway_response") or {},
+                        )
+                        created += 1
+                    except Exception:
+                        logger.exception("Razorpay QR prewarm failed owner_id=%s plan_id=%s", owner_id, plan_id)
+                        break
+        except Exception:
+            logger.exception("Razorpay QR pool refresh failed owner_id=%s", owner_id)
+    return created
+
+
+async def cleanup_razorpay_qr_pool_job() -> int:
+    """Close and delete every expired QR pool record, including assigned ones."""
+    rows = await get_expired_razorpay_qr_pool_entries(limit=500)
+    if not rows:
+        return 0
+    deleted = 0
+    settings_cache: dict[int, dict] = {}
+    for row in rows:
+        owner_id = int(row.get("owner_id") or 0)
+        if owner_id not in settings_cache:
+            try:
+                cfg = await get_gateway_config("seller", owner_id, decrypt=True)
+                settings_cache[owner_id] = (cfg.get("gateways") or {}).get("razorpay") or {}
+            except Exception:
+                settings_cache[owner_id] = {}
+        await _close_razorpay_qr(str(row.get("qr_code_id") or ""), settings_cache[owner_id])
+        deleted += await delete_razorpay_qr_pool_entry(str(row.get("qr_code_id") or ""))
+    return deleted
 
 
 async def expire_razorpay_qr_transactions_job() -> int:
