@@ -6,6 +6,7 @@ from database.payment_gateways import (
     claim_razorpay_qr_pool_entry,
     cache_razorpay_qr_telegram_file_id,
 )
+from services.payment_gateways import cancel_previous_razorpay_qr_for_same_plan
 from handlers.common.feature_navigation import feature_back_callback
 import io
 import time
@@ -64,12 +65,25 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('Plan not found', show_alert=True)
             return True
         context.user_data['selected_child_plan'] = plan
+        bot_id = int(context.application.bot_data.get('seller_bot_id') or 0)
+        gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
+        gateways = gateway_cfg.get('gateways') or {}
+        razorpay_settings = gateways.get('razorpay') or {}
+        if (razorpay_settings.get('enabled') and
+                str(razorpay_settings.get('checkout_mode') or 'upi_qr').lower() == 'upi_qr' and
+                bot_id):
+            # Same plan: replace the user's previous QR. Other plans remain visible
+            # and usable until their own QR expires.
+            try:
+                await cancel_previous_razorpay_qr_for_same_plan(
+                    context.bot, owner, q.from_user.id, bot_id, str(plan['plan_id'])
+                )
+            except Exception:
+                logger.exception('Could not replace previous Razorpay QR for same plan')
         s = await get_seller_settings(owner)
         qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get('seller_bot_id') or 0))
         if not qr_file_id:
             qr_file_id = str(s.get('upi_qr_file_id') or '')
-        gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
-        gateways = gateway_cfg.get('gateways') or {}
         currency = normalize_currency(s.get('currency')) or 'INR'
         enabled = [g for g in SUPPORTED_GATEWAYS if (gateways.get(g) or {}).get('enabled')]
         if currency != 'INR':
@@ -220,6 +234,14 @@ async def handle(self, update, context, q, owner, action):
         if currency != 'INR':
             await self.safe_query_message(q, f'⚠️ {gateway.title()} automatic checkout is currently configured for INR only. Current bot currency is {currency}. Use Manual Payment or change the currency to INR.', back_keyboard)
             return True
+        if gateway == 'razorpay':
+            bot_id = int(context.application.bot_data.get('seller_bot_id') or 0)
+            try:
+                await cancel_previous_razorpay_qr_for_same_plan(
+                    context.bot, owner, q.from_user.id, bot_id, str(plan_id)
+                )
+            except Exception:
+                logger.exception('Could not replace previous Razorpay QR for same plan')
         tx = await create_gateway_transaction(
             scope='seller', owner_id=owner, payer_user_id=q.from_user.id, gateway=gateway,
             amount=float(plan['price']), currency=currency, purpose='child_subscription',
