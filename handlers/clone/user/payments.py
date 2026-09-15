@@ -35,7 +35,8 @@ def _razorpay_qr_photo(checkout: dict):
 
 async def _claim_precreated_razorpay_qr(tx: dict, plan: dict, owner: int, currency: str) -> dict | None:
     pool = await claim_razorpay_qr_pool_entry(
-        owner, str(plan["plan_id"]), float(plan["price"]), currency, str(tx["transaction_id"])
+        owner, str(plan["plan_id"]), float(plan["price"]), currency, str(tx["transaction_id"]),
+        bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
     )
     if not pool:
         return None
