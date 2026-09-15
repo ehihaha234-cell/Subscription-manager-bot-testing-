@@ -64,7 +64,7 @@ async def initialize_payment_gateway_indexes():
     await _transactions().create_index([("status", 1), ("fulfillment_lease_until", 1)])
     await _transactions().create_index([("gateway_payment_id", 1)], sparse=True)
     await _razorpay_qr_pool().create_index("qr_code_id", unique=True)
-    await _razorpay_qr_pool().create_index([("owner_id", 1), ("plan_id", 1), ("status", 1), ("qr_close_by", 1)])
+    await _razorpay_qr_pool().create_index([("owner_id", 1), ("bot_id", 1), ("plan_id", 1), ("status", 1), ("qr_close_by", 1)])
 
 
 async def get_gateway_config(scope: str, owner_id: int = 0, decrypt: bool = False) -> dict:
@@ -594,26 +594,23 @@ async def list_razorpay_qr_pool_owners() -> list[int]:
 
 
 async def count_available_razorpay_qr_pool(
-    owner_id: int, plan_id: str, amount: float, currency: str = "INR", *, minimum_valid_seconds: int = 90
+    owner_id: int, plan_id: str, amount: float, currency: str = "INR", *, bot_id: int = 0, minimum_valid_seconds: int = 90
 ) -> int:
     cutoff = int(datetime.now(timezone.utc).timestamp()) + max(0, int(minimum_valid_seconds))
-    return int(await _razorpay_qr_pool().count_documents({
-        "owner_id": int(owner_id),
-        "plan_id": str(plan_id),
-        "amount": float(amount),
-        "currency": str(currency).upper(),
-        "status": "available",
-        "qr_close_by": {"$gt": cutoff},
-    }))
+    query = {"owner_id": int(owner_id), "plan_id": str(plan_id), "amount": float(amount),
+             "currency": str(currency).upper(), "status": "available", "qr_close_by": {"$gt": cutoff}}
+    if int(bot_id or 0): query["bot_id"] = int(bot_id)
+    return int(await _razorpay_qr_pool().count_documents(query))
 
 
 async def create_razorpay_qr_pool_entry(
-    *, owner_id: int, plan_id: str, amount: float, currency: str, qr_code_id: str,
+    *, owner_id: int, plan_id: str, amount: float, currency: str, qr_code_id: str, bot_id: int = 0,
     image_url: str = "", image_content: str = "", telegram_file_id: str = "", qr_close_by: int, gateway_response: dict | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
     doc = {
         "owner_id": int(owner_id),
+        "bot_id": int(bot_id or 0),
         "plan_id": str(plan_id),
         "amount": float(amount),
         "currency": str(currency).upper(),
@@ -636,27 +633,22 @@ async def create_razorpay_qr_pool_entry(
 
 
 async def claim_razorpay_qr_pool_entry(
-    owner_id: int, plan_id: str, amount: float, currency: str, transaction_id: str
+    owner_id: int, plan_id: str, amount: float, currency: str, transaction_id: str, bot_id: int = 0
 ) -> dict | None:
+    if not int(bot_id or 0): return None
     now = int(datetime.now(timezone.utc).timestamp()) + 30
     return await _razorpay_qr_pool().find_one_and_update(
-        {
-            "owner_id": int(owner_id),
-            "plan_id": str(plan_id),
-            "amount": float(amount),
-            "currency": str(currency).upper(),
-            "status": "available",
-            "qr_close_by": {"$gt": now},
-        },
-        {"$set": {
-            "status": "assigned",
-            "transaction_id": str(transaction_id),
-            "assigned_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc),
-        }},
-        sort=[("qr_close_by", 1)],
-        return_document=ReturnDocument.AFTER,
+        {"owner_id": int(owner_id), "bot_id": int(bot_id), "plan_id": str(plan_id), "amount": float(amount),
+         "currency": str(currency).upper(), "status": "available", "qr_close_by": {"$gt": now}},
+        {"$set": {"status": "assigned", "transaction_id": str(transaction_id), "assigned_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}},
+        sort=[("qr_close_by", 1)], return_document=ReturnDocument.AFTER,
     )
+
+
+async def list_available_razorpay_qr_pool_entries(owner_id: int, bot_id: int, plan_id: str, limit: int = 5) -> list[dict]:
+    now = int(datetime.now(timezone.utc).timestamp()) + 30
+    size = max(1, min(int(limit), 20))
+    return await _razorpay_qr_pool().find({"owner_id": int(owner_id), "bot_id": int(bot_id), "plan_id": str(plan_id), "status": "available", "qr_close_by": {"$gt": now}}).sort("qr_close_by", 1).limit(size).to_list(length=size)
 
 
 async def cache_razorpay_qr_telegram_file_id(qr_code_id: str, telegram_file_id: str) -> dict | None:
