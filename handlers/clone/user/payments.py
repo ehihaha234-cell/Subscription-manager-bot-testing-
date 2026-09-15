@@ -1,19 +1,18 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
-from database.payment_gateways import update_gateway_transaction
+from database.payment_gateways import (
+    update_gateway_transaction,
+    claim_razorpay_qr_pool_entry,
+)
 from handlers.common.feature_navigation import feature_back_callback
-import asyncio
 import io
 import time
 import qrcode
 
 
 def _razorpay_qr_photo(checkout: dict):
-    """Build the QR locally from Razorpay's UPI payload to avoid downloading
-    Razorpay's hosted image URL. This removes the extra network hop that can
-    make the QR take several seconds to appear in Telegram.
-    """
+    """Build the QR locally from Razorpay's returned UPI URI; no image download."""
     content = str(checkout.get("qr_image_content") or "").strip()
     if not content:
         return None
@@ -33,6 +32,27 @@ def _razorpay_qr_photo(checkout: dict):
     return stream
 
 
+async def _claim_precreated_razorpay_qr(tx: dict, plan: dict, owner: int, currency: str) -> dict | None:
+    pool = await claim_razorpay_qr_pool_entry(
+        owner, str(plan["plan_id"]), float(plan["price"]), currency, str(tx["transaction_id"])
+    )
+    if not pool:
+        return None
+    checkout = {
+        "gateway_order_id": str(pool.get("qr_code_id") or ""),
+        "checkout_url": str(pool.get("image_url") or ""),
+        "qr_code_id": str(pool.get("qr_code_id") or ""),
+        "qr_image_url": str(pool.get("image_url") or ""),
+        "qr_image_content": str(pool.get("image_content") or ""),
+        "qr_close_by": int(pool.get("qr_close_by") or 0),
+        "checkout_mode": "upi_qr",
+        "gateway_response": pool.get("gateway_response") or {},
+        "status": "pending",
+    }
+    await update_gateway_transaction(tx["transaction_id"], **checkout)
+    return checkout
+
+
 async def handle(self, update, context, q, owner, action):
     back_keyboard = self.back(feature_back_callback(context))
     if action.startswith('c_select_'):
@@ -41,16 +61,11 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('Plan not found', show_alert=True)
             return True
         context.user_data['selected_child_plan'] = plan
-        # Acknowledge the callback immediately and fetch independent DB reads in parallel.
-        try:
-            await q.answer()
-        except TelegramError:
-            pass
-        s, gateway_cfg = await asyncio.gather(
-            get_seller_settings(owner),
-            get_gateway_config('seller', owner, decrypt=True),
-        )
-        qr_file_id = ''
+        s = await get_seller_settings(owner)
+        qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get('seller_bot_id') or 0))
+        if not qr_file_id:
+            qr_file_id = str(s.get('upi_qr_file_id') or '')
+        gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         gateways = gateway_cfg.get('gateways') or {}
         currency = normalize_currency(s.get('currency')) or 'INR'
         enabled = [g for g in SUPPORTED_GATEWAYS if (gateways.get(g) or {}).get('enabled')]
@@ -78,16 +93,18 @@ async def handle(self, update, context, q, owner, action):
                 },
             )
             try:
-                checkout = await create_checkout(tx)
+                checkout = None
+                if gateway == 'razorpay':
+                    checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
+                if checkout is None:
+                    checkout = await create_checkout(tx)
                 if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
+                    image = _razorpay_qr_photo(checkout)
                     image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
-                    if not image_url and not checkout.get('qr_image_content'):
-                        raise GatewayError('Razorpay QR data was not returned')
+                    if image is None and not image_url:
+                        raise GatewayError('Razorpay QR image was not returned')
                     close_by = int(checkout.get('qr_close_by') or 0)
                     remaining = max(1, int((close_by - time.time() + 59) // 60)) if close_by else 30
-                    qr_photo = _razorpay_qr_photo(checkout)
-                    if qr_photo is None and not image_url:
-                        raise GatewayError('Razorpay QR image was not returned')
                     text = (
                         f"💳 Razorpay UPI Payment\n\n"
                         f"Plan: {plan['name']}\n"
@@ -98,18 +115,16 @@ async def handle(self, update, context, q, owner, action):
                         f"✅ Payment will be verified automatically.\n"
                         f"You do not need to send a payment screenshot."
                     )
-                    # Send the QR first; deleting the old plan message before the upload
-                    # only adds another Telegram round-trip to the critical path.
-                    sent = await context.bot.send_photo(
-                        chat_id=q.message.chat_id,
-                        photo=qr_photo if qr_photo is not None else image_url,
-                        caption=text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
-                    )
                     try:
                         await q.message.delete()
                     except TelegramError:
                         pass
+                    sent = await context.bot.send_photo(
+                        chat_id=q.message.chat_id,
+                        photo=image if image is not None else image_url,
+                        caption=text,
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                    )
                     await update_gateway_transaction(
                         tx['transaction_id'],
                         payment_message_chat_id=int(sent.chat_id),
@@ -139,10 +154,6 @@ async def handle(self, update, context, q, owner, action):
                 f"💳 Payment\n\nPlan: {plan['name']}\n{stars_line}"
             )
         if manual_enabled:
-            # Manual payment stays on the plan/payment-details page. The user
-            # does not need to open a separate upload screen; after selecting
-            # the plan, the next photo they send is handled by the existing
-            # manual-payment screenshot flow.
             context.user_data['waiting_child_screenshot'] = True
             manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay the amount and send your payment screenshot here."
             text = f'{text}\n\n{manual_text}' if text else f'💳 Payment\n\n{manual_text}'
@@ -153,10 +164,6 @@ async def handle(self, update, context, q, owner, action):
             text = '⚠️ No payment method is currently available. Please contact support.'
         rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
         kb = InlineKeyboardMarkup(rows)
-        if manual_enabled:
-            qr_file_id = await get_bot_payment_qr(int(context.application.bot_data.get('seller_bot_id') or 0))
-            if not qr_file_id:
-                qr_file_id = str(s.get('upi_qr_file_id') or '')
         if qr_file_id and manual_enabled:
             try:
                 await q.message.delete()
@@ -186,10 +193,6 @@ async def handle(self, update, context, q, owner, action):
         return True
     if action.startswith('c_pg_'):
         try:
-            await q.answer()
-        except TelegramError:
-            pass
-        try:
             _, _, gateway, plan_id = action.split('_', 3)
         except ValueError:
             await q.answer('Invalid payment option', show_alert=True)
@@ -213,16 +216,18 @@ async def handle(self, update, context, q, owner, action):
             },
         )
         try:
-            checkout = await create_checkout(tx)
+            checkout = None
+            if gateway == 'razorpay':
+                checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
+            if checkout is None:
+                checkout = await create_checkout(tx)
             if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
+                image = _razorpay_qr_photo(checkout)
                 image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
-                if not image_url and not checkout.get('qr_image_content'):
-                    raise GatewayError('Razorpay QR data was not returned')
-                qr_photo = _razorpay_qr_photo(checkout)
-                if qr_photo is None and not image_url:
+                if image is None and not image_url:
                     raise GatewayError('Razorpay QR image was not returned')
                 close_by = int(checkout.get('qr_close_by') or 0)
-                remaining = max(1, int((close_by - time.time() + 59) // 60)) if close_by else 30
+                remaining = max(1, int((close_by - __import__('time').time() + 59) // 60)) if close_by else 30
                 text = (
                     f"💳 Razorpay UPI Payment\n\nPlan: {plan['name']}\n"
                     f"Amount: {format_currency(currency, plan['price'])}\n"
@@ -232,14 +237,14 @@ async def handle(self, update, context, q, owner, action):
                     f"✅ Payment will be verified automatically.\n"
                     f"You do not need to send a payment screenshot."
                 )
-                sent = await context.bot.send_photo(
-                    chat_id=q.message.chat_id, photo=qr_photo if qr_photo is not None else image_url, caption=text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
-                )
                 try:
                     await q.message.delete()
                 except TelegramError:
                     pass
+                sent = await context.bot.send_photo(
+                    chat_id=q.message.chat_id, photo=image if image is not None else image_url, caption=text,
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                )
                 await update_gateway_transaction(
                     tx['transaction_id'], payment_message_chat_id=int(sent.chat_id),
                     payment_message_id=int(sent.message_id), payment_message_type='photo',
