@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -223,7 +224,8 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
     mode = str(s.get("checkout_mode") or "upi_qr").lower()
 
     if mode == "upi_qr":
-        close_by = int((datetime.now(timezone.utc) + timedelta(minutes=20)).timestamp())
+        close_minutes = 30 if bool((tx.get("metadata") or {}).get("qr_prewarm")) else 20
+        close_by = int((datetime.now(timezone.utc) + timedelta(minutes=close_minutes)).timestamp())
         payload = {
             "type": "upi_qr",
             "name": str(tx["metadata"].get("plan_name") or "Subscription Payment")[:100],
@@ -709,38 +711,117 @@ async def _cache_pool_qr_on_telegram(bot, owner_id: int, row: dict) -> str:
     return file_id
 
 
-async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 2) -> int:
-    created=0; owners=await list_razorpay_qr_pool_owners(); target=max(1,min(int(target_per_plan),3))
-    from services.bot_manager import bot_manager
-    for owner_id in owners:
-        try:
-            cfg=await get_gateway_config("seller",owner_id,decrypt=True); settings=(cfg.get("gateways") or {}).get("razorpay") or {}
-            if not settings.get("enabled") or str(settings.get("checkout_mode") or "upi_qr").lower()!="upi_qr": continue
-            plans=await get_plans(owner_id,True); bots=await get_bots(owner_id)
-            for br in bots:
-                bot_id=int(br.get("bot_id") or 0); running=bot_manager.get_running(bot_id) if bot_id else None
-                if not running: continue
-                bot=running.application.bot
-                for plan in plans:
-                    plan_id=str(plan.get("plan_id") or ""); amount=float(plan.get("price") or 0)
-                    if not plan_id or amount<=0: continue
-                    available=await count_available_razorpay_qr_pool(owner_id,plan_id,amount,"INR",bot_id=bot_id,minimum_valid_seconds=20 * 60)
-                    for _ in range(max(0,target-available)):
-                        try:
-                            fake_tx={"transaction_id":"prewarm_"+uuid4().hex,"owner_id":owner_id,"amount":amount,"currency":"INR","metadata":{"plan_id":plan_id,"plan_name":str(plan.get("name") or "Subscription")[:100],"description":f"{str(plan.get('name') or 'Subscription')} subscription"},"purpose":"child_subscription"}
-                            checkout=await _create_razorpay(fake_tx,settings)
-                            row=await create_razorpay_qr_pool_entry(owner_id=owner_id,bot_id=bot_id,plan_id=plan_id,amount=amount,currency="INR",qr_code_id=str(checkout.get("qr_code_id") or ""),image_url=str(checkout.get("qr_image_url") or ""),image_content=str(checkout.get("qr_image_content") or ""),telegram_file_id="",qr_close_by=int(checkout.get("qr_close_by") or 0),gateway_response=checkout.get("gateway_response") or {})
-                            await _cache_pool_qr_on_telegram(bot,owner_id,row); created+=1
-                        except Exception:
-                            logger.exception("Razorpay QR prewarm/cache failed owner_id=%s bot_id=%s plan_id=%s",owner_id,bot_id,plan_id); break
-                    rows=await list_available_razorpay_qr_pool_entries(owner_id,bot_id,plan_id,target,minimum_valid_seconds=20 * 60)
-                    for row in rows:
-                        if not str(row.get("telegram_file_id") or "").strip():
-                            try: await _cache_pool_qr_on_telegram(bot,owner_id,row)
-                            except Exception: logger.exception("Razorpay QR Telegram cache backfill failed owner_id=%s bot_id=%s plan_id=%s",owner_id,bot_id,plan_id)
-        except Exception: logger.exception("Razorpay QR pool refresh failed owner_id=%s",owner_id)
-    return created
+async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
+    """Keep a small, fresh, Telegram-cached QR pool ready for busy sellers.
 
+    Pool QR codes are created with a 30-minute Razorpay lifetime, while users
+    are only assigned codes having more than 20 minutes remaining. Work is
+    bounded and concurrent so many sellers/plans do not make the scheduler
+    block on one Razorpay request at a time.
+    """
+    created = 0
+    owners = await list_razorpay_qr_pool_owners()
+    target = max(1, min(int(target_per_plan), 5))
+    from services.bot_manager import bot_manager
+    sem = asyncio.Semaphore(4)
+
+    async def ensure_plan(owner_id: int, bot_id: int, bot, plan: dict, settings: dict) -> int:
+        plan_id = str(plan.get("plan_id") or "")
+        amount = float(plan.get("price") or 0)
+        if not plan_id or amount <= 0:
+            return 0
+        async with sem:
+            made = 0
+            available = await count_available_razorpay_qr_pool(
+                owner_id, plan_id, amount, "INR", bot_id=bot_id,
+                minimum_valid_seconds=20 * 60,
+            )
+            for _ in range(max(0, target - available)):
+                try:
+                    fake_tx = {
+                        "transaction_id": "prewarm_" + uuid4().hex,
+                        "owner_id": owner_id,
+                        "amount": amount,
+                        "currency": "INR",
+                        "metadata": {
+                            "plan_id": plan_id,
+                            "plan_name": str(plan.get("name") or "Subscription")[:100],
+                            "description": f"{str(plan.get('name') or 'Subscription')} subscription",
+                            "qr_prewarm": True,
+                        },
+                        "purpose": "child_subscription",
+                    }
+                    checkout = await _create_razorpay(fake_tx, settings)
+                    row = await create_razorpay_qr_pool_entry(
+                        owner_id=owner_id,
+                        bot_id=bot_id,
+                        plan_id=plan_id,
+                        amount=amount,
+                        currency="INR",
+                        qr_code_id=str(checkout.get("qr_code_id") or ""),
+                        image_url=str(checkout.get("qr_image_url") or ""),
+                        image_content=str(checkout.get("qr_image_content") or ""),
+                        telegram_file_id="",
+                        qr_close_by=int(checkout.get("qr_close_by") or 0),
+                        gateway_response=checkout.get("gateway_response") or {},
+                    )
+                    await _cache_pool_qr_on_telegram(bot, owner_id, row)
+                    made += 1
+                except Exception:
+                    logger.exception(
+                        "Razorpay QR prewarm/cache failed owner_id=%s bot_id=%s plan_id=%s",
+                        owner_id, bot_id, plan_id,
+                    )
+                    break
+            # Backfill Telegram file_id for any old pool entries that are still fresh.
+            rows = await list_available_razorpay_qr_pool_entries(
+                owner_id, bot_id, plan_id, target, minimum_valid_seconds=20 * 60,
+            )
+            for row in rows:
+                if not str(row.get("telegram_file_id") or "").strip():
+                    try:
+                        await _cache_pool_qr_on_telegram(bot, owner_id, row)
+                    except Exception:
+                        logger.exception(
+                            "Razorpay QR Telegram cache backfill failed owner_id=%s bot_id=%s plan_id=%s",
+                            owner_id, bot_id, plan_id,
+                        )
+            return made
+
+    async def ensure_owner(owner_id: int) -> int:
+        try:
+            cfg = await get_gateway_config("seller", owner_id, decrypt=True)
+            settings = (cfg.get("gateways") or {}).get("razorpay") or {}
+            if not settings.get("enabled") or str(settings.get("checkout_mode") or "upi_qr").lower() != "upi_qr":
+                return 0
+            plans = await get_plans(owner_id, True)
+            bots = await get_bots(owner_id)
+            tasks = []
+            for br in bots:
+                bot_id = int(br.get("bot_id") or 0)
+                running = bot_manager.get_running(bot_id) if bot_id else None
+                if not running:
+                    continue
+                bot = running.application.bot
+                for plan in plans:
+                    tasks.append(ensure_plan(owner_id, bot_id, bot, plan, settings))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            total = 0
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.exception("Razorpay QR plan prewarm task failed owner_id=%s", owner_id, exc_info=result)
+                else:
+                    total += int(result or 0)
+            return total
+        except Exception:
+            logger.exception("Razorpay QR pool refresh failed owner_id=%s", owner_id)
+            return 0
+
+    results = await asyncio.gather(*(ensure_owner(owner_id) for owner_id in owners), return_exceptions=True)
+    for result in results:
+        if not isinstance(result, Exception):
+            created += int(result or 0)
+    return created
 
 async def cleanup_razorpay_qr_pool_job() -> int:
     """Close and delete every expired QR pool record, including assigned ones."""
