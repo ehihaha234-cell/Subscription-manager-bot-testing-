@@ -38,7 +38,6 @@ from database.payment_gateways import (
     get_expired_razorpay_qr_pool_entries,
     delete_razorpay_qr_pool_entry,
     list_available_razorpay_qr_pool_entries,
-    cache_razorpay_qr_telegram_file_id,
     claim_active_razorpay_qr_transaction_for_cancel,
 )
 from database.seller_data import fulfill_subscription_payment, get_plan, get_plans, create_automatic_payment, get_subscription
@@ -681,38 +680,8 @@ async def _close_razorpay_qr(qr_code_id: str, settings: dict) -> None:
         pass
 
 
-async def _cache_pool_qr_on_telegram(bot, owner_id: int, row: dict) -> str:
-    existing = str(row.get("telegram_file_id") or "").strip()
-    if existing: return existing
-    import io
-    from telegram import InputFile
-    image = None
-    content = str(row.get("image_content") or "").strip()
-    if content:
-        try:
-            import qrcode
-            qr=qrcode.QRCode(version=None,error_correction=qrcode.constants.ERROR_CORRECT_M,box_size=10,border=4)
-            qr.add_data(content); qr.make(fit=True); pil=qr.make_image()
-            image=io.BytesIO(); pil.save(image,format="PNG",optimize=True); image.seek(0); image.name="razorpay_qr.png"
-        except Exception: image=None
-    if image is None and row.get("image_url"):
-        timeout=aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(str(row["image_url"])) as response:
-                if response.status >= 400: raise GatewayError("Unable to pre-cache Razorpay QR image")
-                image=io.BytesIO(await response.read()); image.seek(0); image.name="razorpay_qr.png"
-    if image is None: raise GatewayError("Razorpay QR image is unavailable")
-    sent=await bot.send_photo(chat_id=int(owner_id),photo=InputFile(image,filename="razorpay_qr.png"),caption="")
-    file_id=str(sent.photo[-1].file_id) if getattr(sent,"photo",None) else ""
-    try: await bot.delete_message(chat_id=int(owner_id),message_id=int(sent.message_id))
-    except Exception: pass
-    if not file_id: raise GatewayError("Telegram did not return a QR file_id")
-    await cache_razorpay_qr_telegram_file_id(str(row.get("qr_code_id") or ""),file_id)
-    return file_id
-
-
 async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
-    """Keep a small, fresh, Telegram-cached QR pool ready for busy sellers.
+    """Keep a small, fresh QR pool ready for busy sellers.
 
     Pool QR codes are created with a 30-minute Razorpay lifetime, while users
     are only assigned codes having more than 20 minutes remaining. Work is
@@ -765,7 +734,6 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
                         qr_close_by=int(checkout.get("qr_close_by") or 0),
                         gateway_response=checkout.get("gateway_response") or {},
                     )
-                    await _cache_pool_qr_on_telegram(bot, owner_id, row)
                     made += 1
                 except Exception:
                     logger.exception(
@@ -773,19 +741,12 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
                         owner_id, bot_id, plan_id,
                     )
                     break
-            # Backfill Telegram file_id for any old pool entries that are still fresh.
-            rows = await list_available_razorpay_qr_pool_entries(
-                owner_id, bot_id, plan_id, target, minimum_valid_seconds=20 * 60,
-            )
-            for row in rows:
-                if not str(row.get("telegram_file_id") or "").strip():
-                    try:
-                        await _cache_pool_qr_on_telegram(bot, owner_id, row)
-                    except Exception:
-                        logger.exception(
-                            "Razorpay QR Telegram cache backfill failed owner_id=%s bot_id=%s plan_id=%s",
-                            owner_id, bot_id, plan_id,
-                        )
+            # IMPORTANT: never send prewarmed QR images to the seller/owner chat.
+            # The previous Telegram file_id cache implementation had to send a
+            # temporary photo to obtain a file_id, which made clone bots visibly
+            # post/delete QR images in the owner chat during background prewarming.
+            # User checkout already builds the QR locally from image_content, so
+            # no Telegram upload is needed here.
             return made
 
     async def ensure_owner(owner_id: int) -> int:
@@ -1119,7 +1080,6 @@ async def fulfill_transaction(tx: dict) -> None:
                         "duration": plan.get("duration_text") or f"{plan.get('duration_minutes', 0)} minutes",
                         "was_already_active": was_already_active,
                         "previous_expiry": previous_expiry,
-                        "target_chat_ids": list(dict.fromkeys(int(x) for x in (tx.get("metadata", {}).get("target_chat_ids") or plan.get("target_chat_ids") or []))),
                     },
                 )
                 if delivery.get("error") or (
