@@ -3,6 +3,7 @@
 from handlers.common.clone_context import *
 from typing import Any, Iterable
 from urllib.parse import quote
+import hashlib
 
 from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -53,7 +54,14 @@ def welcome_url_buttons_header() -> str:
         "• Add a feature button:\n"
         "Button title - feature: feature_name\n\n"
         "Available feature names:\n"
-        "plans, buy, profile, renew, referral, referral_unlock, support, home"
+        "plans, buy, profile, renew, referral, referral_unlock, support, home\n\n"
+        "• Show a separate plan list for one connected group/channel:\n"
+        "Button title - plans:CHAT_ID\n"
+        "Example: Premium Channel - plans:-1001234567890\n\n"
+        "• Show one plan list for multiple connected groups/channels:\n"
+        "Button title - plans:CHAT_ID_1,CHAT_ID_2\n"
+        "Example: Premium Access - plans:-1001234567890,-1009876543210\n\n"
+        "The plan must be assigned to the selected chat(s)."
     )
 
 
@@ -74,6 +82,20 @@ def _parse_welcome_button_target(target: str, line_no: int, button_no: int) -> d
         if not callback:
             raise ValueError(location + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)}")
         return {"text_type": "callback", "value": callback}
+    if target.startswith("plans:"):
+        raw_ids = target.split(":", 1)[1].strip()
+        if not raw_ids:
+            raise ValueError(location + "plans: requires at least one connected chat ID.")
+        chat_ids = []
+        for raw_id in raw_ids.split(","):
+            raw_id = raw_id.strip()
+            try:
+                chat_id = int(raw_id)
+            except (TypeError, ValueError):
+                raise ValueError(location + "plans: chat IDs must be numeric and comma-separated.")
+            if chat_id not in chat_ids:
+                chat_ids.append(chat_id)
+        return {"text_type": "plans", "value": ",".join(str(x) for x in chat_ids)}
     for prefix, action in (("popup:", "popup"), ("alert:", "alert"), ("share:", "share"), ("copy:", "copy")):
         if target.startswith(prefix):
             value = target[len(prefix):].strip()
@@ -123,6 +145,13 @@ def build_welcome_keyboard(rows: Iterable[Iterable[dict[str, Any]]] | None) -> I
                 built.append(InlineKeyboardButton(text, url=value))
             elif kind == "callback":
                 built.append(InlineKeyboardButton(text, callback_data=value or "c_home"))
+            elif kind == "plans":
+                # Keep callback_data short even when several Telegram chat IDs
+                # are configured. The original value remains in the saved
+                # button definition and is resolved from the seller settings
+                # when the user clicks it.
+                token = hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+                built.append(InlineKeyboardButton(text, callback_data=f"c_plans_target_{token}"))
             elif kind == "copy":
                 built.append(InlineKeyboardButton(text, copy_text=CopyTextButton(value[:256])))
             elif kind == "share":

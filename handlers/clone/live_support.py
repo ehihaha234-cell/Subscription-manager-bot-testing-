@@ -430,10 +430,17 @@ class CloneLiveSupportMixin:
                 return
             if context.user_data.get("wait_plan_add") or context.user_data.get("wait_plan_edit"):
                 try:
-                    name,dtext,dmins,price,stars=self.parse_plan(text)
+                    name,dtext,dmins,price,stars,target_chat_ids=self.parse_plan(text)
+                    if target_chat_ids:
+                        connected_ids={int(x.get("chat_id")) for x in await get_channels(owner) if x.get("chat_id") is not None}
+                        missing=[str(x) for x in target_chat_ids if int(x) not in connected_ids]
+                        if missing:
+                            raise ValueError("These chat IDs are not connected to this clone: " + ", ".join(missing))
                     pid=context.user_data.get("wait_plan_edit")
-                    if pid: await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price,stars_price=stars)
-                    else: await create_plan(owner,name,dtext,dmins,price,stars)
+                    if pid:
+                        await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price,stars_price=stars,target_chat_ids=target_chat_ids)
+                    else:
+                        await create_plan(owner,name,dtext,dmins,price,stars,target_chat_ids=target_chat_ids)
                     context.user_data.clear(); await update.effective_message.reply_text("✅ Plan saved",reply_markup=self.plans_admin_menu())
                 except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}")
                 return

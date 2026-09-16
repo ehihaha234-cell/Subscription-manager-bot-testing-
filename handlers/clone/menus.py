@@ -152,7 +152,12 @@ class CloneMenusMixin:
 
     @staticmethod
     def plans_admin_menu():
-        return InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add Plan",callback_data="a_plan_add")],[InlineKeyboardButton("📋 View Plans",callback_data="a_plan_list")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Plan",callback_data="a_plan_add")],
+            [InlineKeyboardButton("📋 View Plans",callback_data="a_plan_list")],
+            [InlineKeyboardButton("🔗 Plan - Channel Settings",callback_data="a_plan_channels")],
+            [InlineKeyboardButton("⬅ Back",callback_data="a_home")],
+        ])
 
     @staticmethod
     def channels_menu():

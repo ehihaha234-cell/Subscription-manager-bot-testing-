@@ -41,7 +41,8 @@ class CloneCommonUtilsMixin:
     @classmethod
     def parse_plan(cls,text:str):
         p=[x.strip() for x in text.split("|")]
-        if len(p)!=4: raise ValueError("Use: Plan Name | Duration | Price | Stars")
+        if len(p) not in (4, 5):
+            raise ValueError("Use: Plan Name | Duration | Price | Stars | Chat IDs (optional)")
         try:
             price = float(p[2])
             stars = int(p[3])
@@ -49,7 +50,16 @@ class CloneCommonUtilsMixin:
             raise ValueError("Price and Stars must be valid numbers")
         if price < 0: raise ValueError("Price cannot be negative")
         if stars < 0: raise ValueError("Stars cannot be negative")
-        return p[0],p[1].lower(),cls.parse_duration(p[1]),price,stars
+        target_chat_ids=[]
+        if len(p) == 5 and p[4]:
+            for raw in p[4].split(","):
+                raw=raw.strip()
+                try:
+                    target_chat_ids.append(int(raw))
+                except (TypeError, ValueError):
+                    raise ValueError("Chat IDs must be numeric and comma-separated")
+            target_chat_ids=list(dict.fromkeys(target_chat_ids))
+        return p[0],p[1].lower(),cls.parse_duration(p[1]),price,stars,target_chat_ids
 
     def owner(self,context):
         # owner() is the clone-specific persistent data scope. Seller identity
