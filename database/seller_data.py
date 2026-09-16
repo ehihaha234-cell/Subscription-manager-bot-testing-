@@ -480,7 +480,7 @@ async def increment_business_account_stat(owner_id:int, account_user_id:int, fie
     return result.matched_count>0
 
 
-async def create_plan(owner_id, name, duration_text, duration_minutes, price, stars_price=0):
+async def create_plan(owner_id, name, duration_text, duration_minutes, price, stars_price=0, target_chat_ids=None):
     """Create a seller plan with optional Telegram Stars pricing.
 
     ``stars_price`` is optional so older callers remain compatible.
@@ -510,6 +510,7 @@ async def create_plan(owner_id, name, duration_text, duration_minutes, price, st
         "duration_minutes": minutes,
         "price": fiat_price,
         "stars_price": stars,
+        "target_chat_ids": list(dict.fromkeys(int(x) for x in (target_chat_ids or []))),
         "active": True,
         "created_at": now,
         "updated_at": now,
@@ -523,6 +524,51 @@ async def get_plans(owner_id,active_only=False):
     return await c(PLANS).find(q).sort("price",1).to_list(length=100)
 async def update_plan(owner_id,plan_id,**values):
     values["updated_at"]=datetime.now(timezone.utc); r=await c(PLANS).update_one({"owner_id":owner_id,"plan_id":plan_id},{"$set":values}); return r.matched_count>0
+
+
+async def set_plan_target_chat_ids(owner_id:int, plan_id:str, chat_ids):
+    """Assign a plan to one or more connected subscription chats.
+
+    An empty list means the plan is unassigned/global for backwards compatibility.
+    Only currently connected chats are accepted by the admin UI.
+    """
+    clean=[]
+    seen=set()
+    for value in chat_ids or []:
+        try:
+            cid=int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in seen:
+            seen.add(cid)
+            clean.append(cid)
+    result=await c(PLANS).update_one(
+        {"owner_id":int(owner_id),"plan_id":str(plan_id)},
+        {"$set":{"target_chat_ids":clean,"updated_at":datetime.now(timezone.utc)}},
+    )
+    return result.matched_count>0
+
+
+async def toggle_plan_target_chat(owner_id:int, plan_id:str, chat_id:int):
+    """Toggle one connected chat in a plan's target list."""
+    plan=await get_plan(int(owner_id),str(plan_id))
+    if not plan:
+        return None
+    current=[]
+    for value in plan.get("target_chat_ids") or []:
+        try:
+            cid=int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in current:
+            current.append(cid)
+    cid=int(chat_id)
+    if cid in current:
+        current.remove(cid)
+    else:
+        current.append(cid)
+    await set_plan_target_chat_ids(owner_id,plan_id,current)
+    return current
 async def delete_plan(owner_id,plan_id): return (await c(PLANS).delete_one({"owner_id":owner_id,"plan_id":plan_id})).deleted_count>0
 
 
@@ -676,7 +722,7 @@ async def remove_subscription(owner_id:int, user_id:int):
 
 async def create_payment(owner_id,user_id,plan,screenshot_file_id):
     now=datetime.now(timezone.utc)
-    doc={"owner_id":owner_id,"payment_id":uuid4().hex[:16],"user_id":user_id,"plan_id":plan["plan_id"],"plan":plan["name"],"amount":plan["price"],"duration_text":plan["duration_text"],"duration_minutes":plan["duration_minutes"],"screenshot_file_id":screenshot_file_id,"status":"pending","created_at":now,"updated_at":now,"notification_messages":[]}
+    doc={"owner_id":owner_id,"payment_id":uuid4().hex[:16],"user_id":user_id,"plan_id":plan["plan_id"],"plan":plan["name"],"amount":plan["price"],"duration_text":plan["duration_text"],"duration_minutes":plan["duration_minutes"],"target_chat_ids":list(dict.fromkeys(int(x) for x in (plan.get("target_chat_ids") or []))),"screenshot_file_id":screenshot_file_id,"status":"pending","created_at":now,"updated_at":now,"notification_messages":[]}
     await c(PAYMENTS).insert_one(doc); return doc
 
 
@@ -738,6 +784,7 @@ async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,
         "plan_id":plan["plan_id"],"plan":plan["name"],"amount":float(plan["price"]),
         "duration_text":plan["duration_text"],"duration_minutes":int(plan["duration_minutes"]),
         "payment_method":gateway,"gateway_payment_id":str(gateway_payment_id or ""),
+        "target_chat_ids":list(dict.fromkeys(int(x) for x in (plan.get("target_chat_ids") or []))),
         "status":"approved","admin_id":0,"processed_at":now,"created_at":now,"updated_at":now,
     }
     result=await c(PAYMENTS).update_one(
