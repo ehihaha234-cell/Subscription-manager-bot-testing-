@@ -9,6 +9,7 @@ from utils.branding import append_branding
 from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import hashlib
 
 
 
@@ -112,6 +113,24 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
         await context.bot.send_document(document=file_id, **kwargs)
 
 
+async def _resolve_target_plan_button(owner: int, token: str) -> list[int] | None:
+    """Resolve a compact welcome-button token back to its saved chat IDs."""
+    settings = await get_seller_settings(owner)
+    for row in settings.get("welcome_buttons") or []:
+        for item in row or []:
+            if str(item.get("type") or "") != "plans":
+                continue
+            value = str(item.get("value") or "")
+            if hashlib.sha1(value.encode("utf-8")).hexdigest()[:12] != token:
+                continue
+            try:
+                ids = [int(x.strip()) for x in value.split(",") if x.strip()]
+            except (TypeError, ValueError):
+                return None
+            return list(dict.fromkeys(ids)) or None
+    return None
+
+
 async def handle(self, update, context, q, owner, action):
     if action == 'c_return_origin':
         if await restore_feature_origin(q, context):
@@ -123,7 +142,7 @@ async def handle(self, update, context, q, owner, action):
         except Exception:
             pass
         return True
-    if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'}:
+    if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'} or action.startswith('c_plans_target_'):
         # Do not replace the original Welcome/previous-page origin when the
         # user is leaving an active/expired payment screen via Back. Otherwise
         # the subsequent Plans -> Back navigation can point back to the payment
@@ -175,6 +194,14 @@ async def handle(self, update, context, q, owner, action):
         record = await get_bot_by_data_owner_id(owner)
         settings = await ensure_seller_defaults(owner, (record or {}).get('bot_name', 'Subscription Bot'))
         await self.send_welcome(q.message, context, settings, q.from_user)
+        return True
+    if action.startswith('c_plans_target_'):
+        token = action.replace('c_plans_target_', '', 1)
+        target_chat_ids = await _resolve_target_plan_button(owner, token)
+        if not target_chat_ids:
+            await q.answer('This subscription button is no longer configured.', show_alert=True)
+            return True
+        await self.show_plans(q, owner, True, context, target_chat_ids=target_chat_ids)
         return True
     if action == 'c_plans':
         payment_photo = bool(
