@@ -46,6 +46,8 @@ def _button_target(item):
         reverse = {v: k for k, v in WELCOME_FEATURE_CALLBACKS.items()}
         feature = reverse.get(value)
         return f"feature:{feature}" if feature else value
+    if kind == "plans":
+        return f"plans:{value}"
     if kind in {"popup", "alert", "share", "copy"}:
         return f"{kind}: {value}"
     if kind == "rules":

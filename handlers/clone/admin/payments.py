@@ -261,7 +261,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     await release_referral_reward(owner, p['user_id'], str(exc), payment_id=pid)
                     logger.exception('Referral reward processing failed owner=%s referred=%s payment=%s', owner, p['user_id'], pid)
             links = []
-            for ch in await get_channels(owner):
+            requested_targets = []
+            try:
+                requested_targets = [int(x) for x in (p.get("target_chat_ids") or [])]
+            except (TypeError, ValueError):
+                requested_targets = []
+            connected_channels = await get_channels(owner)
+            if requested_targets:
+                wanted = set(requested_targets)
+                connected_channels = [ch for ch in connected_channels if int(ch.get("chat_id") or 0) in wanted]
+            for ch in connected_channels:
                 try:
                     inv = await context.bot.create_chat_invite_link(ch['chat_id'], member_limit=1)
                     await save_invite(owner, p['user_id'], ch['chat_id'], inv.invite_link)
