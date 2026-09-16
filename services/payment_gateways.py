@@ -1119,6 +1119,7 @@ async def fulfill_transaction(tx: dict) -> None:
                         "duration": plan.get("duration_text") or f"{plan.get('duration_minutes', 0)} minutes",
                         "was_already_active": was_already_active,
                         "previous_expiry": previous_expiry,
+                        "target_chat_ids": list(dict.fromkeys(int(x) for x in (tx.get("metadata", {}).get("target_chat_ids") or plan.get("target_chat_ids") or []))),
                     },
                 )
                 if delivery.get("error") or (
