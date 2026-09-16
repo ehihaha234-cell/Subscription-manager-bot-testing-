@@ -1,4 +1,6 @@
-from datetime import timezone
+import asyncio
+import time
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,6 +22,8 @@ from database.users import (
     unban_user,
 )
 from database.payments import total_revenue
+from database.mongo import get_database
+from html import escape
 from database.settings import get_setting, get_setting_value, set_setting
 from database.subscriptions import (
     get_subscription,
@@ -645,17 +649,22 @@ async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=back_keyboard(),
         )
     elif query.data == "admin_stats":
-        users = await total_users()
-        channels = await total_channels()
-        revenue = await total_revenue()
+        await _render_main_statistics(query)
 
-        await query.edit_message_text(
-            f"📊 Bot Statistics\n\n"
-            f"👤 Users: {users}\n"
-            f"📢 Channels: {channels}\n"
-            f"💰 Revenue: ₹{revenue}",
-            reply_markup=back_keyboard(),
-        )
+    elif query.data == "admin_stats_refresh":
+        await _render_main_statistics(query, force=True)
+
+    elif query.data in {"admin_stats_lifetime", "admin_stats_today", "admin_stats_users"}:
+        kind = query.data.removeprefix("admin_stats_")
+        await _render_ranking(query, kind)
+
+    elif query.data in {
+        "admin_stats_lifetime_refresh",
+        "admin_stats_today_refresh",
+        "admin_stats_users_refresh",
+    }:
+        kind = query.data.removeprefix("admin_stats_").removesuffix("_refresh")
+        await _render_ranking(query, kind, force=True)
 
     elif query.data == "admin_broadcast":
         await query.edit_message_text(
@@ -687,6 +696,370 @@ async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await owner_dashboard_text(),
             reply_markup=owner_dashboard_keyboard(),
         )
+
+
+# ---------------------------------------------------------------------------
+# Owner Main Statistics
+# ---------------------------------------------------------------------------
+
+_MAIN_STATS_CACHE = {"expires": 0.0, "data": None}
+_MAIN_STATS_CACHE_TTL = 15.0
+
+
+def _stats_dt(value):
+    if not value:
+        return None
+    if getattr(value, "tzinfo", None) is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+async def _owner_main_statistics(*, force=False):
+    """Build platform-wide clone/seller statistics with batched Mongo queries."""
+    now_ts = time.monotonic()
+    if not force and _MAIN_STATS_CACHE["data"] is not None and now_ts < _MAIN_STATS_CACHE["expires"]:
+        return _MAIN_STATS_CACHE["data"]
+
+    db = get_database()
+    now = datetime.now(timezone.utc)
+    local_now = now.astimezone(IST)
+    start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_local.astimezone(timezone.utc)
+
+    # Read the relatively small control collections once. Heavy statistics
+    # are aggregated by MongoDB rather than doing one query per bot/seller.
+    bots_task = db["seller_bots"].find(
+        {"status": {"$ne": "removed"}},
+        {
+            "owner_id": 1, "seller_account_id": 1, "data_owner_id": 1,
+            "bot_id": 1, "bot_name": 1, "bot_username": 1,
+            "active": 1, "runtime_status": 1, "status": 1,
+        },
+    ).to_list(length=None)
+    sellers_task = db["sellers"].find(
+        {},
+        {"owner_id": 1, "first_name": 1, "username": 1, "active": 1, "updated_at": 1},
+    ).to_list(length=None)
+
+    user_task = db["seller_users"].aggregate([
+        {"$group": {"_id": "$owner_id", "count": {"$sum": 1}}}
+    ]).to_list(length=None)
+    active_task = db["seller_subscriptions"].aggregate([
+        {"$match": {"active": True, "expiry_date": {"$gt": now}}},
+        {"$group": {"_id": "$owner_id", "count": {"$sum": 1}}}
+    ]).to_list(length=None)
+    payment_task = db["seller_payments"].aggregate([
+        {"$match": {"status": {"$in": ["approved", "paid", "success"]}}},
+        {"$group": {
+            "_id": "$owner_id",
+            "successful": {"$sum": 1},
+            "revenue": {"$sum": {"$ifNull": ["$amount", 0]}},
+            "today_revenue": {"$sum": {
+                "$cond": [
+                    {"$or": [
+                        {"$gte": ["$processed_at", start_utc]},
+                        {"$gte": ["$created_at", start_utc]},
+                    ]},
+                    {"$ifNull": ["$amount", 0]},
+                    0,
+                ]
+            }},
+            "today_successful": {"$sum": {
+                "$cond": [
+                    {"$or": [
+                        {"$gte": ["$processed_at", start_utc]},
+                        {"$gte": ["$created_at", start_utc]},
+                    ]},
+                    1,
+                    0,
+                ]
+            }},
+        }}
+    ]).to_list(length=None)
+    pending_task = db["seller_payments"].aggregate([
+        {"$match": {"status": "pending"}},
+        {"$group": {"_id": "$owner_id", "count": {"$sum": 1}}}
+    ]).to_list(length=None)
+    channel_task = db["seller_channels"].aggregate([
+        {"$match": {"active": True}},
+        {"$group": {
+            "_id": {"owner_id": "$owner_id", "chat_type": "$chat_type"},
+            "count": {"$sum": 1},
+        }}
+    ]).to_list(length=None)
+
+    bots, sellers, user_rows, active_rows, payment_rows, pending_rows, channel_rows = await asyncio.gather(
+        bots_task, sellers_task, user_task, active_task,
+        payment_task, pending_task, channel_task,
+    )
+
+    def group_map(rows):
+        out = {}
+        for row in rows:
+            key = row.get("_id")
+            if key is None:
+                continue
+            out[key] = row
+        return out
+
+    users_by_scope = {r["_id"]: int(r.get("count", 0)) for r in user_rows if r.get("_id") is not None}
+    active_by_scope = {r["_id"]: int(r.get("count", 0)) for r in active_rows if r.get("_id") is not None}
+    pending_by_scope = {r["_id"]: int(r.get("count", 0)) for r in pending_rows if r.get("_id") is not None}
+    payments_by_scope = {}
+    for r in payment_rows:
+        if r.get("_id") is not None:
+            payments_by_scope[r["_id"]] = {
+                "successful": int(r.get("successful", 0)),
+                "revenue": float(r.get("revenue", 0) or 0),
+                "today_revenue": float(r.get("today_revenue", 0) or 0),
+                "today_successful": int(r.get("today_successful", 0)),
+            }
+
+    channels_by_scope = {}
+    total_groups = total_channels = 0
+    for r in channel_rows:
+        key = r.get("_id") or {}
+        scope = key.get("owner_id")
+        ctype = str(key.get("chat_type") or "").lower()
+        count = int(r.get("count", 0))
+        if scope is None:
+            continue
+        entry = channels_by_scope.setdefault(scope, {"groups": 0, "channels": 0})
+        if ctype == "channel":
+            entry["channels"] += count
+            total_channels += count
+        else:
+            entry["groups"] += count
+            total_groups += count
+
+    # Every clone maps its data scope back to the seller account.
+    seller_by_id = {int(x.get("owner_id")): x for x in sellers if x.get("owner_id") is not None}
+    scope_to_seller = {}
+    clone_rows = []
+    for bot in bots:
+        try:
+            seller_id = int(bot.get("owner_id") or bot.get("seller_account_id") or 0)
+        except (TypeError, ValueError):
+            seller_id = 0
+        try:
+            scope = int(bot.get("data_owner_id") or seller_id)
+        except (TypeError, ValueError):
+            scope = seller_id
+        if seller_id:
+            scope_to_seller[scope] = seller_id
+
+        runtime = str(bot.get("runtime_status") or "").lower()
+        is_running = bool(bot.get("active")) and runtime == "running"
+        bot_id = int(bot.get("bot_id") or 0)
+        clone_rows.append({
+            "bot_id": bot_id,
+            "bot_name": str(bot.get("bot_name") or bot.get("bot_username") or f"Bot {bot_id}"),
+            "bot_username": str(bot.get("bot_username") or "").lstrip("@"),
+            "seller_id": seller_id,
+            "scope": scope,
+            "running": is_running,
+            "users": users_by_scope.get(scope, 0),
+        })
+
+    # Combine all clone scopes for each seller.
+    seller_stats = {}
+    for bot in clone_rows:
+        sid = bot["seller_id"]
+        if not sid:
+            continue
+        st = seller_stats.setdefault(sid, {
+            "users": 0, "active": 0, "pending": 0, "successful": 0,
+            "today_revenue": 0.0, "revenue": 0.0, "today_successful": 0,
+            "running": 0, "stopped": 0, "bots": [],
+        })
+        scope = bot["scope"]
+        st["users"] += users_by_scope.get(scope, 0)
+        st["active"] += active_by_scope.get(scope, 0)
+        st["pending"] += pending_by_scope.get(scope, 0)
+        pay = payments_by_scope.get(scope, {})
+        st["successful"] += int(pay.get("successful", 0))
+        st["today_successful"] += int(pay.get("today_successful", 0))
+        st["today_revenue"] += float(pay.get("today_revenue", 0))
+        st["revenue"] += float(pay.get("revenue", 0))
+        if bot["running"]:
+            st["running"] += 1
+        else:
+            st["stopped"] += 1
+        st["bots"].append(bot)
+
+    # Seller activity: "today active/total" uses today's updated seller records.
+    today_active_sellers = sum(
+        1 for seller in sellers
+        if bool(seller.get("active")) and (_stats_dt(seller.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= start_utc
+    )
+
+    total_users = sum(users_by_scope.values())
+    total_active = sum(active_by_scope.values())
+    total_pending = sum(pending_by_scope.values())
+    total_successful = sum(v["successful"] for v in payments_by_scope.values())
+    total_today_successful = sum(v["today_successful"] for v in payments_by_scope.values())
+    total_revenue = sum(v["revenue"] for v in payments_by_scope.values())
+    total_today_revenue = sum(v["today_revenue"] for v in payments_by_scope.values())
+
+    configured = len(clone_rows)
+    running = sum(1 for b in clone_rows if b["running"])
+    offline_error = max(0, configured - running)
+
+    data = {
+        "configured": configured,
+        "running": running,
+        "offline_error": offline_error,
+        "seller_today": today_active_sellers,
+        "seller_total": len(sellers),
+        "total_users": total_users,
+        "active_subscribers": total_active,
+        "groups": total_groups,
+        "channels": total_channels,
+        "today_revenue": total_today_revenue,
+        "today_successful": total_today_successful,
+        "successful": total_successful,
+        "revenue": total_revenue,
+        "sellers": seller_stats,
+        "clones": clone_rows,
+        "seller_by_id": seller_by_id,
+    }
+    _MAIN_STATS_CACHE["data"] = data
+    _MAIN_STATS_CACHE["expires"] = time.monotonic() + _MAIN_STATS_CACHE_TTL
+    return data
+
+
+def _seller_display(stats, seller_id, seller_by_id):
+    seller = seller_by_id.get(int(seller_id), {})
+    name = str(seller.get("first_name") or seller.get("username") or "Unknown")
+    username = str(seller.get("username") or "").lstrip("@")
+    mention = f'<a href="tg://user?id={int(seller_id)}">{escape(name)}</a>'
+    return name, (f"@{escape(username)}" if username else "-"), mention
+
+
+def _ranking_keyboard(kind):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"admin_stats_{kind}_refresh"),
+            InlineKeyboardButton("⬅ Back", callback_data="admin_stats"),
+        ]
+    ])
+
+
+async def _render_main_statistics(query, *, force=False):
+    data = await _owner_main_statistics(force=force)
+    text = (
+        "📊 <b>Main Statistics</b>\n\n"
+        "🤖 <b>Clone Bots</b>\n"
+        f"• Configured: {data['configured']}\n"
+        f"• Running: 🟢 {data['running']}\n"
+        f"• Offline/Error: 🔴 {data['offline_error']}\n\n"
+        "📈 <b>Platform Usage</b>\n"
+        f"Seller: {data['seller_today']}/{data['seller_total']}\n"
+        f"Total users: {data['total_users']}\n"
+        f"Active subscriber: {data['active_subscribers']}\n"
+        f"Connected group: {data['groups']}\n"
+        f"Connected Channel: {data['channels']}\n\n"
+        "💳 <b>Payments</b>\n"
+        f"• Today: ₹{data['today_revenue']:.2f} ({data['today_successful']} payments)\n"
+        f"• Total Successful: {data['successful']}\n"
+        f"• Total Revenue: ₹{data['revenue']:.2f}"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏆 Lifetime Seller Ranking", callback_data="admin_stats_lifetime")],
+        [InlineKeyboardButton("📅 Today Seller Ranking", callback_data="admin_stats_today")],
+        [InlineKeyboardButton("👥 Top 10 Clone Bot Highest User", callback_data="admin_stats_users")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_stats_refresh")],
+        [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def _render_ranking(query, kind, *, force=False):
+    data = await _owner_main_statistics(force=force)
+    sellers = data["sellers"]
+    seller_by_id = data["seller_by_id"]
+
+    if kind in {"lifetime", "today"}:
+        key = "revenue" if kind == "lifetime" else "today_revenue"
+        title = "🏆 <b>Lifetime Seller Ranking</b>" if kind == "lifetime" else "📅 <b>Today Seller Ranking</b>"
+        ranked = sorted(
+            ((sid, st) for sid, st in sellers.items()),
+            key=lambda item: (-float(item[1].get(key, 0)), -int(item[1].get("users", 0)), int(item[0])),
+        )
+    else:
+        title = "👥 <b>Top 10 Clone Bot Highest User</b>"
+        ranked = sorted(
+            data["clones"],
+            key=lambda b: (-int(b.get("users", 0)), -float(sellers.get(b.get("seller_id"), {}).get("revenue", 0)), int(b.get("bot_id", 0))),
+        )[:10]
+
+    if not ranked:
+        text = f"{title}\n\nNo statistics available yet."
+    else:
+        blocks = []
+        for rank, item in enumerate(ranked[:10], 1):
+            if kind in {"lifetime", "today"}:
+                sid, st = item
+                bot_list = st.get("bots", [])
+                first_bot = bot_list[0] if bot_list else {}
+                bot_name = first_bot.get("bot_name") or "-"
+                bot_username = first_bot.get("bot_username") or "-"
+                bot_id = first_bot.get("bot_id") or "-"
+                name, username, mention = _seller_display(st, sid, seller_by_id)
+                block = (
+                    f"<b>{rank}. {escape(str(bot_name))}</b>\n"
+                    f"Bot username : @{escape(str(bot_username).lstrip('@')) if bot_username != '-' else '-'}\n"
+                    f"Clone bot id: {bot_id}\n"
+                    f"Seller name: {escape(name)}\n"
+                    f"Seller mention: {mention}\n"
+                    f"Seller id: {sid}\n\n"
+                    "📊 <b>Seller Statistics — Combined</b>\n"
+                    f"🤖 Running Bots: {st['running']} | Stopped: {st['stopped']}\n"
+                    f"👥 Total Users: {st['users']}\n"
+                    f"💳 Pending Payments: {st['pending']}\n"
+                    f"✅ Successful Payments: {st['successful']}\n"
+                    f"💰 Today Revenue: ₹{st['today_revenue']:.2f}\n"
+                    f"💰 Total Revenue: ₹{st['revenue']:.2f}"
+                )
+            else:
+                bot = item
+                sid = int(bot.get("seller_id") or 0)
+                st = sellers.get(sid, {
+                    "running": 1 if bot.get("running") else 0, "stopped": 0 if bot.get("running") else 1,
+                    "users": bot.get("users", 0), "pending": 0, "successful": 0,
+                    "today_revenue": 0, "revenue": 0,
+                })
+                name, username, mention = _seller_display(st, sid, seller_by_id) if sid else ("Unknown", "-", "-")
+                block = (
+                    f"<b>{rank}. {escape(str(bot.get('bot_name') or '-'))}</b>\n"
+                    f"Bot username : @{escape(str(bot.get('bot_username') or '-').lstrip('@')) if bot.get('bot_username') else '-'}\n"
+                    f"Clone bot id: {int(bot.get('bot_id') or 0)}\n"
+                    f"Seller name: {escape(name)}\n"
+                    f"Seller mention: {mention}\n"
+                    f"Seller id: {sid or '-'}\n\n"
+                    "📊 <b>Seller Statistics — Combined</b>\n"
+                    f"🤖 Running Bots: {st.get('running',0)} | Stopped: {st.get('stopped',0)}\n"
+                    f"👥 Total Users: {st.get('users',0)}\n"
+                    f"💳 Pending Payments: {st.get('pending',0)}\n"
+                    f"✅ Successful Payments: {st.get('successful',0)}\n"
+                    f"💰 Today Revenue: ₹{st.get('today_revenue',0):.2f}\n"
+                    f"💰 Total Revenue: ₹{st.get('revenue',0):.2f}"
+                )
+            blocks.append(block)
+
+        text = title + "\n\n" + "\n\n".join(blocks)
+        # Telegram text limit is 4096. Keep all ranking entries compact and
+        # trim only if an unusual seller name makes the message too long.
+        if len(text) > 4000:
+            text = text[:3990] + "\n…"
+
+    await query.edit_message_text(
+        text,
+        reply_markup=_ranking_keyboard(kind),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
 
 async def receive_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update.effective_user.id):
