@@ -64,6 +64,7 @@ class ClonePaymentDeliveryMixin:
                 'duration': plan['duration_text'],
                 'was_already_active': was_active,
                 'previous_expiry': previous_expiry,
+                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
             }
             await self.deliver_subscription_access(owner, user_id, details)
             await self.notify_automatic_payment_success(owner, user_id, details)
@@ -281,6 +282,15 @@ class ClonePaymentDeliveryMixin:
         bot=running.application.bot
         timezone_name = await self.seller_timezone(int(owner_id))
         connected_channels=await get_channels(int(owner_id))
+        requested_targets = []
+        if success_details:
+            try:
+                requested_targets = [int(x) for x in (success_details.get("target_chat_ids") or [])]
+            except (TypeError, ValueError):
+                requested_targets = []
+        if requested_targets:
+            wanted = set(requested_targets)
+            connected_channels = [ch for ch in connected_channels if int(ch.get("chat_id") or 0) in wanted]
         if not connected_channels:
             return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
 
