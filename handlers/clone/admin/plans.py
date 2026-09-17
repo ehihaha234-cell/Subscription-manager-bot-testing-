@@ -70,6 +70,7 @@ async def _selection(self, self_obj, q, owner, context):
         kb.append([InlineKeyboardButton(f"{mark} {title[:35]}", callback_data=f"a_plan_group_toggle_{cid}")])
     if not channels:
         lines.append("No connected groups/channels found.")
+    # No separate Save button: pressing Back finalizes the selected target bundle.
     kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plan_group_save")])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
@@ -111,8 +112,6 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
 
     if a == 'a_plan_group_save':
-        # The selection screen intentionally has no Save button. Back commits
-        # the current selection and returns to Plan Management.
         selected = []
         for value in (context.user_data.get('plan_group_selected_chats') or []):
             try:
