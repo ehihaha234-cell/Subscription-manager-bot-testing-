@@ -70,7 +70,7 @@ async def _selection(self, self_obj, q, owner, context):
         kb.append([InlineKeyboardButton(f"{mark} {title[:35]}", callback_data=f"a_plan_group_toggle_{cid}")])
     if not channels:
         lines.append("No connected groups/channels found.")
-    # No separate Save button: pressing Back finalizes the selected target bundle.
+    # No Save button: Back confirms the current selection and creates the bundle.
     kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plan_group_save")])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
