@@ -43,6 +43,25 @@ class CloneAdminCallbacksMixin:
                     except Exception:
                         pass
             return
+
+        # The Create New Plan selection screen uses its Back button as the
+        # save/confirm action. Dispatch it explicitly so it cannot be blocked
+        # by the generic role/prefix router. This keeps the existing button
+        # layout unchanged and fixes the unresponsive Back button.
+        if action == "a_plan_group_save" or action.startswith("a_plan_group_save_edit_"):
+            try:
+                await q.answer()
+                handled = await plans.handle(self, update, context, q, owner, staff_record, action, role)
+                if not handled:
+                    await q.answer("Button action not found", show_alert=True)
+            except Exception as exc:
+                logger.exception("Plan target Back/save callback failed owner=%s", owner)
+                detail = f"{type(exc).__name__}: {str(exc)[:180]}"
+                try:
+                    await q.answer(f"Plan Management error: {detail}", show_alert=True)
+                except Exception:
+                    pass
+            return
         await q.answer()
         if role == "moderator":
             allowed_prefixes = (
