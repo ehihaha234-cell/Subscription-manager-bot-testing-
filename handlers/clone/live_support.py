@@ -430,7 +430,7 @@ class CloneLiveSupportMixin:
                 return
             if context.user_data.get("wait_plan_add") or context.user_data.get("wait_plan_edit"):
                 try:
-                    name,dtext,dmins,price,stars=self.parse_plan(text)
+                    name,dtext,dmins,price,stars,_target_chat_ids=self.parse_plan(text)
                     pid=context.user_data.get("wait_plan_edit")
                     add_state=context.user_data.get("wait_plan_add")
                     if pid:
