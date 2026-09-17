@@ -37,34 +37,8 @@ async def _main(self, q, owner):
                     groups = await get_plan_groups(owner)
                 except Exception:
                     pass
-    settings = await get_seller_settings(owner)
-    currency = normalize_currency(settings.get('currency')) or 'INR'
-
-    # Show a compact summary in the main Plan Management header. Each target
-    # bundle owns its own plan list, so the header is calculated from the same
-    # bundle -> plans relationship used by View Plans. This keeps the summary
-    # accurate when plans are added, deleted, enabled/disabled, or when a
-    # multi-chat bundle is used.
     lines = ["📦 Plan Management", ""]
     if groups:
-        lines.append("📊 Current Plan Summary")
-        lines.append("")
-        for index, group in enumerate(groups, 1):
-            label = _group_label(group) or "Unnamed group/channel"
-            plans = await get_plans(owner, group_id=str(group["group_id"]))
-            lines.append(f"{index}. {label}:")
-            lines.append(f"   Plans : {len(plans)}")
-            if plans:
-                for plan in plans:
-                    price = format_currency(currency, plan.get("price", 0))
-                    stars = int(plan.get("stars_price", 0) or 0)
-                    lines.append(
-                        f"      {plan.get('name', 'Unnamed')} / "
-                        f"{plan.get('duration_text', '')} / {price} / ⭐{stars}"
-                    )
-            else:
-                lines.append("      No plans added")
-            lines.append("")
         lines.append("Select a connected group/channel bundle to manage its plans.")
     else:
         lines.append("No plan target created yet.")
@@ -146,29 +120,38 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 continue
             if cid not in selected:
                 selected.append(cid)
+
+        edit_gid = str(context.user_data.get('plan_group_edit_gid') or '').strip()
         if not selected:
             await q.answer('Select at least one group/channel.', show_alert=True)
             return True
         try:
-            group = await create_plan_group(owner, selected)
+            if edit_gid:
+                await update_plan_group(owner, edit_gid, selected)
+            else:
+                await create_plan_group(owner, selected)
         except Exception as exc:
             await q.answer(str(exc), show_alert=True)
             return True
-        context.user_data.clear()
+        context.user_data.pop('plan_group_selected_chats', None)
+        context.user_data.pop('plan_group_edit_gid', None)
         await _main(self, q, owner)
         return True
 
     if a.startswith('a_plan_group_info_'):
+        # Clicking the bundle name edits the bundle's connected chats. Existing
+        # selections are checked, while new chats can be added and old chats
+        # can be deselected. Back saves the edited bundle.
         gid = a.replace('a_plan_group_info_', '')
         group = await get_plan_group(owner, gid)
         if not group:
             await q.answer('Plan group not found.', show_alert=True)
             return True
-        settings = await get_seller_settings(owner)
-        currency = normalize_currency(settings.get('currency')) or 'INR'
-        plans = await get_plans(owner, True, gid)
-        text = f"📋 {_group_label(group)}\n\n{_group_plan_text(plans, currency)}"
-        await q.answer(text[:190], show_alert=True)
+        context.user_data['plan_group_edit_gid'] = gid
+        context.user_data['plan_group_selected_chats'] = [
+            int(x) for x in (group.get('chat_ids') or [])
+        ]
+        await _selection(self, q, owner, context)
         return True
 
     if a.startswith('a_plan_group_del_'):
