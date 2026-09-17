@@ -23,7 +23,11 @@ async def _main(self, q, owner):
     # One-time compatibility migration: old global plans used to target every
     # connected chat. Convert them into one bundle so existing sellers keep the
     # exact same plan behaviour after the new UI is enabled.
-    groups = await get_plan_groups(owner)
+    try:
+        groups = await get_plan_groups(owner)
+    except Exception:
+        logger.exception('Failed to load plan groups owner=%s', owner)
+        groups = []
     if not groups:
         legacy = await get_plans(owner, group_id=None)
         legacy = [p for p in legacy if not p.get("group_id")]
@@ -34,17 +38,27 @@ async def _main(self, q, owner):
                     migrated = await create_plan_group(owner, [int(x["chat_id"]) for x in chats])
                     for plan in legacy:
                         await update_plan(owner, plan["plan_id"], group_id=migrated["group_id"], target_chat_ids=migrated["chat_ids"])
-                    groups = await get_plan_groups(owner)
+                    try:
+                        groups = await get_plan_groups(owner)
+                    except Exception:
+                        groups = []
                 except Exception:
                     pass
     # Show a compact summary of every plan target and its plans in the header.
-    settings = await get_seller_settings(owner)
+    try:
+        settings = await get_seller_settings(owner)
+    except Exception:
+        settings = {}
     code = normalize_currency(settings.get("currency")) or "INR"
     lines = ["📦 Plan Management", "", "📊 Current Plan Summary", ""]
     if groups:
         for index, group in enumerate(groups, 1):
             label = _group_label(group) or "Unnamed group/channel"
-            plans = await get_plans(owner, group_id=str(group["group_id"]))
+            try:
+                plans = await get_plans(owner, group_id=str(group["group_id"]))
+            except Exception:
+                logger.exception('Failed to load plans for group=%s owner=%s', group.get("group_id"), owner)
+                plans = []
             lines.append(f"{index}. {label}:")
             lines.append(f"   PLAN ID 👉 {str(group.get('plan_list_id') or '')}")
             lines.append(f"   Plans : {len(plans)}")
