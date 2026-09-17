@@ -58,19 +58,43 @@ async def _main(self, q, owner):
 
 
 async def _selection(self, self_obj, q, owner, context):
-    channels = await get_channels(owner)
-    selected = set(int(x) for x in (context.user_data.get("plan_group_selected_chats") or []))
+    # Load connected chats defensively so one stale/malformed DB record cannot
+    # prevent the Create New Plan screen from opening.
+    channels = await get_channels(int(owner))
+    data = context.user_data
+    if data is None:
+        raise RuntimeError("User session data is unavailable")
+
+    selected = set()
+    for value in (data.get("plan_group_selected_chats") or []):
+        try:
+            selected.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
     lines = ["➕ Create New Plan", "", "Select one or more connected group/channel:", ""]
     kb = []
-    for ch in channels:
-        cid = int(ch["chat_id"])
+    valid_count = 0
+    for ch in channels or []:
+        try:
+            cid = int(ch.get("chat_id"))
+        except (TypeError, ValueError):
+            logger.warning("Skipping invalid connected chat owner=%s record=%r", owner, ch)
+            continue
+        valid_count += 1
         mark = "✅" if cid in selected else "☐"
         title = str(ch.get("title") or cid)
         lines.append(f"{mark} {title}")
-        kb.append([InlineKeyboardButton(f"{mark} {title[:35]}", callback_data=f"a_plan_group_toggle_{cid}")])
-    if not channels:
+        kb.append([InlineKeyboardButton(
+            f"{mark} {title[:35]}",
+            callback_data=f"a_plan_group_toggle_{cid}",
+        )])
+
+    if valid_count == 0:
         lines.append("No connected groups/channels found.")
-    # No Save button: Back confirms the current selection and creates the bundle.
+
+    # No Save button by design. Back confirms the current selection and creates
+    # the target bundle.
     kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plan_group_save")])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
