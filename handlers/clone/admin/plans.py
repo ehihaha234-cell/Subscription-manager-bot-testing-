@@ -23,11 +23,7 @@ async def _main(self, q, owner):
     # One-time compatibility migration: old global plans used to target every
     # connected chat. Convert them into one bundle so existing sellers keep the
     # exact same plan behaviour after the new UI is enabled.
-    try:
-        groups = await get_plan_groups(owner)
-    except Exception:
-        logger.exception('Failed to load plan groups owner=%s', owner)
-        groups = []
+    groups = await get_plan_groups(owner)
     if not groups:
         legacy = await get_plans(owner, group_id=None)
         legacy = [p for p in legacy if not p.get("group_id")]
@@ -38,27 +34,17 @@ async def _main(self, q, owner):
                     migrated = await create_plan_group(owner, [int(x["chat_id"]) for x in chats])
                     for plan in legacy:
                         await update_plan(owner, plan["plan_id"], group_id=migrated["group_id"], target_chat_ids=migrated["chat_ids"])
-                    try:
-                        groups = await get_plan_groups(owner)
-                    except Exception:
-                        groups = []
+                    groups = await get_plan_groups(owner)
                 except Exception:
                     pass
     # Show a compact summary of every plan target and its plans in the header.
-    try:
-        settings = await get_seller_settings(owner)
-    except Exception:
-        settings = {}
+    settings = await get_seller_settings(owner)
     code = normalize_currency(settings.get("currency")) or "INR"
     lines = ["📦 Plan Management", "", "📊 Current Plan Summary", ""]
     if groups:
         for index, group in enumerate(groups, 1):
             label = _group_label(group) or "Unnamed group/channel"
-            try:
-                plans = await get_plans(owner, group_id=str(group["group_id"]))
-            except Exception:
-                logger.exception('Failed to load plans for group=%s owner=%s', group.get("group_id"), owner)
-                plans = []
+            plans = await get_plans(owner, group_id=str(group["group_id"]))
             lines.append(f"{index}. {label}:")
             lines.append(f"   PLAN ID 👉 {str(group.get('plan_list_id') or '')}")
             lines.append(f"   Plans : {len(plans)}")
@@ -155,7 +141,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         await _selection(self, q, owner, context)
         return True
 
-    if a == 'a_plan_group_save' or a.startswith('a_plan_group_save_edit_'):
+    if a in ('a_plan_group_save',) or a.startswith('a_plan_group_save_edit_'):
         selected = []
         for value in (context.user_data.get('plan_group_selected_chats') or []):
             try:
@@ -179,8 +165,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
             else:
                 await create_plan_group(owner, selected)
         except Exception as exc:
-            await q.answer(str(exc), show_alert=True)
-            return True
+            logger.exception('Failed to save plan target owner=%s action=%s', owner, a)
+            raise
 
         context.user_data.pop('plan_group_selected_chats', None)
         context.user_data.pop('plan_group_editing_id', None)
