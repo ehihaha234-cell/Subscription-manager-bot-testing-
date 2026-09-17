@@ -80,13 +80,27 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
 
     if a == 'a_plan_add':
-        context.user_data.clear()
-        context.user_data['plan_group_selected_chats'] = []
-        await _selection(self, q, owner, context)
+        # Do not clear the complete user_data here. Other admin flows may keep
+        # state there, and clearing it can make the callback appear to do
+        # nothing when PTB persistence/other handlers are active. Only reset
+        # the temporary selection state used by this screen.
+        context.user_data.pop('plan_group_selected_chats', None)
+        try:
+            await _selection(self, q, owner, context)
+        except Exception as exc:
+            logger.exception('Failed to open Create New Plan screen owner=%s', owner)
+            try:
+                await q.answer('Unable to open Create New Plan. Please try again.', show_alert=True)
+            except Exception:
+                pass
         return True
 
     if a.startswith('a_plan_group_toggle_'):
-        cid = int(a.replace('a_plan_group_toggle_', ''))
+        try:
+            cid = int(a.replace('a_plan_group_toggle_', ''))
+        except (TypeError, ValueError):
+            await q.answer('Invalid group/channel selection.', show_alert=True)
+            return True
         selected = set(int(x) for x in (context.user_data.get('plan_group_selected_chats') or []))
         if cid in selected:
             selected.remove(cid)
@@ -97,7 +111,14 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
 
     if a == 'a_plan_group_save':
-        selected = [int(x) for x in (context.user_data.get('plan_group_selected_chats') or [])]
+        selected = []
+        for value in (context.user_data.get('plan_group_selected_chats') or []):
+            try:
+                cid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if cid not in selected:
+                selected.append(cid)
         if not selected:
             await q.answer('Select at least one group/channel.', show_alert=True)
             return True
