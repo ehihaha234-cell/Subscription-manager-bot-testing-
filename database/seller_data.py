@@ -531,6 +531,63 @@ async def create_plan_group(owner_id, chat_ids):
 async def get_plan_group(owner_id, group_id):
     return await c(PLAN_GROUPS).find_one({"owner_id": int(owner_id), "group_id": str(group_id), "active": True})
 
+async def update_plan_group(owner_id, group_id, chat_ids):
+    """Replace the connected chats in an existing plan-target bundle.
+
+    Existing plans keep the same group_id, so changing a bundle's selected
+    chats also updates the access targets of every plan in that bundle.
+    """
+    owner_id = int(owner_id)
+    group_id = str(group_id)
+    clean_ids = []
+    for value in (chat_ids or []):
+        try:
+            cid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in clean_ids:
+            clean_ids.append(cid)
+    if not clean_ids:
+        raise ValueError("Select at least one group/channel.")
+
+    channels = await c(CHANNELS).find({
+        "owner_id": owner_id,
+        "chat_id": {"$in": clean_ids},
+        "active": True,
+    }).to_list(length=100)
+    by_id = {int(x["chat_id"]): x for x in channels}
+    missing = [cid for cid in clean_ids if cid not in by_id]
+    if missing:
+        raise ValueError("One or more selected chats are no longer connected")
+
+    targets = [
+        {
+            "chat_id": int(cid),
+            "title": str(by_id[cid].get("title") or cid),
+            "chat_type": str(by_id[cid].get("chat_type") or "group"),
+        }
+        for cid in clean_ids
+    ]
+    now = datetime.now(timezone.utc)
+    result = await c(PLAN_GROUPS).update_one(
+        {"owner_id": owner_id, "group_id": group_id, "active": True},
+        {"$set": {
+            "chat_ids": clean_ids,
+            "targets": targets,
+            "updated_at": now,
+        }}
+    )
+    if not result.matched_count:
+        raise ValueError("Plan target group not found")
+
+    # Keep payment/subscription delivery targets synchronized with the edited
+    # bundle. No new plan records are created.
+    await c(PLANS).update_many(
+        {"owner_id": owner_id, "group_id": group_id},
+        {"$set": {"target_chat_ids": clean_ids, "updated_at": now}},
+    )
+    return await get_plan_group(owner_id, group_id)
+
 async def get_plan_groups(owner_id):
     return await c(PLAN_GROUPS).find({"owner_id": int(owner_id), "active": True}).sort("created_at", 1).to_list(length=100)
 
