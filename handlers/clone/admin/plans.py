@@ -57,44 +57,20 @@ async def _main(self, q, owner):
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
 
-async def _selection(self, self_obj, q, owner, context):
-    # Load connected chats defensively so one stale/malformed DB record cannot
-    # prevent the Create New Plan screen from opening.
-    channels = await get_channels(int(owner))
-    data = context.user_data
-    if data is None:
-        raise RuntimeError("User session data is unavailable")
-
-    selected = set()
-    for value in (data.get("plan_group_selected_chats") or []):
-        try:
-            selected.add(int(value))
-        except (TypeError, ValueError):
-            continue
-
+async def _selection(self, q, owner, context):
+    channels = await get_channels(owner)
+    selected = set(int(x) for x in (context.user_data.get("plan_group_selected_chats") or []))
     lines = ["➕ Create New Plan", "", "Select one or more connected group/channel:", ""]
     kb = []
-    valid_count = 0
-    for ch in channels or []:
-        try:
-            cid = int(ch.get("chat_id"))
-        except (TypeError, ValueError):
-            logger.warning("Skipping invalid connected chat owner=%s record=%r", owner, ch)
-            continue
-        valid_count += 1
+    for ch in channels:
+        cid = int(ch["chat_id"])
         mark = "✅" if cid in selected else "☐"
         title = str(ch.get("title") or cid)
         lines.append(f"{mark} {title}")
-        kb.append([InlineKeyboardButton(
-            f"{mark} {title[:35]}",
-            callback_data=f"a_plan_group_toggle_{cid}",
-        )])
-
-    if valid_count == 0:
+        kb.append([InlineKeyboardButton(f"{mark} {title[:35]}", callback_data=f"a_plan_group_toggle_{cid}")])
+    if not channels:
         lines.append("No connected groups/channels found.")
-
-    # No Save button by design. Back confirms the current selection and creates
-    # the target bundle.
+    # No Save button: Back confirms the current selection and creates the bundle.
     kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plan_group_save")])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
@@ -105,9 +81,19 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
 
     if a == 'a_plan_add':
-        # Start a fresh selection only; do not clear unrelated admin state.
+        # Do not clear the complete user_data here. Other admin flows may keep
+        # state there, and clearing it can make the callback appear to do
+        # nothing when PTB persistence/other handlers are active. Only reset
+        # the temporary selection state used by this screen.
         context.user_data.pop('plan_group_selected_chats', None)
-        await _selection(self, q, owner, context)
+        try:
+            await _selection(self, q, owner, context)
+        except Exception as exc:
+            logger.exception('Failed to open Create New Plan screen owner=%s', owner)
+            try:
+                await q.answer('Unable to open Create New Plan. Please try again.', show_alert=True)
+            except Exception:
+                pass
         return True
 
     if a.startswith('a_plan_group_toggle_'):
