@@ -46,6 +46,7 @@ async def _main(self, q, owner):
             label = _group_label(group) or "Unnamed group/channel"
             plans = await get_plans(owner, group_id=str(group["group_id"]))
             lines.append(f"{index}. {label}:")
+            lines.append(f"   PLAN ID 👉 {str(group.get('plan_list_id') or '')}")
             lines.append(f"   Plans : {len(plans)}")
             if plans:
                 for p in plans:
