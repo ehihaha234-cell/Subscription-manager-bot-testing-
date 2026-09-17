@@ -430,18 +430,19 @@ class CloneLiveSupportMixin:
                 return
             if context.user_data.get("wait_plan_add") or context.user_data.get("wait_plan_edit"):
                 try:
-                    name,dtext,dmins,price,stars,target_chat_ids=self.parse_plan(text)
-                    if target_chat_ids:
-                        connected_ids={int(x.get("chat_id")) for x in await get_channels(owner) if x.get("chat_id") is not None}
-                        missing=[str(x) for x in target_chat_ids if int(x) not in connected_ids]
-                        if missing:
-                            raise ValueError("These chat IDs are not connected to this clone: " + ", ".join(missing))
+                    name,dtext,dmins,price,stars=self.parse_plan(text)
                     pid=context.user_data.get("wait_plan_edit")
+                    add_state=context.user_data.get("wait_plan_add")
                     if pid:
-                        await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price,stars_price=stars,target_chat_ids=target_chat_ids)
+                        plan = await get_plan(owner, pid)
+                        await update_plan(owner,pid,name=name,duration_text=dtext,duration_minutes=dmins,price=price,stars_price=stars)
+                        gid = str((plan or {}).get("group_id") or "")
+                        back = f"a_plan_group_view_{gid}" if gid else "a_plans"
                     else:
-                        await create_plan(owner,name,dtext,dmins,price,stars,target_chat_ids=target_chat_ids)
-                    context.user_data.clear(); await update.effective_message.reply_text("✅ Plan saved",reply_markup=self.plans_admin_menu())
+                        gid = str((add_state or {}).get("group_id") or "") if isinstance(add_state, dict) else ""
+                        await create_plan(owner,name,dtext,dmins,price,stars,group_id=gid or None)
+                        back = f"a_plan_group_view_{gid}" if gid else "a_plans"
+                    context.user_data.clear(); await update.effective_message.reply_text("✅ Plan saved",reply_markup=self.back(back))
                 except Exception as exc: await update.effective_message.reply_text(f"❌ {exc}")
                 return
             if context.user_data.get("wait_channel"):
