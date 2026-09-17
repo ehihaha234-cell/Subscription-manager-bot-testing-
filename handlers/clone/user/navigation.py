@@ -142,7 +142,7 @@ async def handle(self, update, context, q, owner, action):
         except Exception:
             pass
         return True
-    if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'} or action.startswith('c_plans_target_'):
+    if action in {'c_plans','c_buy','c_renew','c_profile','c_referral','c_referral_unlock','c_support'} or action.startswith('c_plans_target_') or action.startswith('c_plans_list_'):
         # Do not replace the original Welcome/previous-page origin when the
         # user is leaving an active/expired payment screen via Back. Otherwise
         # the subsequent Plans -> Back navigation can point back to the payment
@@ -202,6 +202,18 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('This subscription button is no longer configured.', show_alert=True)
             return True
         await self.show_plans(q, owner, True, context, target_chat_ids=target_chat_ids)
+        return True
+    if action.startswith('c_plans_list_'):
+        plan_list_id = action.replace('c_plans_list_', '', 1)
+        if len(plan_list_id) != 4 or not plan_list_id.isdigit():
+            await q.answer('Invalid PLAN ID.', show_alert=True)
+            return True
+        groups = await get_plan_groups(owner)
+        group = next((g for g in groups if str(g.get('plan_list_id') or '') == plan_list_id), None)
+        if not group:
+            await q.answer('PLAN ID not found in this bot.', show_alert=True)
+            return True
+        await self.show_plans(q, owner, True, context, target_chat_ids=group.get('chat_ids') or [])
         return True
     if action == 'c_plans':
         payment_photo = bool(
