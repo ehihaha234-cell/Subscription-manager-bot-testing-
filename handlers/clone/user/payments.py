@@ -11,7 +11,6 @@ from handlers.common.feature_navigation import feature_back_callback
 import io
 import time
 import qrcode
-import hashlib
 
 
 def _razorpay_qr_photo(checkout: dict):
@@ -66,11 +65,6 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('Plan not found', show_alert=True)
             return True
         context.user_data['selected_child_plan'] = plan
-        target_chat_ids = [int(x) for x in (context.user_data.get('selected_child_target_chat_ids') or [])]
-        plan_back_callback = 'c_buy'
-        if target_chat_ids:
-            token = hashlib.sha1(','.join(str(x) for x in target_chat_ids).encode('utf-8')).hexdigest()[:12]
-            plan_back_callback = f'c_plans_target_{token}'
         bot_id = int(context.application.bot_data.get('seller_bot_id') or 0)
         gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
         gateways = gateway_cfg.get('gateways') or {}
@@ -113,7 +107,10 @@ async def handle(self, update, context, q, owner, action):
                     'plan_name': plan['name'],
                     'description': f"{plan['name']} subscription",
                     'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
-                    'target_chat_ids': target_chat_ids or list(plan.get('target_chat_ids') or []),
+                'group_id': str(plan.get('group_id') or ''),
+                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
+                    'group_id': str(plan.get('group_id') or ''),
+                    'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
                 },
             )
             try:
@@ -150,7 +147,7 @@ async def handle(self, update, context, q, owner, action):
                         chat_id=q.message.chat_id,
                         photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                         caption=text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=plan_back_callback)]]),
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                     )
                     if not cached_file_id and getattr(sent, 'photo', None):
                         try:
@@ -237,11 +234,6 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('Plan not found', show_alert=True)
             return True
         s = await get_seller_settings(owner)
-        target_chat_ids = [int(x) for x in (context.user_data.get('selected_child_target_chat_ids') or plan.get('target_chat_ids') or [])]
-        plan_back_callback = 'c_buy'
-        if target_chat_ids:
-            token = hashlib.sha1(','.join(str(x) for x in target_chat_ids).encode('utf-8')).hexdigest()[:12]
-            plan_back_callback = f'c_plans_target_{token}'
         currency = normalize_currency(s.get('currency')) or 'INR'
         if currency != 'INR':
             await self.safe_query_message(q, f'⚠️ {gateway.title()} automatic checkout is currently configured for INR only. Current bot currency is {currency}. Use Manual Payment or change the currency to INR.', back_keyboard)
@@ -261,7 +253,8 @@ async def handle(self, update, context, q, owner, action):
                 'plan_id': plan_id, 'plan_name': plan['name'],
                 'description': f"{plan['name']} subscription",
                 'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
-                'target_chat_ids': target_chat_ids,
+                'group_id': str(plan.get('group_id') or ''),
+                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
             },
         )
         try:
@@ -297,7 +290,7 @@ async def handle(self, update, context, q, owner, action):
                     chat_id=q.message.chat_id,
                     photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                     caption=text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=plan_back_callback)]]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
                 )
                 if not cached_file_id and getattr(sent, 'photo', None):
                     try:
@@ -312,7 +305,7 @@ async def handle(self, update, context, q, owner, action):
                     payment_message_id=int(sent.message_id), payment_message_type='photo',
                 )
                 return True
-            await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data=plan_back_callback)]]))
+            await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
             await update_gateway_transaction(
                 tx['transaction_id'], payment_message_chat_id=int(q.message.chat_id),
                 payment_message_id=int(q.message.message_id), payment_message_type='text',
@@ -320,7 +313,7 @@ async def handle(self, update, context, q, owner, action):
         except GatewayError as exc:
             await self.safe_query_message(q, f'❌ Gateway error: {exc}', back_keyboard)
         return True
-        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data=plan_back_callback)]]))
+        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
         return True
     if action == 'c_upload':
         context.user_data['waiting_child_screenshot'] = True
