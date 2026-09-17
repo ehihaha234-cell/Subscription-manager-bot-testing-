@@ -81,7 +81,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard(f'a_user_view_{user_id}'))
             return True
         await activate_subscription(owner, user_id, plan['name'], plan['duration_minutes'], amount=plan.get('price'), duration_text=plan.get('duration_text'))
-        delivery = await self.deliver_subscription_access(owner, user_id)
+        delivery = await self.deliver_subscription_access(owner, user_id, {'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])]})
         try:
             await context.bot.send_message(user_id, f"🎉 Subscription activated/extended by admin.\nPlan: {plan['name']}\nDuration added: {plan['duration_text']}\n\nNew invite links sent: {delivery.get('sent', 0)}\nAlready joined: {delivery.get('already_member', 0)}")
         except Exception:
