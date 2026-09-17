@@ -18,7 +18,6 @@ async def initialize_seller_data_indexes():
     await c(SETTINGS).create_index("owner_id", unique=True)
     await c(PLANS).create_index([("owner_id",1),("plan_id",1)], unique=True)
     await c(PLAN_GROUPS).create_index([("owner_id",1),("group_id",1)], unique=True)
-    await c(PLAN_GROUPS).create_index([("owner_id",1),("plan_list_id",1)], unique=True, sparse=True)
     await c(PLANS).create_index([("owner_id",1),("group_id",1),("active",1)])
     await c(CHANNELS).create_index([("owner_id",1),("chat_id",1)], unique=True)
     await c(USERS).create_index([("owner_id",1),("user_id",1)], unique=True)
@@ -493,7 +492,10 @@ async def _next_plan_list_id(owner_id):
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
-    value = int(doc.get("last_id", 0) or 0)
+    try:
+        value = int(doc.get("last_id", 0) or 0)
+    except (TypeError, ValueError):
+        value = 1000
     if value < 1001 or value > 9999:
         raise ValueError("Plan ID limit reached. Only four-digit Plan IDs (1001-9999) are supported for this bot.")
     return value
@@ -504,12 +506,22 @@ async def _ensure_plan_group_ids(owner_id, groups=None):
     owner_id = int(owner_id)
     if groups is None:
         groups = await c(PLAN_GROUPS).find({"owner_id": owner_id, "active": True}).sort("created_at", 1).to_list(length=100)
-    missing = [g for g in groups if not str(g.get("plan_list_id") or "").isdigit()]
+    missing = []
+    assigned = []
+    for g in groups:
+        raw = g.get("plan_list_id")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 0
+        if 1001 <= value <= 9999:
+            assigned.append(value)
+        else:
+            missing.append(g)
     if not missing:
         return groups
 
     # Bring the counter forward to the highest already-assigned ID, if any.
-    assigned = [int(g["plan_list_id"]) for g in groups if str(g.get("plan_list_id") or "").isdigit() and 1001 <= int(g["plan_list_id"]) <= 9999]
     if assigned:
         counter = await c(PLAN_GROUP_COUNTERS).find_one({"_id": owner_id})
         if counter is None:
