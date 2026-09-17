@@ -41,11 +41,7 @@ def welcome_url_buttons_header() -> str:
         "Button title - t.me/LinkExample\n\n"
         "⭐ Special Buttons\n\n"
         "• Add a button that shows a popup:\n"
-        "Button title - popup: Popup text\n"
-        "or\n"
-        "Button title - alert: Popup text\n\n"
-        "• Add a button with a link to the group rules:\n"
-        "Button title - rules\n\n"
+        "Button title - popup: Popup text\n\n"
         "• Add a share button:\n"
         "Button title - share: Text to be shared\n\n"
         "• Add a button with copyable text:\n"
@@ -58,8 +54,11 @@ def welcome_url_buttons_header() -> str:
         "• Show a separate plan list using its PLAN ID:\n"
         "Button title - feature: plans_(PLAN_ID)\n"
         "Example: Premium Channel - feature: plans_1001\n\n"
-        "Each connected group/channel bundle has its own 4-digit PLAN ID in Plan Management.\n"
-        "The PLAN ID works only inside this bot."
+        "Where to find PLAN ID:\n"
+        "Go to 📦 Plan Management.\n"
+        "Each separate plan group will have its own 4-digit PLAN ID.\n"
+        "Example: PLAN ID 👉 1001\n"
+        "Use that ID as feature: plans_1001."
     )
 
 
