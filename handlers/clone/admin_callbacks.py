@@ -1,6 +1,10 @@
 """Clone-bot administrator callback router."""
 
+import logging
+
 from handlers.common.clone_context import *
+
+logger = logging.getLogger(__name__)
 from handlers.clone.admin import dashboard, plans, channels, welcome, gateways, live_support, payments, broadcast_coupons, referrals, help_terms, staff, users, business_automation, group_manager
 
 _ADMIN_HANDLERS = (group_manager, business_automation, dashboard, plans, channels, welcome, gateways, live_support, payments, broadcast_coupons, referrals, help_terms, staff, users)
