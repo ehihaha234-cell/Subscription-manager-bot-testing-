@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from uuid import uuid4
@@ -10,6 +11,8 @@ PAYMENTS="seller_payments"; SUBS="seller_subscriptions"; REFERRALS="seller_refer
 BUSINESS_ACCOUNTS="seller_business_accounts"; BUSINESS_CONTACTS="seller_business_contacts"
 PLAN_GROUP_COUNTERS="seller_plan_group_counters"
 
+
+logger = logging.getLogger(__name__)
 
 def c(name): return get_database()[name]
 
@@ -493,9 +496,24 @@ async def _next_plan_list_id(owner_id):
     """
     owner_id = int(owner_id)
     try:
+        # Use an update pipeline here. A classic MongoDB update cannot safely
+        # combine $setOnInsert and $inc on the same field (last_id), which was
+        # causing ConflictingUpdateOperators on first Plan ID allocation.
         doc = await c(PLAN_GROUP_COUNTERS).find_one_and_update(
             {"_id": owner_id},
-            {"$setOnInsert": {"owner_id": owner_id, "last_id": 1000}, "$inc": {"last_id": 1}},
+            [
+                {
+                    "$set": {
+                        "owner_id": owner_id,
+                        "last_id": {
+                            "$add": [
+                                {"$ifNull": ["$last_id", 1000]},
+                                1,
+                            ]
+                        },
+                    }
+                }
+            ],
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
