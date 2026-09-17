@@ -155,7 +155,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         await _selection(self, q, owner, context)
         return True
 
-    if a in ('a_plan_group_save',) or a.startswith('a_plan_group_save_edit_'):
+    if a == 'a_plan_group_save' or a.startswith('a_plan_group_save_edit_'):
         selected = []
         for value in (context.user_data.get('plan_group_selected_chats') or []):
             try:
