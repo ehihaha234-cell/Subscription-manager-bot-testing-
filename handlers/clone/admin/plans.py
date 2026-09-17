@@ -76,7 +76,7 @@ async def _selection(self, q, owner, context, *, edit_group_id=None):
         lines.append("No connected groups/channels found.")
     # Back confirms the current selection. Create and edit use separate save callbacks.
     save_callback = (f"a_plan_group_save_edit_{edit_group_id}" if edit_group_id
-                     else "a_plan_group_create_back")
+                     else "a_plan_group_save")
     kb.append([InlineKeyboardButton("⬅ Back", callback_data=save_callback)])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
@@ -117,22 +117,6 @@ async def handle(self, update, context, q, owner, staff, a, role):
         context.user_data['plan_group_selected_chats'] = list(selected)
         await _selection(self, q, owner, context)
         return True
-
-    if a == 'a_plan_group_create_back':
-        # On the Create New Plan screen, Back must always be usable.
-        # If nothing was selected, simply return to Plan Management instead
-        # of routing through the save/validation path and showing an error.
-        selected = context.user_data.get('plan_group_selected_chats') or []
-        if not selected:
-            context.user_data.pop('plan_group_selected_chats', None)
-            context.user_data.pop('plan_group_editing_id', None)
-            await _main(self, q, owner)
-            return True
-
-        # When one or more chats were selected, Back keeps the existing
-        # architecture behaviour: it confirms the selection and creates the
-        # new plan-target bundle.
-        a = 'a_plan_group_save'
 
     if a in ('a_plan_group_save',) or a.startswith('a_plan_group_save_edit_'):
         selected = []
@@ -197,8 +181,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
         kb = []
         for p in plans:
             lines.append(f"{('✅' if p.get('active') else '⏸')} {p['name']} — {p['duration_text']} — {format_currency(code, p['price'])} — ⭐{int(p.get('stars_price',0) or 0)}")
-            kb.append([InlineKeyboardButton(f"✏️ {p['name'][:16]}", callback_data=f"a_plan_edit_{p['plan_id']}"), InlineKeyboardButton("🗑️", callback_data=f"a_plan_del_{p['plan_id']}")])
-            kb.append([InlineKeyboardButton('⏸️ Disable' if p.get('active') else '▶️ Enable', callback_data=f"a_plan_toggle_{p['plan_id']}")])
+            kb.append([
+                InlineKeyboardButton(f"✏️ {p['name'][:16]}", callback_data=f"a_plan_edit_{p['plan_id']}"),
+                InlineKeyboardButton("🗑️", callback_data=f"a_plan_del_{p['plan_id']}"),
+                InlineKeyboardButton("⏸️ Disable" if p.get('active') else "▶️ Enable", callback_data=f"a_plan_toggle_{p['plan_id']}")
+            ])
         kb.append([InlineKeyboardButton("➕ Add Plan", callback_data=f"a_plan_group_add_{gid}")])
         kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plans")])
         await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
@@ -215,7 +202,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if limit >= 0 and existing >= limit:
             await q.edit_message_text(await plan_limit_warning(self.seller_account(context)), reply_markup=self.limit_keyboard(f'a_plan_group_view_{gid}'))
             return True
-        context.user_data.clear()
+        context.user_data.pop('wait_plan_edit', None)
         context.user_data['wait_plan_add'] = {'group_id': gid}
         settings = await get_seller_settings(owner)
         code = normalize_currency(settings.get('currency')) or 'INR'
@@ -263,8 +250,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
             kb=[]
             for plan in plans:
                 lines.append(f"{('✅' if plan.get('active') else '⏸')} {plan['name']} — {plan['duration_text']} — {format_currency(code, plan['price'])} — ⭐{int(plan.get('stars_price',0) or 0)}")
-                kb.append([InlineKeyboardButton(f"✏️ {plan['name'][:16]}", callback_data=f"a_plan_edit_{plan['plan_id']}"), InlineKeyboardButton("🗑️", callback_data=f"a_plan_del_{plan['plan_id']}")])
-                kb.append([InlineKeyboardButton('⏸️ Disable' if plan.get('active') else '▶️ Enable', callback_data=f"a_plan_toggle_{plan['plan_id']}")])
+                kb.append([
+                    InlineKeyboardButton(f"✏️ {plan['name'][:16]}", callback_data=f"a_plan_edit_{plan['plan_id']}"),
+                    InlineKeyboardButton("🗑️", callback_data=f"a_plan_del_{plan['plan_id']}"),
+                    InlineKeyboardButton("⏸️ Disable" if plan.get('active') else "▶️ Enable", callback_data=f"a_plan_toggle_{plan['plan_id']}")
+                ])
             kb.append([InlineKeyboardButton("➕ Add Plan", callback_data=f"a_plan_group_add_{gid}")])
             kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plans")])
             await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
