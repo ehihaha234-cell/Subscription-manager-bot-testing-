@@ -76,7 +76,7 @@ async def _selection(self, q, owner, context, *, edit_group_id=None):
         lines.append("No connected groups/channels found.")
     # Back confirms the current selection. Create and edit use separate save callbacks.
     save_callback = (f"a_plan_group_save_edit_{edit_group_id}" if edit_group_id
-                     else "a_plan_group_save")
+                     else "a_plan_group_create_back")
     kb.append([InlineKeyboardButton("⬅ Back", callback_data=save_callback)])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
@@ -117,6 +117,22 @@ async def handle(self, update, context, q, owner, staff, a, role):
         context.user_data['plan_group_selected_chats'] = list(selected)
         await _selection(self, q, owner, context)
         return True
+
+    if a == 'a_plan_group_create_back':
+        # On the Create New Plan screen, Back must always be usable.
+        # If nothing was selected, simply return to Plan Management instead
+        # of routing through the save/validation path and showing an error.
+        selected = context.user_data.get('plan_group_selected_chats') or []
+        if not selected:
+            context.user_data.pop('plan_group_selected_chats', None)
+            context.user_data.pop('plan_group_editing_id', None)
+            await _main(self, q, owner)
+            return True
+
+        # When one or more chats were selected, Back keeps the existing
+        # architecture behaviour: it confirms the selection and creates the
+        # new plan-target bundle.
+        a = 'a_plan_group_save'
 
     if a in ('a_plan_group_save',) or a.startswith('a_plan_group_save_edit_'):
         selected = []
