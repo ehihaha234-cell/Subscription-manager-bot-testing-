@@ -15,6 +15,7 @@ class CloneAdminCallbacksMixin:
             await q.edit_message_text("❌ Not authorized")
             return
         action = q.data
+        role = staff_record.get("role", "moderator")
         # Plan creation has its own explicit dispatch path. Keep it before the
         # generic admin routing so the Create New Plan button cannot be
         # swallowed by another callback route or role-prefix guard.
@@ -29,7 +30,6 @@ class CloneAdminCallbacksMixin:
         # They still need a registered callback path so Telegram's spinner closes.
         if action == "a_noop":
             return
-        role = staff_record.get("role", "moderator")
         if role == "moderator":
             allowed_prefixes = (
                 "a_home",
