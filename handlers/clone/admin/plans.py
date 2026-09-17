@@ -57,10 +57,14 @@ async def _main(self, q, owner):
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
 
-async def _selection(self, q, owner, context):
+async def _selection(self, q, owner, context, *, edit_group_id=None):
+    # Preserve edit mode while the seller toggles multiple chats.
+    if edit_group_id is None:
+        edit_group_id = context.user_data.get("plan_group_editing_id")
     channels = await get_channels(owner)
     selected = set(int(x) for x in (context.user_data.get("plan_group_selected_chats") or []))
-    lines = ["➕ Create New Plan", "", "Select one or more connected group/channel:", ""]
+    title = "✏️ Edit Plan Target" if edit_group_id else "➕ Create New Plan"
+    lines = [title, "", "Select one or more connected group/channel:", ""]
     kb = []
     for ch in channels:
         cid = int(ch["chat_id"])
@@ -70,8 +74,10 @@ async def _selection(self, q, owner, context):
         kb.append([InlineKeyboardButton(f"{mark} {title[:35]}", callback_data=f"a_plan_group_toggle_{cid}")])
     if not channels:
         lines.append("No connected groups/channels found.")
-    # No Save button: Back confirms the current selection and creates the bundle.
-    kb.append([InlineKeyboardButton("⬅ Back", callback_data="a_plan_group_save")])
+    # Back confirms the current selection. Create and edit use separate save callbacks.
+    save_callback = (f"a_plan_group_save_edit_{edit_group_id}" if edit_group_id
+                     else "a_plan_group_save")
+    kb.append([InlineKeyboardButton("⬅ Back", callback_data=save_callback)])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
 
@@ -86,6 +92,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         # nothing when PTB persistence/other handlers are active. Only reset
         # the temporary selection state used by this screen.
         context.user_data.pop('plan_group_selected_chats', None)
+        context.user_data.pop('plan_group_editing_id', None)
         try:
             await _selection(self, q, owner, context)
         except Exception as exc:
@@ -111,7 +118,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         await _selection(self, q, owner, context)
         return True
 
-    if a == 'a_plan_group_save':
+    if a in ('a_plan_group_save',) or a.startswith('a_plan_group_save_edit_'):
         selected = []
         for value in (context.user_data.get('plan_group_selected_chats') or []):
             try:
@@ -120,38 +127,39 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 continue
             if cid not in selected:
                 selected.append(cid)
-
-        edit_gid = str(context.user_data.get('plan_group_edit_gid') or '').strip()
         if not selected:
             await q.answer('Select at least one group/channel.', show_alert=True)
             return True
+
         try:
-            if edit_gid:
-                await update_plan_group(owner, edit_gid, selected)
+            if a.startswith('a_plan_group_save_edit_'):
+                gid = a.replace('a_plan_group_save_edit_', '', 1)
+                await update_plan_group(owner, gid, selected)
             else:
                 await create_plan_group(owner, selected)
         except Exception as exc:
             await q.answer(str(exc), show_alert=True)
             return True
+
         context.user_data.pop('plan_group_selected_chats', None)
-        context.user_data.pop('plan_group_edit_gid', None)
+        context.user_data.pop('plan_group_editing_id', None)
         await _main(self, q, owner)
         return True
 
     if a.startswith('a_plan_group_info_'):
-        # Clicking the bundle name edits the bundle's connected chats. Existing
-        # selections are checked, while new chats can be added and old chats
-        # can be deselected. Back saves the edited bundle.
-        gid = a.replace('a_plan_group_info_', '')
+        # The group-name button is the Edit button. Open the same multi-select
+        # screen with the bundle's current targets pre-selected.
+        gid = a.replace('a_plan_group_info_', '', 1)
         group = await get_plan_group(owner, gid)
         if not group:
             await q.answer('Plan group not found.', show_alert=True)
             return True
-        context.user_data['plan_group_edit_gid'] = gid
+        context.user_data.pop('plan_group_selected_chats', None)
+        context.user_data['plan_group_editing_id'] = gid
         context.user_data['plan_group_selected_chats'] = [
             int(x) for x in (group.get('chat_ids') or [])
         ]
-        await _selection(self, q, owner, context)
+        await _selection(self, q, owner, context, edit_group_id=gid)
         return True
 
     if a.startswith('a_plan_group_del_'):
