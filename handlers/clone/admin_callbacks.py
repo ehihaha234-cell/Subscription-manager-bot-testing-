@@ -34,14 +34,14 @@ class CloneAdminCallbacksMixin:
                 await plans.handle(self, update, context, q, owner, staff_record, action, role)
             except Exception as exc:
                 logger.exception("Create New Plan callback failed owner=%s", owner)
+                detail = f"{type(exc).__name__}: {str(exc)[:180]}"
                 try:
-                    await q.answer("Unable to open Create New Plan. Please try again.", show_alert=True)
+                    await q.message.reply_text(f"⚠️ Create New Plan error\n\n{detail}")
                 except Exception:
-                    pass
-                try:
-                    await q.message.reply_text("⚠️ Create New Plan could not be opened. Please try again.")
-                except Exception:
-                    pass
+                    try:
+                        await q.answer(f"Create New Plan error: {detail}", show_alert=True)
+                    except Exception:
+                        pass
             return
         await q.answer()
         if role == "moderator":
