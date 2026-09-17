@@ -1,6 +1,10 @@
 """Seller plan-target bundle management and per-bundle subscription plans."""
 
+import logging
+
 from handlers.common.clone_context import *
+
+logger = logging.getLogger(__name__)
 
 
 def _group_label(group):
