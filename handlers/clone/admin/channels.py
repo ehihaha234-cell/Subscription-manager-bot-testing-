@@ -42,6 +42,46 @@ async def _send_message_with_retry(context, user_id, text, disable_web_page_prev
     )
 
 
+async def _has_invite_permission(context, chat_id, bot_id=None):
+    """Return whether the clone bot currently has Telegram invite permission."""
+    try:
+        if bot_id is None:
+            bot_id = (await context.bot.get_me()).id
+        member = await context.bot.get_chat_member(int(chat_id), int(bot_id))
+        status = getattr(member, 'status', '')
+        can_invite = bool(getattr(member, 'can_invite_users', False))
+        return status == 'creator' or (status == 'administrator' and can_invite)
+    except Exception as exc:
+        logger.warning('Channel permission check failed chat=%s: %s', chat_id, exc)
+        return False
+
+
+async def _render_channel_list(context, q, owner):
+    channels = await get_channels(owner)
+    me = await context.bot.get_me()
+    lines = [
+        '📋 Channels / Groups',
+        '',
+        'Choose which connected chats should receive automatic invite links after successful automatic payment verification.',
+        '',
+        '✅ = Clone bot has the required Telegram permission',
+        '❌ = Clone bot does not have the required Telegram permission',
+    ]
+    kb = []
+    for ch in channels:
+        title = ch.get('title', 'Chat')
+        chat_id = int(ch['chat_id'])
+        has_permission = await _has_invite_permission(context, chat_id, me.id)
+        mark = '✅' if has_permission else '❌'
+        lines.append(f"• {title}\n  {chat_id}")
+        kb.append([
+            InlineKeyboardButton(f'{mark} {title[:24]}', callback_data=f'a_channel_permission_{chat_id}'),
+            InlineKeyboardButton('🗑 Remove', callback_data=f'a_channel_del_{chat_id}')
+        ])
+    kb.append([InlineKeyboardButton('⬅ Back', callback_data='a_channels')])
+    await q.edit_message_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(kb))
+
+
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_channels':
         await q.edit_message_text('📢 Channels / Groups', reply_markup=self.channels_menu())
@@ -58,38 +98,21 @@ async def handle(self, update, context, q, owner, staff, a, role):
         await q.edit_message_text('📢 Connect Channel / Group\n\n✅ Channel\n• Child bot ko channel me Admin banao.\n• Channel se koi bhi message yahan FORWARD karo.\n\n✅ Private Group (Recommended)\n1. Child bot ko group me add karo.\n2. Bot ko Admin banao.\n3. Invite Users permission ON rakho.\n4. Usi group ke andar /connectgroup bhejo.\n\nBot group automatically detect karke save karega aur invite-link permission test karega.\n\n🔄 Agar auto detect na ho:\n• Group se koi message yahan FORWARD karo.\n\n⚠️ Sirf last option:\n-100xxxxxxxxxx | Group Name', reply_markup=self.back('a_channels'))
         return True
     if a == 'a_channel_list':
-        channels = await get_channels(owner)
-        lines = ['📋 Channels / Groups\n', 'Choose which connected chats should receive automatic invite links after successful automatic payment verification.\n', '✅ Enabled: invite link will be sent\n❌ Disabled: invite link will be skipped']
-        kb = []
-        for ch in channels:
-            enabled = ch.get('auto_invite_enabled', True) is not False
-            status = '✅ Enabled' if enabled else '❌ Disabled'
-            title = ch.get('title', 'Chat')
-            lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
-            kb.append([InlineKeyboardButton(f"{('✅' if enabled else '❌')} {title[:24]}", callback_data=f"a_channel_autoinvite_{ch['chat_id']}"), InlineKeyboardButton('🗑 Remove', callback_data=f"a_channel_del_{ch['chat_id']}")])
-        kb.append([InlineKeyboardButton('⬅ Back', callback_data='a_channels')])
-        await q.edit_message_text('\n\n'.join(lines), reply_markup=InlineKeyboardMarkup(kb))
+        await _render_channel_list(context, q, owner)
         return True
-    if a.startswith('a_channel_autoinvite_'):
-        chat_id = int(a.replace('a_channel_autoinvite_', '', 1))
+    if a.startswith('a_channel_permission_'):
+        chat_id = int(a.replace('a_channel_permission_', '', 1))
         channels = await get_channels(owner)
-        channel = next((item for item in channels if int(item.get('chat_id')) == chat_id), None)
+        channel = next((item for item in channels if int(item.get('chat_id', 0)) == chat_id), None)
         if not channel:
             await q.answer('Channel or group not found.', show_alert=True)
             return True
-        current = channel.get('auto_invite_enabled', True) is not False
-        await set_channel_auto_invite(owner, chat_id, not current)
-        channels = await get_channels(owner)
-        lines = ['📋 Channels / Groups\n', 'Choose which connected chats should receive automatic invite links after successful automatic payment verification.\n', '✅ Enabled: invite link will be sent\n❌ Disabled: invite link will be skipped']
-        kb = []
-        for ch in channels:
-            enabled = ch.get('auto_invite_enabled', True) is not False
-            status = '✅ Enabled' if enabled else '❌ Disabled'
-            title = ch.get('title', 'Chat')
-            lines.append(f"• {title}\n  {ch.get('chat_id')}\n  Auto Invite: {status}")
-            kb.append([InlineKeyboardButton(f"{('✅' if enabled else '❌')} {title[:24]}", callback_data=f"a_channel_autoinvite_{ch['chat_id']}"), InlineKeyboardButton('🗑 Remove', callback_data=f"a_channel_del_{ch['chat_id']}")])
-        kb.append([InlineKeyboardButton('⬅ Back', callback_data='a_channels')])
-        await q.edit_message_text('\n\n'.join(lines), reply_markup=InlineKeyboardMarkup(kb))
+        allowed = await _has_invite_permission(context, chat_id)
+        await q.answer(
+            '✅ Invite permission available' if allowed else '❌ Invite permission is not available',
+            show_alert=False,
+        )
+        await _render_channel_list(context, q, owner)
         return True
     if a == 'a_channel_resend':
         channels = await get_channels(owner)
@@ -101,7 +124,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_channel_resend_yes':
         await q.edit_message_text('⏳ Invite links resend ho rahe hain...')
-        channels = [channel for channel in await get_channels(owner) if channel.get('auto_invite_enabled', True) is not False]
+        all_channels = await get_channels(owner)
+        bot_id = (await context.bot.get_me()).id
+        channels = [
+            channel for channel in all_channels
+            if await _has_invite_permission(context, channel['chat_id'], bot_id)
+        ]
         subscriptions = await active_subscriptions(owner, limit=None)
         sent = failed = invite_failed = 0
         now = datetime.now(timezone.utc)
@@ -145,7 +173,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_retry_failed':
         failed_docs = await get_failed_deliveries(owner, 'invite_resend')
         sent = still_failed = skipped = 0
-        channels = [channel for channel in await get_channels(owner) if channel.get('auto_invite_enabled', True) is not False]
+        all_channels = await get_channels(owner)
+        bot_id = (await context.bot.get_me()).id
+        channels = [
+            channel for channel in all_channels
+            if await _has_invite_permission(context, channel['chat_id'], bot_id)
+        ]
         for item in failed_docs:
             claimed = await claim_failed_delivery(item['_id'], owner, stale_after_seconds=600)
             if not claimed:
