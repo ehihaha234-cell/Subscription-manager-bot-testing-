@@ -55,13 +55,11 @@ def welcome_url_buttons_header() -> str:
         "Button title - feature: feature_name\n\n"
         "Available feature names:\n"
         "plans, buy, profile, renew, referral, referral_unlock, support, home\n\n"
-        "• Show a separate plan list for one connected group/channel:\n"
-        "Button title - plans:CHAT_ID\n"
-        "Example: Premium Channel - plans:-1001234567890\n\n"
-        "• Show one plan list for multiple connected groups/channels:\n"
-        "Button title - plans:CHAT_ID_1,CHAT_ID_2\n"
-        "Example: Premium Access - plans:-1001234567890,-1009876543210\n\n"
-        "The plan must be assigned to the selected chat(s)."
+        "• Show a separate plan list using its PLAN ID:\n"
+        "Button title - feature: plans_(PLAN_ID)\n"
+        "Example: Premium Channel - feature: plans_1001\n\n"
+        "Each connected group/channel bundle has its own 4-digit PLAN ID in Plan Management.\n"
+        "The PLAN ID works only inside this bot."
     )
 
 
@@ -78,9 +76,14 @@ def _parse_welcome_button_target(target: str, line_no: int, button_no: int) -> d
         return {"text_type": "url", "value": f"https://t.me/{username}"}
     if target.startswith("feature:"):
         feature = target.split(":", 1)[1].strip().lower()
+        if feature.startswith("plans_"):
+            plan_list_id = feature.split("_", 1)[1].strip()
+            if len(plan_list_id) != 4 or not plan_list_id.isdigit():
+                raise ValueError(location + "PLAN ID must be exactly 4 digits. Example: feature: plans_1001")
+            return {"text_type": "callback", "value": f"c_plans_list_{plan_list_id}"}
         callback = WELCOME_FEATURE_CALLBACKS.get(feature)
         if not callback:
-            raise ValueError(location + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)}")
+            raise ValueError(location + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)} or plans_(PLAN_ID)")
         return {"text_type": "callback", "value": callback}
     if target.startswith("plans:"):
         raw_ids = target.split(":", 1)[1].strip()
