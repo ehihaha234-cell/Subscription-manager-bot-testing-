@@ -293,18 +293,36 @@ class ClonePaymentDeliveryMixin:
         if not connected_channels:
             return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
 
-        # Existing channel documents default to enabled so current sellers keep
-        # their previous behaviour until they explicitly disable a destination.
-        channels=[
-            channel for channel in connected_channels
-            if channel.get("auto_invite_enabled",True) is not False
-        ]
+        # Automatic invite delivery is controlled only by the clone bot's
+        # current Telegram permission. There is no stored enable/disable
+        # switch anymore. A chat is eligible only when the clone bot is an
+        # administrator/creator and has Invite Users permission.
+        me = await bot.get_me()
+        channels=[]
+        for channel in connected_channels:
+            chat_id=int(channel["chat_id"])
+            try:
+                bot_member = await bot.get_chat_member(chat_id, int(me.id))
+                bot_status = getattr(bot_member, "status", "")
+                can_invite = bool(getattr(bot_member, "can_invite_users", False))
+                if bot_status == "creator" or (bot_status == "administrator" and can_invite):
+                    channels.append(channel)
+                else:
+                    logger.warning(
+                        "Invite delivery skipped: missing Telegram invite permission owner=%s chat=%s status=%s can_invite=%s",
+                        owner_id, chat_id, bot_status, can_invite,
+                    )
+            except TelegramError as exc:
+                logger.warning(
+                    "Invite permission check failed owner=%s chat=%s: %s",
+                    owner_id, chat_id, exc,
+                )
         if not channels:
             return {
                 "sent":0,
                 "already_member":0,
                 "failed":0,
-                "error":"Automatic invite delivery is disabled for every connected channel/group",
+                "error":"No connected channel/group has the required Telegram invite permission",
             }
 
         links=[]
