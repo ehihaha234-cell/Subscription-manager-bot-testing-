@@ -8,7 +8,6 @@ _ADMIN_HANDLERS = (group_manager, business_automation, dashboard, plans, channel
 class CloneAdminCallbacksMixin:
     async def admin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
-        await q.answer()
         owner = self.owner(context)
         staff_record = await self.staff_record(update, context)
         if not staff_record:
@@ -31,11 +30,20 @@ class CloneAdminCallbacksMixin:
         # by another callback route or role-prefix guard.
         if action == "a_plan_add":
             try:
+                await q.answer()
                 await plans.handle(self, update, context, q, owner, staff_record, action, role)
-            except Exception:
+            except Exception as exc:
                 logger.exception("Create New Plan callback failed owner=%s", owner)
-                await q.answer("Unable to open Create New Plan. Please try again.", show_alert=True)
+                try:
+                    await q.answer("Unable to open Create New Plan. Please try again.", show_alert=True)
+                except Exception:
+                    pass
+                try:
+                    await q.message.reply_text("⚠️ Create New Plan could not be opened. Please try again.")
+                except Exception:
+                    pass
             return
+        await q.answer()
         if role == "moderator":
             allowed_prefixes = (
                 "a_home",
