@@ -15,14 +15,26 @@ class CloneAdminCallbacksMixin:
             await q.edit_message_text("❌ Not authorized")
             return
         action = q.data
-        # Resolve the staff role before any plan callback is dispatched.
-        # The previous version passed `role` before assigning it, so clicking
-        # Create New Plan raised UnboundLocalError and appeared to do nothing.
+        # Resolve the staff role BEFORE any feature-specific dispatch.
+        # The previous code passed `role` into the Plan handler before assigning
+        # it, causing an UnboundLocalError and making ➕ Create New Plan appear
+        # completely unresponsive.
         role = staff_record.get("role", "moderator")
 
         # Informational/status buttons intentionally perform no navigation.
         # They still need a registered callback path so Telegram's spinner closes.
         if action == "a_noop":
+            return
+
+        # Plan creation has its own explicit dispatch path. Keep it before the
+        # generic admin routing so the Create New Plan button cannot be swallowed
+        # by another callback route or role-prefix guard.
+        if action == "a_plan_add":
+            try:
+                await plans.handle(self, update, context, q, owner, staff_record, action, role)
+            except Exception:
+                logger.exception("Create New Plan callback failed owner=%s", owner)
+                await q.answer("Unable to open Create New Plan. Please try again.", show_alert=True)
             return
         if role == "moderator":
             allowed_prefixes = (
