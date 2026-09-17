@@ -37,8 +37,25 @@ async def _main(self, q, owner):
                     groups = await get_plan_groups(owner)
                 except Exception:
                     pass
-    lines = ["📦 Plan Management", ""]
+    # Show a compact summary of every plan target and its plans in the header.
+    settings = await get_seller_settings(owner)
+    code = normalize_currency(settings.get("currency")) or "INR"
+    lines = ["📦 Plan Management", "", "📊 Current Plan Summary", ""]
     if groups:
+        for index, group in enumerate(groups, 1):
+            label = _group_label(group) or "Unnamed group/channel"
+            plans = await get_plans(owner, group_id=str(group["group_id"]))
+            lines.append(f"{index}. {label}:")
+            lines.append(f"   Plans : {len(plans)}")
+            if plans:
+                for p in plans:
+                    lines.append(
+                        f"      {p['name']} / {p['duration_text']} / "
+                        f"{format_currency(code, p['price'])} / ⭐{int(p.get('stars_price', 0) or 0)}"
+                    )
+            else:
+                lines.append("      No plans added")
+            lines.append("")
         lines.append("Select a connected group/channel bundle to manage its plans.")
     else:
         lines.append("No plan target created yet.")
