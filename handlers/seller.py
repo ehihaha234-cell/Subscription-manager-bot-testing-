@@ -117,18 +117,44 @@ async def _activate_first_clone_trial(message, owner_id: int) -> bool:
     return True
 
 
+def _seller_plan_selector_text(plans: list[dict]) -> str:
+    """Render the seller plan selector with limits for every plan.
+
+    Clone-bot count is a seller-level quota. The remaining resource quotas are
+    explicitly shown as per-clone-bot limits because clone data is isolated by
+    each bot's data_owner_id.
+    """
+    lines = [
+        "💎 Buy / Change Seller Plan",
+        "",
+        "📊 Plan Limitations",
+        "• Clone Bots: seller-level limit",
+        "• Active Subscribers, Channels/Groups, Subscription Plans and Admins are per clone bot.",
+        "",
+    ]
+    for plan in plans:
+        lines.extend([
+            f"• {plan.get('name', 'Plan')} — ₹{plan.get('price', 0):g} / {plan.get('duration_days', 30)} days",
+            f"  🤖 Clone Bots: {_limit_text(plan.get('bot_limit', 1))}",
+            f"  👥 Active Subscribers: {_limit_text(plan.get('active_subscriber_limit', 25))} / bot",
+            f"  📢 Channels / Groups: {_limit_text(plan.get('channel_limit', 1))} / bot",
+            f"  📦 Subscription Plans: {_limit_text(plan.get('plan_limit', 2))} / bot",
+            f"  👨‍💼 Admins: {_limit_text(plan.get('admin_limit', 1))} / bot",
+            "",
+        ])
+    if not plans:
+        lines.append("No paid seller plans are available right now.")
+    return "\n".join(lines).rstrip()
+
+
 async def send_seller_upgrade_plan(message, owner_id: int) -> None:
     """Send the seller plan selector from commands/deep links."""
     cfg = await get_config()
     plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
     rows = []
-    lines = ["💎 Buy / Change Seller Plan", ""]
+    lines = [_seller_plan_selector_text(plans)]
     current, _ = await effective_plan(owner_id)
     for plan in plans:
-        lines.append(
-            f"• {plan.get('name', 'Plan')} — ₹{plan.get('price', 0):g} / "
-            f"{plan.get('duration_days', 30)} days"
-        )
         request_type = (
             "upgrade"
             if float(plan.get("price", 0)) >= float(current.get("price", 0))
@@ -140,8 +166,6 @@ async def send_seller_upgrade_plan(message, owner_id: int) -> None:
                 callback_data=f"seller_buy_{request_type}_{plan.get('plan_id')}",
             )
         ])
-    if not plans:
-        lines.append("No paid seller plans are available right now.")
     rows.append([InlineKeyboardButton("⬅ Back", callback_data="main_home")])
     await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
 
@@ -1623,10 +1647,8 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg = await get_config()
         plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
         rows = []
-        lines = ["💎 Buy / Change Seller Plan", ""]
         current, _ = await effective_plan(owner_id)
         for p in plans:
-            lines.append(f"• {p.get('name','Plan')} — ₹{p.get('price',0):g} / {p.get('duration_days',30)} days")
             typ = "upgrade" if float(p.get("price", 0)) >= float(current.get("price", 0)) else "downgrade"
             rows.append([InlineKeyboardButton(f"Select {p.get('name')}", callback_data=f"seller_buy_{typ}_{p.get('plan_id')}")])
         if action == "seller_upgrade_plan_profile":
@@ -1641,7 +1663,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             back_target = "main_home"
         rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_target)])
         markup = InlineKeyboardMarkup(rows)
-        text = "\n".join(lines)
+        text = _seller_plan_selector_text(plans)
         # A seller payment screen may be a photo (QR code). Telegram cannot use
         # edit_message_text on photo messages, so replace it with a normal text message.
         if q.message and (q.message.photo or q.message.document):
