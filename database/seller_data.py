@@ -8,6 +8,7 @@ from database.mongo import get_database
 SETTINGS="seller_settings"; PLANS="seller_plans"; PLAN_GROUPS="seller_plan_groups"; CHANNELS="seller_channels"; USERS="seller_users"
 PAYMENTS="seller_payments"; SUBS="seller_subscriptions"; REFERRALS="seller_referrals"
 BUSINESS_ACCOUNTS="seller_business_accounts"; BUSINESS_CONTACTS="seller_business_contacts"
+PLAN_GROUP_COUNTERS="seller_plan_group_counters"
 
 
 def c(name): return get_database()[name]
@@ -17,6 +18,7 @@ async def initialize_seller_data_indexes():
     await c(SETTINGS).create_index("owner_id", unique=True)
     await c(PLANS).create_index([("owner_id",1),("plan_id",1)], unique=True)
     await c(PLAN_GROUPS).create_index([("owner_id",1),("group_id",1)], unique=True)
+    await c(PLAN_GROUPS).create_index([("owner_id",1),("plan_list_id",1)], unique=True, sparse=True)
     await c(PLANS).create_index([("owner_id",1),("group_id",1),("active",1)])
     await c(CHANNELS).create_index([("owner_id",1),("chat_id",1)], unique=True)
     await c(USERS).create_index([("owner_id",1),("user_id",1)], unique=True)
@@ -482,6 +484,57 @@ async def increment_business_account_stat(owner_id:int, account_user_id:int, fie
     return result.matched_count>0
 
 
+async def _next_plan_list_id(owner_id):
+    """Return the next four-digit plan-list ID for this bot only."""
+    owner_id = int(owner_id)
+    doc = await c(PLAN_GROUP_COUNTERS).find_one_and_update(
+        {"_id": owner_id},
+        {"$setOnInsert": {"owner_id": owner_id, "last_id": 1000}, "$inc": {"last_id": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    value = int(doc.get("last_id", 0) or 0)
+    if value < 1001 or value > 9999:
+        raise ValueError("Plan ID limit reached. Only four-digit Plan IDs (1001-9999) are supported for this bot.")
+    return value
+
+
+async def _ensure_plan_group_ids(owner_id, groups=None):
+    """Backfill four-digit plan-list IDs for old bundles without changing their group IDs."""
+    owner_id = int(owner_id)
+    if groups is None:
+        groups = await c(PLAN_GROUPS).find({"owner_id": owner_id, "active": True}).sort("created_at", 1).to_list(length=100)
+    missing = [g for g in groups if not str(g.get("plan_list_id") or "").isdigit()]
+    if not missing:
+        return groups
+
+    # Bring the counter forward to the highest already-assigned ID, if any.
+    assigned = [int(g["plan_list_id"]) for g in groups if str(g.get("plan_list_id") or "").isdigit() and 1001 <= int(g["plan_list_id"]) <= 9999]
+    if assigned:
+        counter = await c(PLAN_GROUP_COUNTERS).find_one({"_id": owner_id})
+        if counter is None:
+            await c(PLAN_GROUP_COUNTERS).update_one(
+                {"_id": owner_id},
+                {"$setOnInsert": {"owner_id": owner_id, "last_id": max(assigned)}},
+                upsert=True,
+            )
+        else:
+            await c(PLAN_GROUP_COUNTERS).update_one(
+                {"_id": owner_id},
+                {"$max": {"last_id": max(assigned)}},
+            )
+
+    for group in missing:
+        plan_list_id = await _next_plan_list_id(owner_id)
+        result = await c(PLAN_GROUPS).update_one(
+            {"owner_id": owner_id, "group_id": str(group["group_id"]), "active": True, "plan_list_id": {"$exists": False}},
+            {"$set": {"plan_list_id": plan_list_id, "updated_at": datetime.now(timezone.utc)}},
+        )
+        if result.modified_count:
+            group["plan_list_id"] = plan_list_id
+    return groups
+
+
 async def create_plan_group(owner_id, chat_ids):
     """Create one plan-target bundle containing one or more connected chats."""
     owner_id = int(owner_id)
@@ -508,6 +561,7 @@ async def create_plan_group(owner_id, chat_ids):
 
     now = datetime.now(timezone.utc)
     group_id = uuid4().hex[:12]
+    plan_list_id = await _next_plan_list_id(owner_id)
     targets = [
         {
             "chat_id": int(cid),
@@ -519,6 +573,7 @@ async def create_plan_group(owner_id, chat_ids):
     doc = {
         "owner_id": owner_id,
         "group_id": group_id,
+        "plan_list_id": plan_list_id,
         "chat_ids": clean_ids,
         "targets": targets,
         "active": True,
@@ -586,7 +641,8 @@ async def update_plan_group(owner_id, group_id, chat_ids):
 
 
 async def get_plan_groups(owner_id):
-    return await c(PLAN_GROUPS).find({"owner_id": int(owner_id), "active": True}).sort("created_at", 1).to_list(length=100)
+    groups = await c(PLAN_GROUPS).find({"owner_id": int(owner_id), "active": True}).sort("created_at", 1).to_list(length=100)
+    return await _ensure_plan_group_ids(owner_id, groups)
 
 async def delete_plan_group(owner_id, group_id):
     owner_id = int(owner_id)
