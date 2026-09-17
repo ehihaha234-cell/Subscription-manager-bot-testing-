@@ -17,7 +17,6 @@ from utils.branding import append_branding
 # The stored schema and feature callback names remain backward compatible.
 # ---------------------------------------------------------------------------
 WELCOME_FEATURE_CALLBACKS: dict[str, str] = {
-    "plans": "c_plans",
     "buy": "c_buy",
     "profile": "c_profile",
     "renew": "c_renew",
@@ -50,7 +49,7 @@ def welcome_url_buttons_header() -> str:
         "• Add a feature button:\n"
         "Button title - feature: feature_name\n\n"
         "Available feature names:\n"
-        "plans, buy, profile, renew, referral, referral_unlock, support, home\n\n"
+        "buy, profile, renew, referral, referral_unlock, support, home\n\n"
         "• Show a separate plan list using its PLAN ID:\n"
         "Button title - feature: plans_(PLAN_ID)\n"
         "Example: Premium Channel - feature: plans_1001\n\n"
