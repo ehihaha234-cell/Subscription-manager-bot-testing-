@@ -25,43 +25,33 @@ class CloneAdminCallbacksMixin:
         if action == "a_noop":
             return
 
-        # Plan creation has its own explicit dispatch path. Keep it before the
-        # generic admin routing so the Create New Plan button cannot be swallowed
-        # by another callback route or role-prefix guard.
-        if action == "a_plan_add":
+        # Route every Plan Management callback directly.  In particular, the
+        # Create New Plan selection screen uses a_plan_group_save for its Back
+        # button; handling it here prevents the generic admin router from
+        # swallowing the callback.  The handler itself performs the database
+        # operation first, then we close the Telegram callback spinner once.
+        if action == "a_plans" or action.startswith("a_plan_"):
             try:
-                await q.answer()
-                await plans.handle(self, update, context, q, owner, staff_record, action, role)
-            except Exception as exc:
-                logger.exception("Create New Plan callback failed owner=%s", owner)
-                detail = f"{type(exc).__name__}: {str(exc)[:180]}"
-                try:
-                    await q.message.reply_text(f"⚠️ Create New Plan error\n\n{detail}")
-                except Exception:
-                    try:
-                        await q.answer(f"Create New Plan error: {detail}", show_alert=True)
-                    except Exception:
-                        pass
-            return
-
-        # The Create New Plan selection screen uses its Back button as the
-        # save/confirm action. Dispatch it explicitly so it cannot be blocked
-        # by the generic role/prefix router. This keeps the existing button
-        # layout unchanged and fixes the unresponsive Back button.
-        if action == "a_plan_group_save" or action.startswith("a_plan_group_save_edit_"):
-            try:
-                await q.answer()
                 handled = await plans.handle(self, update, context, q, owner, staff_record, action, role)
                 if not handled:
                     await q.answer("Button action not found", show_alert=True)
+                else:
+                    try:
+                        await q.answer()
+                    except Exception:
+                        pass
             except Exception as exc:
-                logger.exception("Plan target Back/save callback failed owner=%s", owner)
+                logger.exception("Plan Management callback failed owner=%s action=%s", owner, action)
                 detail = f"{type(exc).__name__}: {str(exc)[:180]}"
                 try:
                     await q.answer(f"Plan Management error: {detail}", show_alert=True)
                 except Exception:
-                    pass
+                    try:
+                        await q.message.reply_text(f"⚠️ Plan Management error\n\n{detail}")
+                    except Exception:
+                        pass
             return
+        await q.answer()
         await q.answer()
         if role == "moderator":
             allowed_prefixes = (
