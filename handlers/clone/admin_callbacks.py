@@ -15,6 +15,16 @@ class CloneAdminCallbacksMixin:
             await q.edit_message_text("❌ Not authorized")
             return
         action = q.data
+        # Plan creation has its own explicit dispatch path. Keep it before the
+        # generic admin routing so the Create New Plan button cannot be
+        # swallowed by another callback route or role-prefix guard.
+        if action == "a_plan_add":
+            try:
+                await plans.handle(self, update, context, q, owner, staff_record, action, role)
+            except Exception:
+                logger.exception("Create New Plan callback failed owner=%s", owner)
+                await q.answer("Unable to open Create New Plan. Please try again.", show_alert=True)
+            return
         # Informational/status buttons intentionally perform no navigation.
         # They still need a registered callback path so Telegram's spinner closes.
         if action == "a_noop":
