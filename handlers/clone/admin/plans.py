@@ -37,8 +37,34 @@ async def _main(self, q, owner):
                     groups = await get_plan_groups(owner)
                 except Exception:
                     pass
+    settings = await get_seller_settings(owner)
+    currency = normalize_currency(settings.get('currency')) or 'INR'
+
+    # Show a compact summary in the main Plan Management header. Each target
+    # bundle owns its own plan list, so the header is calculated from the same
+    # bundle -> plans relationship used by View Plans. This keeps the summary
+    # accurate when plans are added, deleted, enabled/disabled, or when a
+    # multi-chat bundle is used.
     lines = ["📦 Plan Management", ""]
     if groups:
+        lines.append("📊 Current Plan Summary")
+        lines.append("")
+        for index, group in enumerate(groups, 1):
+            label = _group_label(group) or "Unnamed group/channel"
+            plans = await get_plans(owner, group_id=str(group["group_id"]))
+            lines.append(f"{index}. {label}:")
+            lines.append(f"   Plans : {len(plans)}")
+            if plans:
+                for plan in plans:
+                    price = format_currency(currency, plan.get("price", 0))
+                    stars = int(plan.get("stars_price", 0) or 0)
+                    lines.append(
+                        f"      {plan.get('name', 'Unnamed')} / "
+                        f"{plan.get('duration_text', '')} / {price} / ⭐{stars}"
+                    )
+            else:
+                lines.append("      No plans added")
+            lines.append("")
         lines.append("Select a connected group/channel bundle to manage its plans.")
     else:
         lines.append("No plan target created yet.")
