@@ -336,7 +336,14 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             media_file_id = str(welcome.get("media_file_id") or "")
             media_items = list(welcome.get("media") or [])
             if text or media_file_id or media_items:
-                text = await append_branding(text)
+                # Apply Powered By according to the seller's assigned plan.
+                try:
+                    from database.seller_subscriptions import effective_plan
+                    plan, _ = await effective_plan(owner_id)
+                    if bool(plan.get("branding_enabled", True)):
+                        text = await append_branding(text)
+                except Exception:
+                    text = await append_branding(text)
                 welcome_message_ids = await _send_configured_message(
                     context,
                     chat_id=message.chat_id,

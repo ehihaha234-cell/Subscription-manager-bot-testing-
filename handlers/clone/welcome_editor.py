@@ -17,6 +17,7 @@ from utils.branding import append_branding
 # The stored schema and feature callback names remain backward compatible.
 # ---------------------------------------------------------------------------
 WELCOME_FEATURE_CALLBACKS: dict[str, str] = {
+    "plans": "c_plans",
     "buy": "c_buy",
     "profile": "c_profile",
     "renew": "c_renew",
@@ -40,7 +41,11 @@ def welcome_url_buttons_header() -> str:
         "Button title - t.me/LinkExample\n\n"
         "⭐ Special Buttons\n\n"
         "• Add a button that shows a popup:\n"
-        "Button title - popup: Popup text\n\n"
+        "Button title - popup: Popup text\n"
+        "or\n"
+        "Button title - alert: Popup text\n\n"
+        "• Add a button with a link to the group rules:\n"
+        "Button title - rules\n\n"
         "• Add a share button:\n"
         "Button title - share: Text to be shared\n\n"
         "• Add a button with copyable text:\n"
@@ -49,15 +54,12 @@ def welcome_url_buttons_header() -> str:
         "• Add a feature button:\n"
         "Button title - feature: feature_name\n\n"
         "Available feature names:\n"
-        "buy, profile, renew, referral, referral_unlock, support, home\n\n"
+        "plans, buy, profile, renew, referral, referral_unlock, support, home\n\n"
         "• Show a separate plan list using its PLAN ID:\n"
         "Button title - feature: plans_(PLAN_ID)\n"
         "Example: Premium Channel - feature: plans_1001\n\n"
-        "Where to find PLAN ID:\n"
-        "Go to 📦 Plan Management.\n"
-        "Each separate plan group will have its own 4-digit PLAN ID.\n"
-        "Example: PLAN ID 👉 1001\n"
-        "Use that ID as feature: plans_1001."
+        "Each connected group/channel bundle has its own 4-digit PLAN ID in Plan Management.\n"
+        "The PLAN ID works only inside this bot."
     )
 
 
@@ -255,8 +257,17 @@ class CloneWelcomeEditorMixin:
         else:
             welcome_text="👋 WELCOME TO OUR SUBSCRIPTION BOT"
 
-        # Platform branding is controlled only from the Owner Dashboard.
-        text=await append_branding(welcome_text)
+        # Branding is controlled by the seller's assigned seller plan.
+        # Existing welcome editing/preview behavior remains unchanged.
+        owner_id = self.owner(context)
+        try:
+            from database.seller_subscriptions import effective_plan
+            plan, _ = await effective_plan(owner_id)
+            if bool(plan.get("branding_enabled", True)):
+                text = await append_branding(welcome_text)
+        except Exception:
+            # Never let branding configuration break the welcome message.
+            text = await append_branding(welcome_text)
 
         # Seller ke welcome buttons fully removable hain. Empty list ka matlab
         # welcome message ke niche koi button nahi dikhana.
