@@ -90,7 +90,31 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a.startswith('a_user_remove_'):
         user_id = int(a.replace('a_user_remove_', ''))
+
+        # Clone-wide subscription and Plan Group subscriptions are separate.
+        # Removing a user must deactivate both records and remove the user from
+        # every target chat belonging to their Plan Group subscriptions.
         await remove_subscription(owner, user_id)
+        plan_group_result = await remove_plan_group_subscriptions(owner, user_id)
+
+        for chat_id in plan_group_result.get('target_chat_ids', []):
+            try:
+                member = await context.bot.get_chat_member(chat_id, user_id)
+                if getattr(member, 'status', '') in {'creator', 'administrator'}:
+                    continue
+                await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+            except TelegramError as exc:
+                logger.warning(
+                    'Admin subscription removal failed owner=%s user=%s chat=%s: %s',
+                    owner, user_id, chat_id, exc,
+                )
+            except Exception:
+                logger.exception(
+                    'Unexpected admin subscription removal failure owner=%s user=%s chat=%s',
+                    owner, user_id, chat_id,
+                )
+
         try:
             await context.bot.send_message(user_id, '❌ Your subscription was removed by admin.')
         except Exception:
