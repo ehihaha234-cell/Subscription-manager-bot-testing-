@@ -40,7 +40,7 @@ from database.payment_gateways import (
     list_available_razorpay_qr_pool_entries,
     claim_active_razorpay_qr_transaction_for_cancel,
 )
-from database.seller_data import fulfill_subscription_payment, get_plan, get_plans, create_automatic_payment, get_subscription
+from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
 from database.seller_bots import get_decrypted_bot_token, get_bots
 from database.platform_features import create_invoice, audit
@@ -1028,8 +1028,13 @@ async def fulfill_transaction(tx: dict) -> None:
 
         # Capture the state before activation so every payment method can show
         # whether this purchase created a new subscription or extended an active one.
-        existing_sub = await get_subscription(seller_id, tx["payer_user_id"])
+        group_id = str(plan.get("group_id") or "").strip()
+        target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
         now = datetime.now(timezone.utc)
+        if group_id:
+            existing_sub = await get_plan_group_subscription(seller_id, tx["payer_user_id"], group_id)
+        else:
+            existing_sub = await get_subscription(seller_id, tx["payer_user_id"])
         previous_expiry = (existing_sub or {}).get("expiry_date")
         if previous_expiry and previous_expiry.tzinfo is None:
             previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
@@ -1041,18 +1046,24 @@ async def fulfill_transaction(tx: dict) -> None:
         )
 
         # Apply validity with the gateway transaction as the idempotency key.
-        # This closes the crash window between saving the payment record and
-        # activating the subscription: retries can safely call this every time
-        # without adding the purchased duration twice.
-        subscription_result = await fulfill_subscription_payment(
-            seller_id,
-            tx["payer_user_id"],
-            f"gateway:{tx['transaction_id']}",
-            plan["name"],
-            plan["duration_minutes"],
-            tx["amount"],
-            plan.get("duration_text"),
-        )
+        # Plan Group purchases are fulfilled in their own subscription collection,
+        # so they cannot extend the clone-wide subscription or another group.
+        if group_id:
+            subscription_result = await fulfill_plan_group_subscription(
+                seller_id, tx["payer_user_id"], f"gateway:{tx['transaction_id']}",
+                group_id, plan["name"], plan["duration_minutes"], tx["amount"],
+                plan.get("duration_text"), target_chat_ids=target_chat_ids,
+            )
+        else:
+            subscription_result = await fulfill_subscription_payment(
+                seller_id,
+                tx["payer_user_id"],
+                f"gateway:{tx['transaction_id']}",
+                plan["name"],
+                plan["duration_minutes"],
+                tx["amount"],
+                plan.get("duration_text"),
+            )
         expiry = subscription_result.get("expiry_date")
 
         invoice = await create_invoice(seller_id, tx["payer_user_id"], payment, "Seller")
@@ -1080,6 +1091,8 @@ async def fulfill_transaction(tx: dict) -> None:
                         "duration": plan.get("duration_text") or f"{plan.get('duration_minutes', 0)} minutes",
                         "was_already_active": was_already_active,
                         "previous_expiry": previous_expiry,
+                        "group_id": group_id,
+                        "target_chat_ids": target_chat_ids,
                     },
                 )
                 if delivery.get("error") or (

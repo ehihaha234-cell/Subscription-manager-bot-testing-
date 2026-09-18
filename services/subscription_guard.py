@@ -7,7 +7,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from database.mongo import get_database
-from database.seller_data import get_channels, get_subscription
+from database.seller_data import active_plan_group_subscriptions_for_chat, get_channels, get_subscription
 from database.subscription_guard import (
     add_whitelist, get_guard_settings, is_whitelisted, log_guard_event,
     get_guard_chat_status,
@@ -28,12 +28,22 @@ async def _connected_chat(owner_id: int, chat_id: int) -> bool:
     return any(int(item.get("chat_id")) == int(chat_id) for item in channels) and await get_guard_chat_status(int(owner_id), int(chat_id))
 
 
-async def _active(owner_id: int, user_id: int) -> bool:
+async def _active(owner_id: int, user_id: int, chat_id: int | None = None) -> bool:
+    now = datetime.now(timezone.utc)
     sub = await get_subscription(int(owner_id), int(user_id))
-    if not sub or not sub.get("active"):
-        return False
-    expiry = _aware(sub.get("expiry_date"))
-    return bool(expiry and expiry > datetime.now(timezone.utc))
+    if sub and sub.get("active"):
+        expiry = _aware(sub.get("expiry_date"))
+        if expiry and expiry > now:
+            return True
+    if chat_id is not None:
+        # Plan Group subscriptions are independent from the clone-wide
+        # subscription. A user is allowed into this chat when any active Plan
+        # Group containing this chat is valid.
+        group_sub = await active_plan_group_subscriptions_for_chat(
+            int(owner_id), int(user_id), int(chat_id)
+        )
+        return bool(group_sub)
+    return False
 
 
 async def _is_admin(bot, chat_id: int, user_id: int) -> bool:
@@ -108,7 +118,7 @@ async def subscription_guard_chat_member(update: Update, context: ContextTypes.D
             pass
         await mark_invite_used(owner_id, invite.invite_link)
 
-    if await _active(owner_id, user.id):
+    if await _active(owner_id, user.id, event.chat.id):
         await log_guard_event(owner_id, event.chat.id, user.id, "allowed", "Active subscription")
         return
     if not settings.get("unauthorized_join_protection", True):
@@ -182,7 +192,7 @@ async def subscription_guard_new_members(update: Update, context: ContextTypes.D
             _set_welcome_guard_marker(context, chat.id, user.id, True)
             continue
 
-        if await _active(owner_id, user.id):
+        if await _active(owner_id, user.id, chat.id):
             await log_guard_event(owner_id, chat.id, user.id, "allowed", "Active subscription")
             _set_welcome_guard_marker(context, chat.id, user.id, True)
             continue
@@ -273,13 +283,29 @@ async def force_sync_known_users(bot, owner_id: int) -> dict:
         report["users_checked"] += 1
         sub = await get_subscription(owner_id, user_id)
         expiry = _aware((sub or {}).get("expiry_date"))
+        generic_active = bool(sub and sub.get("active") and expiry and expiry > now)
         banned = bool(user.get("banned"))
-        inactive = not (sub and sub.get("active") and expiry and expiry > now)
-        if not banned and not inactive:
+        if banned:
+            report["banned"] += 1
+            result = await enforce_user_access(bot, owner_id, user_id, "Banned user")
+            for key in ("removed", "remove_failed", "invites_revoked"):
+                report[key] += result[key]
             continue
-        reason = "Banned user" if banned else "Expired or inactive subscription"
-        report["banned" if banned else "expired_or_inactive"] += 1
-        result = await enforce_user_access(bot, owner_id, user_id, reason)
-        for key in ("removed", "remove_failed", "invites_revoked"):
-            report[key] += result[key]
+        if generic_active:
+            continue
+        # Remove only chats for which this user has no active Plan Group access.
+        for channel in await get_channels(owner_id):
+            chat_id = int(channel["chat_id"])
+            if not await get_guard_chat_status(owner_id, chat_id):
+                continue
+            if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                continue
+            report["expired_or_inactive"] += 1
+            try:
+                if await _is_admin(bot, chat_id, user_id) or await is_whitelisted(owner_id, chat_id, user_id):
+                    continue
+                await _remove_member(bot, chat_id, user_id)
+                report["removed"] += 1
+            except TelegramError:
+                report["remove_failed"] += 1
     return report
