@@ -145,6 +145,8 @@ async def send_seller_upgrade_plan(message, owner_id: int) -> None:
         lines.append(f"  👨‍💼 Admins: {_display_plan_limit(plan.get('admin_limit'))} / bot")
         if not bool(plan.get("branding_enabled", True)):
             lines.append("  REMOVED BRAND TAG")
+        # Keep a clearly visible blank gap between every seller plan.
+        lines.append("")
         lines.append("")
         request_type = (
             "upgrade"
