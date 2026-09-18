@@ -24,7 +24,7 @@ from config import TELEGRAM_API_HASH, TELEGRAM_API_ID
 from database.seller_bots import get_bot_by_data_owner_id
 from database.business_delivery import record_business_contact
 from handlers.common.clone_context import MAIN_BOT_USERNAME
-from utils.branding import append_branding
+from utils.branding import append_seller_branding
 from database.business_automation import (
     get_business_auto_reply,
     list_business_auto_replies,
@@ -622,7 +622,7 @@ class BusinessAutomationRuntime:
 
             welcome_sent = False
             if welcome.get("enabled", True) and first_contact:
-                text = await append_branding(str(welcome.get("text") or "").strip())
+                text = await append_seller_branding(str(welcome.get("text") or "").strip(), owner_id)
                 media_file_id = str(welcome.get("media_file_id") or "")
                 media_items = list(welcome.get("media") or [])
                 if text or media_file_id or media_items:
