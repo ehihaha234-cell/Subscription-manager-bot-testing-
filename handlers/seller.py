@@ -145,6 +145,7 @@ async def send_seller_upgrade_plan(message, owner_id: int) -> None:
         lines.append(f"  👨‍💼 Admins: {_display_plan_limit(plan.get('admin_limit'))} / bot")
         if not bool(plan.get("branding_enabled", True)):
             lines.append("  REMOVED BRAND TAG")
+        lines.append("")
         request_type = (
             "upgrade"
             if float(plan.get("price", 0)) >= float(current.get("price", 0))
@@ -1660,6 +1661,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  👨‍💼 Admins: {_display_plan_limit(p.get('admin_limit'))} / bot")
             if not bool(p.get("branding_enabled", True)):
                 lines.append("  REMOVED BRAND TAG")
+                lines.append("")
             typ = "upgrade" if float(price) >= float(current.get("price", 0)) else "downgrade"
             rows.append([InlineKeyboardButton(f"Select {p.get('name')}", callback_data=f"seller_buy_{typ}_{p.get('plan_id')}")])
         if action == "seller_upgrade_plan_profile":
