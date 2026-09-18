@@ -928,6 +928,52 @@ async def remove_subscription(owner_id:int, user_id:int):
     return result.matched_count>0
 
 
+async def remove_plan_group_subscriptions(owner_id:int, user_id:int):
+    """Remove all Plan Group subscriptions for one user and return their targets.
+
+    Plan Group access is stored separately from the clone-wide subscription.
+    Manual removal must therefore deactivate these records separately and give
+    the caller the exact target chats from which Telegram access must be removed.
+    """
+    owner_id = int(owner_id)
+    user_id = int(user_id)
+    now = datetime.now(timezone.utc)
+
+    rows = await c(PLAN_GROUP_SUBS).find({
+        "owner_id": owner_id,
+        "user_id": user_id,
+        "active": True,
+    }, {
+        "group_id": 1,
+        "target_chat_ids": 1,
+    }).to_list(length=5000)
+
+    if not rows:
+        return {"removed": False, "target_chat_ids": []}
+
+    await c(PLAN_GROUP_SUBS).update_many(
+        {"owner_id": owner_id, "user_id": user_id, "active": True},
+        {"$set": {
+            "active": False,
+            "removed_by_admin": True,
+            "removed_at": now,
+            "updated_at": now,
+        }},
+    )
+
+    target_ids = []
+    for row in rows:
+        for value in row.get("target_chat_ids") or []:
+            try:
+                target_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    return {
+        "removed": True,
+        "target_chat_ids": list(dict.fromkeys(target_ids)),
+    }
+
+
 async def create_payment(owner_id,user_id,plan,screenshot_file_id):
     now=datetime.now(timezone.utc)
     doc={"owner_id":owner_id,"payment_id":uuid4().hex[:16],"user_id":user_id,"plan_id":plan["plan_id"],"plan":plan["name"],"amount":plan["price"],"duration_text":plan["duration_text"],"duration_minutes":plan["duration_minutes"],"group_id":str(plan.get("group_id") or ""),"target_chat_ids":[int(x) for x in (plan.get("target_chat_ids") or [])],"screenshot_file_id":screenshot_file_id,"status":"pending","created_at":now,"updated_at":now,"notification_messages":[]}
