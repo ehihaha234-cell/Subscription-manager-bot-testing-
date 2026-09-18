@@ -233,13 +233,38 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 await q.answer('Seller plan limit reached', show_alert=True)
                 await context.bot.send_message(seller_account_id, await plan_limit_warning(seller_account_id), reply_markup=self.limit_keyboard('a_pending'))
                 return True
-            previous_sub = await get_subscription(owner, p['user_id'])
+            group_id = str(p.get('group_id') or '').strip()
+            target_ids = set()
+            try:
+                target_ids = {int(x) for x in (p.get('target_chat_ids') or [])}
+            except (TypeError, ValueError):
+                target_ids = set()
+            if group_id and not target_ids:
+                target_group = await get_plan_group(owner, group_id)
+                target_ids = {int(x) for x in ((target_group or {}).get('chat_ids') or [])}
+
             now = datetime.now(timezone.utc)
-            previous_expiry = (previous_sub or {}).get('expiry_date')
-            if previous_expiry and previous_expiry.tzinfo is None:
-                previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
-            was_already_active = bool(previous_sub and previous_sub.get('active') and previous_expiry and (previous_expiry > now))
-            manual_fulfillment = await fulfill_subscription_payment(owner, p['user_id'], f'manual:{owner}:{pid}', p['plan'], p['duration_minutes'], amount=p.get('amount'), duration_text=p.get('duration_text'))
+            if group_id:
+                previous_sub = await get_plan_group_subscription(owner, p['user_id'], group_id)
+                previous_expiry = (previous_sub or {}).get('expiry_date')
+                if previous_expiry and previous_expiry.tzinfo is None:
+                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+                was_already_active = bool(previous_sub and previous_sub.get('active') and previous_expiry and previous_expiry > now)
+                manual_fulfillment = await fulfill_plan_group_subscription(
+                    owner, p['user_id'], f'manual:{owner}:{pid}', group_id,
+                    p['plan'], p['duration_minutes'], amount=p.get('amount'),
+                    duration_text=p.get('duration_text'), target_chat_ids=target_ids,
+                )
+            else:
+                previous_sub = await get_subscription(owner, p['user_id'])
+                previous_expiry = (previous_sub or {}).get('expiry_date')
+                if previous_expiry and previous_expiry.tzinfo is None:
+                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+                was_already_active = bool(previous_sub and previous_sub.get('active') and previous_expiry and previous_expiry > now)
+                manual_fulfillment = await fulfill_subscription_payment(
+                    owner, p['user_id'], f'manual:{owner}:{pid}', p['plan'], p['duration_minutes'],
+                    amount=p.get('amount'), duration_text=p.get('duration_text')
+                )
             expiry = manual_fulfillment.get('expiry_date')
             referral = await mark_referral_rewarded(owner, p['user_id'], payment_id=pid)
             if referral:
@@ -261,11 +286,6 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     await release_referral_reward(owner, p['user_id'], str(exc), payment_id=pid)
                     logger.exception('Referral reward processing failed owner=%s referred=%s payment=%s', owner, p['user_id'], pid)
             links = []
-            target_ids = set()
-            try:
-                target_ids = {int(x) for x in (p.get("target_chat_ids") or [])}
-            except (TypeError, ValueError):
-                target_ids = set()
             channels_for_payment = await get_channels(owner)
             if target_ids:
                 channels_for_payment = [ch for ch in channels_for_payment if int(ch.get("chat_id", 0)) in target_ids]
@@ -286,7 +306,18 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 status_text = f'ℹ️ Your subscription was already active.\nYour new payment has been added to your existing subscription.\n\n📅 Previous Expiry: {self.format_dt(previous_expiry)}\n📅 New Expiry: {expiry_text}\n\n🔗 A fresh private invite link has been generated for you.'
             else:
                 status_text = f'📅 Expiry Date: {expiry_text}\n\n🔗 Your fresh private invite link has been generated.'
-            await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
+            target_lines = ''
+            if group_id:
+                target_names = [
+                    str(ch.get('title') or ch.get('chat_id') or 'Group/Channel')
+                    for ch in channels_for_payment
+                    if int(ch.get('chat_id', 0)) in target_ids
+                ]
+                target_lines = (
+                    '🎯 Target Group/Channel:\n' + '\n'.join(f'• {name}' for name in target_names) + '\n\n'
+                    if target_names else f'🎯 Target Group/Channel: {group_id}\n\n'
+                )
+            await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{target_lines}{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
             approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
             await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), approved_caption, current_message=q.message
