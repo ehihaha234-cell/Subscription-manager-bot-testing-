@@ -122,13 +122,27 @@ async def send_seller_upgrade_plan(message, owner_id: int) -> None:
     cfg = await get_config()
     plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
     rows = []
-    lines = ["💎 Buy / Change Seller Plan", ""]
+    lines = [
+        "💎 Buy / Change Seller Plan",
+        "",
+        "📊 Plan Limitations",
+        "• Clone Bots: seller-level limit",
+        "• Active Subscribers, Channels/Groups, Subscription Plans and Admins are per clone bot.",
+        "",
+    ]
     current, _ = await effective_plan(owner_id)
     for plan in plans:
+        plan_name = plan.get('name', 'Plan')
+        price = plan.get('price', 0)
+        duration_days = plan.get('duration_days', 30)
         lines.append(
-            f"• {plan.get('name', 'Plan')} — ₹{plan.get('price', 0):g} / "
-            f"{plan.get('duration_days', 30)} days"
+            f"• {plan_name} — ₹{price:g} / {duration_days} days"
         )
+        lines.append(f"  🤖 Clone Bots: {_display_plan_limit(plan.get('bot_limit'))}")
+        lines.append(f"  👥 Active Subscribers: {_display_plan_limit(plan.get('active_subscriber_limit'))} / bot")
+        lines.append(f"  📢 Channels / Groups: {_display_plan_limit(plan.get('channel_limit'))} / bot")
+        lines.append(f"  📦 Subscription Plans: {_display_plan_limit(plan.get('plan_limit'))} / bot")
+        lines.append(f"  👨‍💼 Admins: {_display_plan_limit(plan.get('admin_limit'))} / bot")
         if not bool(plan.get("branding_enabled", True)):
             lines.append("  REMOVED BRAND TAG")
         request_type = (
@@ -1625,13 +1639,28 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg = await get_config()
         plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
         rows = []
-        lines = ["💎 Buy / Change Seller Plan", ""]
+        lines = [
+            "💎 Buy / Change Seller Plan",
+            "",
+            "📊 Plan Limitations",
+            "• Clone Bots: seller-level limit",
+            "• Active Subscribers, Channels/Groups, Subscription Plans and Admins are per clone bot.",
+            "",
+        ]
         current, _ = await effective_plan(owner_id)
         for p in plans:
-            lines.append(f"• {p.get('name','Plan')} — ₹{p.get('price',0):g} / {p.get('duration_days',30)} days")
+            plan_name = p.get('name', 'Plan')
+            price = p.get('price', 0)
+            duration_days = p.get('duration_days', 30)
+            lines.append(f"• {plan_name} — ₹{price:g} / {duration_days} days")
+            lines.append(f"  🤖 Clone Bots: {_display_plan_limit(p.get('bot_limit'))}")
+            lines.append(f"  👥 Active Subscribers: {_display_plan_limit(p.get('active_subscriber_limit'))} / bot")
+            lines.append(f"  📢 Channels / Groups: {_display_plan_limit(p.get('channel_limit'))} / bot")
+            lines.append(f"  📦 Subscription Plans: {_display_plan_limit(p.get('plan_limit'))} / bot")
+            lines.append(f"  👨‍💼 Admins: {_display_plan_limit(p.get('admin_limit'))} / bot")
             if not bool(p.get("branding_enabled", True)):
                 lines.append("  REMOVED BRAND TAG")
-            typ = "upgrade" if float(p.get("price", 0)) >= float(current.get("price", 0)) else "downgrade"
+            typ = "upgrade" if float(price) >= float(current.get("price", 0)) else "downgrade"
             rows.append([InlineKeyboardButton(f"Select {p.get('name')}", callback_data=f"seller_buy_{typ}_{p.get('plan_id')}")])
         if action == "seller_upgrade_plan_profile":
             back_target = "main_seller_profile"
