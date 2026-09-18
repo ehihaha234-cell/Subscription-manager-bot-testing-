@@ -5,7 +5,7 @@ from handlers.common.editor_engine import build_editor_keyboard
 from handlers.common.feature_navigation import capture_feature_origin, restore_feature_origin, feature_back_callback
 from database.business_automation import get_business_welcome
 from handlers.common.clone_context import MAIN_BOT_USERNAME
-from utils.branding import append_branding
+from utils.branding import append_seller_branding
 from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -67,7 +67,7 @@ async def _send_business_welcome(update, context, owner: int, business_connectio
     item = await get_business_welcome(owner)
     user = update.effective_user
     text = _render_business_variables(str(item.get("text") or "Welcome!"), user)
-    text = await append_branding(text)
+    text = await append_seller_branding(text, owner)
     bot_record = await get_bot_by_data_owner_id(owner) or {}
     markup = build_editor_keyboard(
         _render_business_buttons(item.get("buttons") or [], user),
