@@ -152,8 +152,19 @@ class CloneUserUIMixin:
             f"⏳ Duration: {payment.get('duration_text') or '-'}",
             f"💰 Amount: {format_currency(settings.get('currency'), payment.get('amount',0))}",
             f"📅 Submitted: {created_text}",
-            f"📌 Status: {current_status.title()}",
         ]
+        group_id = str(payment.get("group_id") or "").strip()
+        if group_id:
+            target_ids = set()
+            try:
+                target_ids = {int(x) for x in (payment.get("target_chat_ids") or [])}
+            except (TypeError, ValueError):
+                target_ids = set()
+            targets = await get_channels(owner)
+            if target_ids:
+                targets = [ch for ch in targets if int(ch.get("chat_id", 0)) in target_ids]
+            lines.append("🎯 Target Group/Channel: " + ", ".join(str(ch.get("title") or ch.get("chat_id") or "Group/Channel") for ch in targets) if targets else f"🎯 Target Group/Channel: {group_id}")
+        lines.append(f"📌 Status: {current_status.title()}")
 
         audit_name = payment.get("processed_by_name")
         audit_id = payment.get("admin_id")
