@@ -6,7 +6,7 @@ from uuid import uuid4
 from pymongo import ReturnDocument
 from database.mongo import get_database
 
-SETTINGS="seller_settings"; PLANS="seller_plans"; PLAN_GROUPS="seller_plan_groups"; CHANNELS="seller_channels"; USERS="seller_users"
+SETTINGS="seller_settings"; PLANS="seller_plans"; PLAN_GROUPS="seller_plan_groups"; PLAN_GROUP_SUBS="seller_plan_group_subscriptions"; CHANNELS="seller_channels"; USERS="seller_users"
 PAYMENTS="seller_payments"; SUBS="seller_subscriptions"; REFERRALS="seller_referrals"
 BUSINESS_ACCOUNTS="seller_business_accounts"; BUSINESS_CONTACTS="seller_business_contacts"
 PLAN_GROUP_COUNTERS="seller_plan_group_counters"
@@ -23,6 +23,9 @@ async def initialize_seller_data_indexes():
     await c(PLAN_GROUPS).create_index([("owner_id",1),("group_id",1)], unique=True)
     await c(PLAN_GROUPS).create_index([("owner_id",1),("plan_list_id",1)], unique=True, sparse=True)
     await c(PLANS).create_index([("owner_id",1),("group_id",1),("active",1)])
+    await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("user_id",1),("group_id",1)], unique=True)
+    await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("expiry_date",1),("active",1)])
+    await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("target_chat_ids",1),("active",1)])
     await c(CHANNELS).create_index([("owner_id",1),("chat_id",1)], unique=True)
     await c(USERS).create_index([("owner_id",1),("user_id",1)], unique=True)
     await c(PAYMENTS).create_index([("owner_id",1),("status",1),("created_at",-1)])
@@ -1263,6 +1266,148 @@ async def fulfill_subscription_payment(
         "subscription": result or {},
         "fulfillment_key": key,
     }
+
+
+async def get_plan_group_subscription(owner_id, user_id, group_id):
+    """Return one user's subscription for one Plan Group only."""
+    gid = str(group_id or "").strip()
+    if not gid:
+        return None
+    return await c(PLAN_GROUP_SUBS).find_one({
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "group_id": gid,
+    })
+
+
+async def fulfill_plan_group_subscription(
+    owner_id,
+    user_id,
+    fulfillment_key,
+    group_id,
+    plan_name,
+    duration_minutes,
+    amount=None,
+    duration_text=None,
+    target_chat_ids=None,
+):
+    """Idempotently activate/extend a subscription for one Plan Group.
+
+    Plan Group subscriptions intentionally live in their own collection so a
+    purchase for one target bundle can never extend the clone-wide subscription
+    or another Plan Group. Repeating the same payment is also idempotent.
+    """
+    now = datetime.now(timezone.utc)
+    gid = str(group_id or "").strip()
+    key = str(fulfillment_key or "").strip()
+    if not gid:
+        raise ValueError("group_id is required for Plan Group subscription")
+    if not key:
+        raise ValueError("fulfillment_key is required")
+    added_minutes = max(0, int(duration_minutes or 0))
+    if added_minutes <= 0:
+        raise ValueError("Subscription duration must be greater than zero")
+    clean_targets = []
+    for value in target_chat_ids or []:
+        try:
+            clean_targets.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    clean_targets = list(dict.fromkeys(clean_targets))
+    payment_amount = float(amount or 0)
+
+    already_applied = {
+        "$in": [key, {"$ifNull": ["$fulfillment_keys", []]}]
+    }
+    active_before = {
+        "$and": [
+            {"$eq": [{"$ifNull": ["$active", False]}, True]},
+            {"$gt": [{"$ifNull": ["$expiry_date", now]}, now]},
+        ]
+    }
+    base_expiry = {"$cond": [active_before, "$expiry_date", now]}
+    new_expiry = {"$add": [base_expiry, added_minutes * 60 * 1000]}
+
+    set_fields = {
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "group_id": gid,
+        "plan": {"$cond": [already_applied, {"$ifNull": ["$plan", plan_name]}, plan_name]},
+        "active": {"$cond": [already_applied, {"$ifNull": ["$active", True]}, True]},
+        "expiry_date": {"$cond": [already_applied, "$expiry_date", new_expiry]},
+        "target_chat_ids": {"$cond": [already_applied, {"$ifNull": ["$target_chat_ids", clean_targets]}, clean_targets]},
+        "last_renewed_at": {"$cond": [already_applied, "$last_renewed_at", now]},
+        "last_added_minutes": {"$cond": [already_applied, "$last_added_minutes", added_minutes]},
+        "total_duration_minutes": {
+            "$cond": [already_applied, {"$ifNull": ["$total_duration_minutes", 0]}, {"$add": [{"$ifNull": ["$total_duration_minutes", 0]}, added_minutes]}]
+        },
+        "total_paid": {
+            "$cond": [already_applied, {"$ifNull": ["$total_paid", 0]}, {"$add": [{"$ifNull": ["$total_paid", 0]}, payment_amount]}]
+        },
+        "amount": {"$cond": [already_applied, "$amount", payment_amount]},
+        "last_payment_amount": {"$cond": [already_applied, "$last_payment_amount", payment_amount]},
+        "duration_text": {"$cond": [already_applied, "$duration_text", duration_text or ""]},
+        "last_duration_text": {"$cond": [already_applied, "$last_duration_text", duration_text or ""]},
+        "removed_by_admin": {"$cond": [already_applied, {"$ifNull": ["$removed_by_admin", False]}, False]},
+        "start_date": {
+            "$cond": [already_applied, {"$ifNull": ["$start_date", now]}, {"$cond": [active_before, {"$ifNull": ["$start_date", now]}, now]}]
+        },
+        "created_at": {"$ifNull": ["$created_at", now]},
+        "updated_at": {"$cond": [already_applied, {"$ifNull": ["$updated_at", now]}, now]},
+        "fulfillment_keys": {
+            "$cond": [already_applied, {"$ifNull": ["$fulfillment_keys", []]}, {"$concatArrays": [{"$ifNull": ["$fulfillment_keys", []]}, [key]]}]
+        },
+        "last_fulfillment_key": {"$cond": [already_applied, "$last_fulfillment_key", key]},
+    }
+    result = await c(PLAN_GROUP_SUBS).find_one_and_update(
+        {"owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid},
+        [{"$set": set_fields}],
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return {
+        "expiry_date": (result or {}).get("expiry_date"),
+        "subscription": result or {},
+        "fulfillment_key": key,
+        "group_id": gid,
+        "target_chat_ids": clean_targets,
+    }
+
+
+async def active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+    """True when this user has an active Plan Group containing this chat."""
+    now = datetime.now(timezone.utc)
+    return await c(PLAN_GROUP_SUBS).find_one({
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "active": True,
+        "expiry_date": {"$gt": now},
+        "target_chat_ids": int(chat_id),
+    })
+
+
+async def expired_plan_group_subscriptions(owner_id=None, limit=5000):
+    now = datetime.now(timezone.utc)
+    query = {"active": True, "expiry_date": {"$lte": now}}
+    if owner_id is not None:
+        query["owner_id"] = int(owner_id)
+    return await c(PLAN_GROUP_SUBS).find(query).sort("expiry_date", 1).to_list(length=limit)
+
+
+async def expire_plan_group_subscription(owner_id, user_id, group_id, expected_expiry=None):
+    query = {
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "group_id": str(group_id),
+        "active": True,
+    }
+    if expected_expiry is not None:
+        query["expiry_date"] = expected_expiry
+    result = await c(PLAN_GROUP_SUBS).update_one(
+        query,
+        {"$set": {"active": False, "expired_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}}
+    )
+    return result.modified_count > 0
 
 
 async def active_subscriptions(owner_id, limit=5000):
