@@ -7,7 +7,7 @@ import hashlib
 
 from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
-from utils.branding import append_branding
+from utils.branding import append_seller_branding
 
 
 # ---------------------------------------------------------------------------
@@ -257,17 +257,8 @@ class CloneWelcomeEditorMixin:
         else:
             welcome_text="👋 WELCOME TO OUR SUBSCRIPTION BOT"
 
-        # Branding is controlled by the seller's assigned seller plan.
-        # Existing welcome editing/preview behavior remains unchanged.
-        owner_id = self.owner(context)
-        try:
-            from database.seller_subscriptions import effective_plan
-            plan, _ = await effective_plan(owner_id)
-            if bool(plan.get("branding_enabled", True)):
-                text = await append_branding(welcome_text)
-        except Exception:
-            # Never let branding configuration break the welcome message.
-            text = await append_branding(welcome_text)
+        # Platform branding is controlled by the seller's current plan.
+        text=await append_seller_branding(welcome_text, self.seller_account(context))
 
         # Seller ke welcome buttons fully removable hain. Empty list ka matlab
         # welcome message ke niche koi button nahi dikhana.

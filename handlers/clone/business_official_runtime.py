@@ -33,7 +33,7 @@ from database.business_official import (
     save_official_business_connection,
 )
 from database.seller_bots import get_bot_by_data_owner_id
-from utils.branding import append_branding
+from utils.branding import append_seller_branding
 from database.seller_data import (
     claim_business_welcome,
     get_seller_settings,
@@ -336,14 +336,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             media_file_id = str(welcome.get("media_file_id") or "")
             media_items = list(welcome.get("media") or [])
             if text or media_file_id or media_items:
-                # Apply Powered By according to the seller's assigned plan.
-                try:
-                    from database.seller_subscriptions import effective_plan
-                    plan, _ = await effective_plan(owner_id)
-                    if bool(plan.get("branding_enabled", True)):
-                        text = await append_branding(text)
-                except Exception:
-                    text = await append_branding(text)
+                text = await append_seller_branding(text, owner)
                 welcome_message_ids = await _send_configured_message(
                     context,
                     chat_id=message.chat_id,
