@@ -138,11 +138,28 @@ async def save_paid_plan(plan: dict):
         plans.append(plan)
     else:
         plans[idx] = {**plans[idx], **plan}
-    # Branding is always ON on free and paid plans.
+    # Preserve each paid plan's branding preference. New plans default to ON,
+    # while edits keep the existing ON/OFF setting unless explicitly changed.
     for p in plans:
-        p["branding_enabled"] = True
+        p["branding_enabled"] = bool(p.get("branding_enabled", True))
     await update_config(paid_plans=plans)
     return plan
+
+
+async def set_paid_plan_branding(plan_id: str, enabled: bool):
+    """Enable/disable SaaS Powered By branding for one paid seller plan."""
+    config = await get_config(force_refresh=True)
+    plans = list(config.get("paid_plans", []))
+    found = False
+    for p in plans:
+        if str(p.get("plan_id")) == str(plan_id):
+            p["branding_enabled"] = bool(enabled)
+            found = True
+            break
+    if not found:
+        raise ValueError("Paid plan not found")
+    await update_config(paid_plans=plans)
+    return next(p for p in plans if str(p.get("plan_id")) == str(plan_id))
 
 
 async def delete_paid_plan(plan_id: str):
