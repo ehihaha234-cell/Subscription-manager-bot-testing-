@@ -70,7 +70,7 @@ from database.platform_features import (
     update_scheduled_campaign, delete_scheduled_campaign,
 )
 from database.seller_data import (
-    activate_subscription, fulfill_subscription_payment, active_subscriptions, active_expiry_reminder_subscriptions,
+    activate_subscription, fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, active_plan_group_subscriptions_for_chat, active_subscriptions, active_expiry_reminder_subscriptions,
     claim_expiry_reminder, complete_expiry_reminder, release_expiry_reminder, add_channel, create_payment, create_automatic_payment, create_plan, delete_plan, create_plan_group, update_plan_group, get_plan_group, get_plan_groups, delete_plan_group,
     ensure_seller_defaults, expired_subscriptions, get_channels, get_payment,
     set_channel_auto_invite,
