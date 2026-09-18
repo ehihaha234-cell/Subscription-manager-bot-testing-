@@ -13,6 +13,13 @@ from services.channel_service import (
     revoke_channel_access,
     send_expiry_notification,
 )
+from database.seller_data import (
+    active_plan_group_subscriptions_for_chat,
+    expire_plan_group_subscription,
+    expired_plan_group_subscriptions,
+    get_subscription as get_seller_subscription,
+)
+from database.subscription_guard import is_whitelisted
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -20,6 +27,10 @@ logger = get_logger(__name__)
 
 async def check_expired_users():
     now = datetime.now(timezone.utc)
+    try:
+        await check_expired_plan_group_subscriptions()
+    except Exception:
+        logger.exception("Plan Group subscription expiry worker failed")
     subscriptions = await get_expired_subscriptions(now)
 
     for snapshot in subscriptions:
@@ -120,3 +131,63 @@ async def check_expired_users():
                     "Failed releasing expiry claim user_id=%s",
                     user_id,
                 )
+
+
+async def check_expired_plan_group_subscriptions():
+    """Expire Plan Group subscriptions without touching clone-wide access."""
+    now = datetime.now(timezone.utc)
+    rows = await expired_plan_group_subscriptions(limit=5000)
+    from services.bot_manager import bot_manager
+
+    for row in rows:
+        owner_id = int(row.get("owner_id") or 0)
+        user_id = int(row.get("user_id") or 0)
+        group_id = str(row.get("group_id") or "").strip()
+        if not owner_id or not user_id or not group_id:
+            continue
+
+        running = bot_manager.get_running(owner_id)
+        if not running:
+            # Leave the record active-but-expired so a later worker can retry
+            # removal when the clone bot is available again.
+            continue
+        bot = running.application.bot
+        target_ids = []
+        for value in row.get("target_chat_ids") or []:
+            try:
+                target_ids.append(int(value))
+            except (TypeError, ValueError):
+                pass
+        target_ids = list(dict.fromkeys(target_ids))
+
+        failed = False
+        for chat_id in target_ids:
+            # Another active Plan Group or the normal clone subscription keeps
+            # this particular chat accessible; never remove that user's access.
+            generic = await get_seller_subscription(owner_id, user_id)
+            generic_expiry = (generic or {}).get("expiry_date")
+            if generic_expiry and generic_expiry.tzinfo is None:
+                generic_expiry = generic_expiry.replace(tzinfo=timezone.utc)
+            generic_active = bool(generic and generic.get("active") and generic_expiry and generic_expiry > now)
+            if generic_active or await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                continue
+            try:
+                member = await bot.get_chat_member(chat_id, user_id)
+                if getattr(member, "status", "") in {"creator", "administrator"} or await is_whitelisted(owner_id, chat_id, user_id):
+                    continue
+                await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+            except Exception as exc:
+                failed = True
+                logger.warning(
+                    "Plan Group expiry removal failed owner=%s user=%s group=%s chat=%s: %s",
+                    owner_id, user_id, group_id, chat_id, exc,
+                )
+
+        if failed:
+            continue
+        await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
+        logger.info(
+            "Plan Group subscription expired owner=%s user=%s group=%s expiry=%s",
+            owner_id, user_id, group_id, row.get("expiry_date"),
+        )
