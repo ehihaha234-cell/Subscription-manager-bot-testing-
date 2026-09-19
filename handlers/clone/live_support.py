@@ -538,8 +538,9 @@ class CloneLiveSupportMixin:
                 )
                 return
 
-            if context.user_data.get("wait_user_custom_duration"):
-                user_id=int(context.user_data["wait_user_custom_duration"])
+            if context.user_data.get("wait_user_group_duration"):
+                user_id=int(context.user_data["wait_user_group_duration"])
+                gid=str(context.user_data.get("wait_user_group_duration_gid") or "").strip()
                 value=text.strip().lower()
                 try:
                     if value.endswith("mo"):
@@ -563,33 +564,60 @@ class CloneLiveSupportMixin:
                     )
                     return
 
-                rows = await get_user_plan_group_subscriptions(owner, user_id)
-                if not rows:
+                group = await get_plan_group(owner, gid)
+                if not group:
                     context.user_data.clear()
                     await update.effective_message.reply_text(
-                        "🎁 Give / Extend Subscription\n\nNo Plan Group subscription found.",
+                        "❌ Plan Group not found or is no longer active.",
                         reply_markup=self.back(f"a_user_view_{user_id}"),
                     )
                     return
 
-                context.user_data["user_custom_duration_text"] = value
-                kb=[]
-                for sub in rows:
-                    gid=str(sub.get("group_id") or "")
-                    if not gid:
-                        continue
-                    group=await get_plan_group(owner,gid)
-                    targets=(group or {}).get("targets") or []
-                    label=", ".join(str(x.get("title") or x.get("chat_id")) for x in targets) or ", ".join(str(x) for x in (sub.get("target_chat_ids") or [])) or gid
-                    status="Active" if sub.get("active") else "Expired"
-                    kb.append([InlineKeyboardButton(
-                        f"📦 {sub.get('plan') or 'Plan'} — {label[:32]} ({status})",
-                        callback_data=f"a_user_group_extend_{user_id}_{gid}",
-                    )])
-                kb.append([InlineKeyboardButton("⬅ Back", callback_data=f"a_user_view_{user_id}")])
-                await update.effective_message.reply_text(
-                    "🎁 Give / Extend Subscription\n\nSelect the Plan Group subscription to extend:",
-                    reply_markup=InlineKeyboardMarkup(kb),
+                targets = group.get("targets") or []
+                target_ids = []
+                for item in targets:
+                    try:
+                        target_ids.append(int(item.get("chat_id")))
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+                if not target_ids:
+                    target_ids = [int(x) for x in (group.get("chat_ids") or [])]
+
+                if not target_ids:
+                    context.user_data.clear()
+                    await update.effective_message.reply_text(
+                        "❌ This Plan Group has no connected Group/Channel.",
+                        reply_markup=self.back(f"a_user_view_{user_id}"),
+                    )
+                    return
+
+                result = await fulfill_plan_group_subscription(
+                    owner,
+                    user_id,
+                    f"admin_extend:{owner}:{user_id}:{gid}:{uuid4().hex}",
+                    gid,
+                    "Admin Extension",
+                    duration_minutes,
+                    amount=0,
+                    duration_text=value,
+                    target_chat_ids=target_ids,
+                )
+                context.user_data.clear()
+
+                try:
+                    await context.bot.send_message(
+                        user_id,
+                        "🎉 Plan Group subscription extended by admin.\n"
+                        f"Duration added: {value}\n"
+                        f"New expiry: {self.format_dt(result.get("expiry_date"), await self.seller_timezone(owner))}",
+                    )
+                except Exception:
+                    pass
+
+                await self.show_user_details(
+                    _MessageQueryAdapter(update.effective_message),
+                    owner,
+                    user_id,
                 )
                 return
 
