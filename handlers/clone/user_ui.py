@@ -30,7 +30,7 @@ class CloneUserUIMixin:
 
     async def user_details_text(self,owner,user_id):
         user=await get_user(owner,int(user_id))
-        sub=await get_subscription(owner,int(user_id))
+        rows=await get_user_plan_group_subscriptions(owner,int(user_id))
 
         if not user:
             return None,None,None
@@ -43,45 +43,7 @@ class CloneUserUIMixin:
         ) or "Unknown"
 
         now=datetime.now(timezone.utc)
-        expiry=(sub or {}).get("expiry_date")
-        if expiry and expiry.tzinfo is None:
-            expiry=expiry.replace(tzinfo=timezone.utc)
-        active=bool(sub and sub.get("active") and expiry and expiry>now)
-        if sub and expiry:
-            sub["expiry_date"]=expiry
-
-        # Plan Group subscriptions are separate from the clone-wide record.
-        # Always read them fresh so User Details immediately reflects an admin
-        # extension/removal of the selected Plan Group.
-        plan_group_details = []
-        try:
-            groups = await get_plan_groups(owner)
-            for group in groups:
-                gid = str(group.get("group_id") or "")
-                if not gid:
-                    continue
-                pg_sub = await get_plan_group_subscription(owner, int(user_id), gid)
-                if not pg_sub or not pg_sub.get("active"):
-                    continue
-                pg_expiry = pg_sub.get("expiry_date")
-                if pg_expiry and pg_expiry.tzinfo is None:
-                    pg_expiry = pg_expiry.replace(tzinfo=timezone.utc)
-                if not pg_expiry or pg_expiry <= now:
-                    continue
-                targets = group.get("targets") or []
-                label = ", ".join(
-                    str(item.get("title") or item.get("chat_id"))
-                    for item in targets
-                ) or gid
-                plan_group_details.append((
-                    str(pg_sub.get("plan") or "Plan Group"),
-                    label,
-                    pg_expiry,
-                ))
-        except Exception:
-            logger.exception("Failed to load Plan Group details owner=%s user=%s", owner, user_id)
-
-        lines = [
+        lines=[
             "👤 User Details",
             "",
             f"🆔 ID: {user.get('user_id')}",
@@ -91,22 +53,32 @@ class CloneUserUIMixin:
             f"📋 Reason: {user.get('ban_reason') or '-'}",
             f"📅 Joined: {self.format_dt(user.get('joined_at'), timezone_name)}",
             "",
-            f"💎 Clone Plan: {(sub or {}).get('plan') or 'No Plan'}",
-            f"📅 Clone Expiry: {self.format_dt((sub or {}).get('expiry_date'), timezone_name)}",
-            f"📌 Clone Status: {'Active' if active else 'No Subscription'}",
+            "📦 Plan Group Subscriptions:",
         ]
 
-        if plan_group_details:
-            lines.extend(["", "📦 Plan Group Subscriptions"])
-            for pg_plan, target_label, pg_expiry in plan_group_details:
+        if not rows:
+            lines.append("• No subscription")
+        else:
+            for sub in rows:
+                gid=str(sub.get("group_id") or "")
+                group=await get_plan_group(owner,gid) if gid else None
+                targets=group.get("targets") if group else []
+                target_names=[str(x.get("title") or x.get("chat_id")) for x in (targets or [])]
+                if not target_names:
+                    target_names=[str(x) for x in (sub.get("target_chat_ids") or [])]
+                expiry=sub.get("expiry_date")
+                if expiry and expiry.tzinfo is None:
+                    expiry=expiry.replace(tzinfo=timezone.utc)
+                active=bool(sub.get("active") and expiry and expiry>now)
                 lines.extend([
-                    f"• {pg_plan}",
-                    f"  🔊 {target_label}",
-                    f"  📅 Expiry: {self.format_dt(pg_expiry, timezone_name)}",
+                    "",
+                    f"📦 Plan: {sub.get('plan') or 'Plan'}",
+                    f"🔊 Group/Channel: {', '.join(target_names) or '-'}",
+                    f"📅 Expiry: {self.format_dt(expiry, timezone_name)}",
+                    f"📌 Status: {'Active' if active else 'Expired'}",
                 ])
 
-        text="\n".join(lines)
-        return text,user,sub
+        return "\n".join(lines),user,rows
 
     async def show_user_details(self,q,owner,user_id):
         text,user,sub=await self.user_details_text(owner,user_id)
