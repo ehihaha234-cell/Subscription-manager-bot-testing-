@@ -928,6 +928,47 @@ async def remove_subscription(owner_id:int, user_id:int):
     return result.matched_count>0
 
 
+async def remove_plan_group_subscription(owner_id:int, user_id:int, group_id:str):
+    """Remove one user's subscription for one Plan Group only.
+
+    Returns the deactivated subscription document so the caller can remove the
+    user only from chats belonging to this selected Plan Group. Other Plan
+    Group subscriptions remain active and untouched.
+    """
+    owner_id = int(owner_id)
+    user_id = int(user_id)
+    gid = str(group_id or "").strip()
+    if not gid:
+        return None
+
+    now = datetime.now(timezone.utc)
+    row = await c(PLAN_GROUP_SUBS).find_one({
+        "owner_id": owner_id,
+        "user_id": user_id,
+        "group_id": gid,
+        "active": True,
+    })
+    if not row:
+        return None
+
+    result = await c(PLAN_GROUP_SUBS).find_one_and_update(
+        {
+            "owner_id": owner_id,
+            "user_id": user_id,
+            "group_id": gid,
+            "active": True,
+        },
+        {"$set": {
+            "active": False,
+            "removed_by_admin": True,
+            "removed_at": now,
+            "updated_at": now,
+        }},
+        return_document=ReturnDocument.AFTER,
+    )
+    return result
+
+
 async def remove_plan_group_subscriptions(owner_id:int, user_id:int):
     """Remove all Plan Group subscriptions for one user and return their targets.
 
