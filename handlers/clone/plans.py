@@ -5,8 +5,8 @@ from handlers.common.feature_navigation import feature_back_callback
 
 
 class ClonePlansMixin:
-    async def show_plans(self, q, owner, select=False, context=None, force_new_message=False, target_chat_ids=None):
-        plans=await get_plans(owner,True)
+    async def show_plans(self, q, owner, select=False, context=None, force_new_message=False, target_chat_ids=None, group_id=None):
+        plans=await get_plans(owner,True, group_id=group_id) if group_id else await get_plans(owner,True)
         target_chat_ids=[int(x) for x in (target_chat_ids or [])]
         if target_chat_ids:
             wanted=set(target_chat_ids)
