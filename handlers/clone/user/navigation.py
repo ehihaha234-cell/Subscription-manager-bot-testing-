@@ -222,6 +222,21 @@ async def handle(self, update, context, q, owner, action):
         )
         await self.show_plans(q, owner, True, context, force_new_message=payment_photo)
         return True
+    if action.startswith('c_pg_renew_'):
+        group_id = action.replace('c_pg_renew_', '', 1).strip()
+        if not group_id:
+            await self.show_plans(q, owner, True, context)
+            return True
+        group = await get_plan_group(owner, group_id)
+        if not group:
+            await self.show_plans(q, owner, True, context)
+            return True
+        payment_photo = bool(
+            getattr(q.message, 'photo', None)
+            and 'razorpay upi payment' in str(getattr(q.message, 'caption', '') or '').lower()
+        )
+        await self.show_plans(q, owner, True, context, force_new_message=payment_photo, group_id=group_id)
+        return True
     if action in {'c_buy', 'c_renew'}:
         payment_photo = bool(
             getattr(q.message, 'photo', None)
