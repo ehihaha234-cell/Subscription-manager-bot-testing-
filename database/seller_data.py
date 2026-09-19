@@ -1420,6 +1420,49 @@ async def fulfill_plan_group_subscription(
     }
 
 
+async def extend_plan_group_subscription(owner_id:int, user_id:int, group_id:str, duration_minutes:int, plan_name=None, duration_text=None):
+    """Admin/manual extension for one Plan Group subscription only.
+
+    Keeps the existing remaining validity when active; otherwise starts from now.
+    Never modifies the clone-wide subscription or another Plan Group.
+    """
+    gid = str(group_id or "").strip()
+    if not gid:
+        raise ValueError("group_id is required")
+    minutes = int(duration_minutes or 0)
+    if minutes <= 0:
+        raise ValueError("duration must be greater than zero")
+    now = datetime.now(timezone.utc)
+    current = await c(PLAN_GROUP_SUBS).find_one({
+        "owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid,
+    })
+    current_expiry = (current or {}).get("expiry_date")
+    if current_expiry and current_expiry.tzinfo is None:
+        current_expiry = current_expiry.replace(tzinfo=timezone.utc)
+    elif current_expiry:
+        current_expiry = current_expiry.astimezone(timezone.utc)
+    base = current_expiry if current and current.get("active") and current_expiry and current_expiry > now else now
+    expiry = base + timedelta(minutes=minutes)
+    result = await c(PLAN_GROUP_SUBS).find_one_and_update(
+        {"owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid},
+        {"$set": {
+            "active": True,
+            "expiry_date": expiry,
+            "plan": plan_name or (current or {}).get("plan") or "Admin Assigned",
+            "duration_text": duration_text or (current or {}).get("duration_text") or "",
+            "last_renewed_at": now,
+            "last_added_minutes": minutes,
+            "removed_by_admin": False,
+            "updated_at": now,
+        }, "$setOnInsert": {
+            "owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid,
+            "target_chat_ids": [], "created_at": now,
+        }},
+        upsert=True, return_document=ReturnDocument.AFTER,
+    )
+    return result
+
+
 async def active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
     """True when this user has an active Plan Group containing this chat."""
     now = datetime.now(timezone.utc)
