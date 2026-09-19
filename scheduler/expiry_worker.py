@@ -162,14 +162,11 @@ async def check_expired_plan_group_subscriptions():
 
         failed = False
         for chat_id in target_ids:
-            # Another active Plan Group or the normal clone subscription keeps
-            # this particular chat accessible; never remove that user's access.
-            generic = await get_seller_subscription(owner_id, user_id)
-            generic_expiry = (generic or {}).get("expiry_date")
-            if generic_expiry and generic_expiry.tzinfo is None:
-                generic_expiry = generic_expiry.replace(tzinfo=timezone.utc)
-            generic_active = bool(generic and generic.get("active") and generic_expiry and generic_expiry > now)
-            if generic_active or await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+            # Plan Group access is independent from the clone-wide subscription.
+            # Keep this chat only when another ACTIVE Plan Group also grants
+            # access to the same target chat. A normal clone-wide subscription
+            # must NOT protect a Plan Group target from removal.
+            if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
                 continue
             try:
                 member = await bot.get_chat_member(chat_id, user_id)
