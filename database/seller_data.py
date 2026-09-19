@@ -1440,6 +1440,75 @@ async def expired_plan_group_subscriptions(owner_id=None, limit=5000):
     return await c(PLAN_GROUP_SUBS).find(query).sort("expiry_date", 1).to_list(length=limit)
 
 
+async def active_expiry_reminder_plan_group_subscriptions(owner_id, reminder_days: int, limit=5000):
+    """Return active Plan Group subscriptions inside the reminder window."""
+    days = max(0, int(reminder_days or 0))
+    if days <= 0:
+        return []
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=days)
+    return await c(PLAN_GROUP_SUBS).find({
+        "owner_id": int(owner_id),
+        "active": True,
+        "expiry_date": {"$gt": now, "$lte": end},
+    }).to_list(length=limit)
+
+
+async def claim_plan_group_expiry_reminder(owner_id: int, user_id: int, group_id: str, expiry_date, stale_after_seconds=600):
+    """Atomically claim one reminder for one Plan Group expiry."""
+    now = datetime.now(timezone.utc)
+    if expiry_date and expiry_date.tzinfo is None:
+        expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+    key = expiry_date.isoformat() if expiry_date else ""
+    if not key:
+        return None
+    stale_before = now - timedelta(seconds=int(stale_after_seconds))
+    token = uuid4().hex
+    result = await c(PLAN_GROUP_SUBS).find_one_and_update(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "group_id": str(group_id),
+            "active": True,
+            "expiry_date": expiry_date,
+            "$or": [
+                {"expiry_reminder_sent_for": {"$ne": key}},
+                {"expiry_reminder_sent_for": {"$exists": False}},
+            ],
+            "$and": [{"$or": [
+                {"expiry_reminder_claimed_at": {"$lt": stale_before}},
+                {"expiry_reminder_claimed_at": {"$exists": False}},
+            ]}],
+        },
+        {"$set": {"expiry_reminder_claim_token": token, "expiry_reminder_claimed_at": now}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return token if result else None
+
+
+async def complete_plan_group_expiry_reminder(owner_id: int, user_id: int, group_id: str, token: str, expiry_date) -> bool:
+    now = datetime.now(timezone.utc)
+    if expiry_date and expiry_date.tzinfo is None:
+        expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+    key = expiry_date.isoformat() if expiry_date else ""
+    result = await c(PLAN_GROUP_SUBS).update_one(
+        {"owner_id": int(owner_id), "user_id": int(user_id), "group_id": str(group_id), "expiry_reminder_claim_token": str(token), "expiry_date": expiry_date},
+        {"$set": {"expiry_reminder_sent_for": key, "expiry_reminder_sent_at": now}, "$unset": {"expiry_reminder_claim_token": "", "expiry_reminder_claimed_at": ""}},
+    )
+    return result.modified_count > 0
+
+
+async def release_plan_group_expiry_reminder(owner_id: int, user_id: int, group_id: str, token: str, error=None) -> bool:
+    fields = {"$unset": {"expiry_reminder_claim_token": "", "expiry_reminder_claimed_at": ""}}
+    if error:
+        fields["$set"] = {"expiry_reminder_last_error": str(error), "expiry_reminder_last_error_at": datetime.now(timezone.utc)}
+    result = await c(PLAN_GROUP_SUBS).update_one(
+        {"owner_id": int(owner_id), "user_id": int(user_id), "group_id": str(group_id), "expiry_reminder_claim_token": str(token)},
+        fields,
+    )
+    return result.modified_count > 0
+
+
 async def expire_plan_group_subscription(owner_id, user_id, group_id, expected_expiry=None):
     query = {
         "owner_id": int(owner_id),
