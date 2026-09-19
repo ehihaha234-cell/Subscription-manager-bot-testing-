@@ -44,13 +44,73 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a.startswith('a_user_manage_') or a.startswith('a_user_give_') or a.startswith('a_user_extend_') or a.startswith('a_user_custom_'):
         prefix = next(x for x in ('a_user_manage_', 'a_user_give_', 'a_user_extend_', 'a_user_custom_') if a.startswith(x))
         user_id = int(a.replace(prefix, ''))
+
+        groups = await get_plan_groups(owner)
+        if not groups:
+            await q.edit_message_text(
+                '🎁 Give / Extend Subscription\n\nNo Plan Group found. Create a Plan Group first.',
+                reply_markup=self.back(f'a_user_view_{user_id}'),
+            )
+            return True
+
         context.user_data.clear()
-        context.user_data['wait_user_custom_duration'] = user_id
+        kb = []
+        for group in groups:
+            gid = str(group.get('group_id') or '').strip()
+            if not gid:
+                continue
+            targets = group.get('targets') or []
+            names = [str(x.get('title') or x.get('chat_id')) for x in targets]
+            label = 'Group/Channel' if not names else ', '.join(names)
+            kb.append([InlineKeyboardButton(
+                f'📦 {label[:48]}',
+                callback_data=f'a_user_group_select_{user_id}_{gid}',
+            )])
+
+        if not kb:
+            await q.edit_message_text(
+                '🎁 Give / Extend Subscription\n\nNo valid Plan Group found.',
+                reply_markup=self.back(f'a_user_view_{user_id}'),
+            )
+            return True
+
+        kb.append([InlineKeyboardButton('⬅ Back', callback_data=f'a_user_view_{user_id}')])
         await q.edit_message_text(
-            '🎁 Give / Extend Plan Group Subscription\n\n'
+            '🎁 Give / Extend Subscription\n\nSelect a Plan Group:',
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return True
+
+    if a.startswith('a_user_group_select_'):
+        payload = a.replace('a_user_group_select_', '', 1)
+        try:
+            user_text, gid = payload.split('_', 1)
+            user_id = int(user_text)
+        except (TypeError, ValueError):
+            await q.answer('Invalid Plan Group selection.', show_alert=True)
+            return True
+
+        group = await get_plan_group(owner, gid)
+        if not group:
+            await q.edit_message_text(
+                '❌ Plan Group not found or is no longer active.',
+                reply_markup=self.back(f'a_user_view_{user_id}'),
+            )
+            return True
+
+        targets = group.get('targets') or []
+        names = [str(x.get('title') or x.get('chat_id')) for x in targets]
+        label = ', '.join(names) or '-'
+
+        context.user_data.clear()
+        context.user_data['wait_user_group_duration'] = user_id
+        context.user_data['wait_user_group_duration_gid'] = gid
+        await q.edit_message_text(
+            '🎁 Extend Subscription\n\n'
+            f'📦 Group/Channel: {label}\n\n'
             'Send a custom duration:\n'
             '30m, 12h, 7d, 3mo or 1y.\n\n'
-            'After that, select which Plan Group subscription to extend.',
+            'Existing active validity will be preserved and the new duration will be added.',
             reply_markup=self.back(f'a_user_view_{user_id}'),
         )
         return True
