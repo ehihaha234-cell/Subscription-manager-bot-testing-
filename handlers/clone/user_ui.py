@@ -50,18 +50,62 @@ class CloneUserUIMixin:
         if sub and expiry:
             sub["expiry_date"]=expiry
 
-        text=(
-            "👤 User Details\n\n"
-            f"🆔 ID: {user.get('user_id')}\n"
-            f"👤 Name: {name}\n"
-            f"📝 Username: {username}\n"
-            f"🚫 Banned: {'Yes' if user.get('banned') else 'No'}\n"
-            f"📋 Reason: {user.get('ban_reason') or '-'}\n"
-            f"📅 Joined: {self.format_dt(user.get('joined_at'), timezone_name)}\n\n"
-            f"💎 Plan: {(sub or {}).get('plan') or 'No Plan'}\n"
-            f"📅 Expiry: {self.format_dt((sub or {}).get('expiry_date'), timezone_name)}\n"
-            f"📌 Status: {'Active' if active else 'No Subscription'}"
-        )
+        # Plan Group subscriptions are separate from the clone-wide record.
+        # Always read them fresh so User Details immediately reflects an admin
+        # extension/removal of the selected Plan Group.
+        plan_group_details = []
+        try:
+            groups = await get_plan_groups(owner)
+            for group in groups:
+                gid = str(group.get("group_id") or "")
+                if not gid:
+                    continue
+                pg_sub = await get_plan_group_subscription(owner, int(user_id), gid)
+                if not pg_sub or not pg_sub.get("active"):
+                    continue
+                pg_expiry = pg_sub.get("expiry_date")
+                if pg_expiry and pg_expiry.tzinfo is None:
+                    pg_expiry = pg_expiry.replace(tzinfo=timezone.utc)
+                if not pg_expiry or pg_expiry <= now:
+                    continue
+                targets = group.get("targets") or []
+                label = ", ".join(
+                    str(item.get("title") or item.get("chat_id"))
+                    for item in targets
+                ) or gid
+                plan_group_details.append((
+                    str(pg_sub.get("plan") or "Plan Group"),
+                    label,
+                    pg_expiry,
+                ))
+        except Exception:
+            logger.exception("Failed to load Plan Group details owner=%s user=%s", owner, user_id)
+
+        lines = [
+            "👤 User Details",
+            "",
+            f"🆔 ID: {user.get('user_id')}",
+            f"👤 Name: {name}",
+            f"📝 Username: {username}",
+            f"🚫 Banned: {'Yes' if user.get('banned') else 'No'}",
+            f"📋 Reason: {user.get('ban_reason') or '-'}",
+            f"📅 Joined: {self.format_dt(user.get('joined_at'), timezone_name)}",
+            "",
+            f"💎 Clone Plan: {(sub or {}).get('plan') or 'No Plan'}",
+            f"📅 Clone Expiry: {self.format_dt((sub or {}).get('expiry_date'), timezone_name)}",
+            f"📌 Clone Status: {'Active' if active else 'No Subscription'}",
+        ]
+
+        if plan_group_details:
+            lines.extend(["", "📦 Plan Group Subscriptions"])
+            for pg_plan, target_label, pg_expiry in plan_group_details:
+                lines.extend([
+                    f"• {pg_plan}",
+                    f"  🔊 {target_label}",
+                    f"  📅 Expiry: {self.format_dt(pg_expiry, timezone_name)}",
+                ])
+
+        text="\n".join(lines)
         return text,user,sub
 
     async def show_user_details(self,q,owner,user_id):
