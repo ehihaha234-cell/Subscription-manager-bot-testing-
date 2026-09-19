@@ -928,47 +928,6 @@ async def remove_subscription(owner_id:int, user_id:int):
     return result.matched_count>0
 
 
-async def remove_plan_group_subscription(owner_id:int, user_id:int, group_id:str):
-    """Remove one user's subscription for one Plan Group only.
-
-    Returns the deactivated subscription document so the caller can remove the
-    user only from chats belonging to this selected Plan Group. Other Plan
-    Group subscriptions remain active and untouched.
-    """
-    owner_id = int(owner_id)
-    user_id = int(user_id)
-    gid = str(group_id or "").strip()
-    if not gid:
-        return None
-
-    now = datetime.now(timezone.utc)
-    row = await c(PLAN_GROUP_SUBS).find_one({
-        "owner_id": owner_id,
-        "user_id": user_id,
-        "group_id": gid,
-        "active": True,
-    })
-    if not row:
-        return None
-
-    result = await c(PLAN_GROUP_SUBS).find_one_and_update(
-        {
-            "owner_id": owner_id,
-            "user_id": user_id,
-            "group_id": gid,
-            "active": True,
-        },
-        {"$set": {
-            "active": False,
-            "removed_by_admin": True,
-            "removed_at": now,
-            "updated_at": now,
-        }},
-        return_document=ReturnDocument.AFTER,
-    )
-    return result
-
-
 async def remove_plan_group_subscriptions(owner_id:int, user_id:int):
     """Remove all Plan Group subscriptions for one user and return their targets.
 
@@ -1355,6 +1314,89 @@ async def fulfill_subscription_payment(
     }
 
 
+async def get_user_plan_group_subscriptions(owner_id: int, user_id: int, limit=100):
+    """Return every Plan Group subscription for a user, including expired ones.
+
+    User Management is Plan Group based, so an expired record must remain
+    selectable for an admin extension instead of being hidden as inactive.
+    """
+    return await c(PLAN_GROUP_SUBS).find({
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+    }).sort("expiry_date", -1).to_list(length=limit)
+
+
+async def remove_plan_group_subscription(owner_id: int, user_id: int, group_id: str):
+    """Deactivate one Plan Group and return only chats that are no longer covered.
+
+    If the same chat belongs to another still-active Plan Group, that chat is
+    deliberately excluded from the removal targets.
+    """
+    owner_id = int(owner_id)
+    user_id = int(user_id)
+    gid = str(group_id or "").strip()
+    if not gid:
+        return {"removed": False, "target_chat_ids": [], "group_id": gid}
+
+    row = await c(PLAN_GROUP_SUBS).find_one({
+        "owner_id": owner_id,
+        "user_id": user_id,
+        "group_id": gid,
+        "active": True,
+    })
+    if not row:
+        return {"removed": False, "target_chat_ids": [], "group_id": gid}
+
+    now = datetime.now(timezone.utc)
+    result = await c(PLAN_GROUP_SUBS).update_one(
+        {
+            "owner_id": owner_id,
+            "user_id": user_id,
+            "group_id": gid,
+            "active": True,
+        },
+        {"$set": {
+            "active": False,
+            "removed_by_admin": True,
+            "removed_at": now,
+            "updated_at": now,
+        }},
+    )
+    if not result.modified_count:
+        return {"removed": False, "target_chat_ids": [], "group_id": gid}
+
+    selected_targets = set()
+    for value in row.get("target_chat_ids") or []:
+        try:
+            selected_targets.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    if not selected_targets:
+        return {"removed": True, "target_chat_ids": [], "group_id": gid}
+
+    now = datetime.now(timezone.utc)
+    protected = await c(PLAN_GROUP_SUBS).find({
+        "owner_id": owner_id,
+        "user_id": user_id,
+        "active": True,
+        "expiry_date": {"$gt": now},
+    }, {"target_chat_ids": 1}).to_list(length=5000)
+    protected_targets = set()
+    for active_row in protected:
+        for value in active_row.get("target_chat_ids") or []:
+            try:
+                protected_targets.add(int(value))
+            except (TypeError, ValueError):
+                continue
+
+    return {
+        "removed": True,
+        "target_chat_ids": sorted(selected_targets - protected_targets),
+        "group_id": gid,
+    }
+
+
 async def get_plan_group_subscription(owner_id, user_id, group_id):
     """Return one user's subscription for one Plan Group only."""
     gid = str(group_id or "").strip()
@@ -1459,49 +1501,6 @@ async def fulfill_plan_group_subscription(
         "group_id": gid,
         "target_chat_ids": clean_targets,
     }
-
-
-async def extend_plan_group_subscription(owner_id:int, user_id:int, group_id:str, duration_minutes:int, plan_name=None, duration_text=None):
-    """Admin/manual extension for one Plan Group subscription only.
-
-    Keeps the existing remaining validity when active; otherwise starts from now.
-    Never modifies the clone-wide subscription or another Plan Group.
-    """
-    gid = str(group_id or "").strip()
-    if not gid:
-        raise ValueError("group_id is required")
-    minutes = int(duration_minutes or 0)
-    if minutes <= 0:
-        raise ValueError("duration must be greater than zero")
-    now = datetime.now(timezone.utc)
-    current = await c(PLAN_GROUP_SUBS).find_one({
-        "owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid,
-    })
-    current_expiry = (current or {}).get("expiry_date")
-    if current_expiry and current_expiry.tzinfo is None:
-        current_expiry = current_expiry.replace(tzinfo=timezone.utc)
-    elif current_expiry:
-        current_expiry = current_expiry.astimezone(timezone.utc)
-    base = current_expiry if current and current.get("active") and current_expiry and current_expiry > now else now
-    expiry = base + timedelta(minutes=minutes)
-    result = await c(PLAN_GROUP_SUBS).find_one_and_update(
-        {"owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid},
-        {"$set": {
-            "active": True,
-            "expiry_date": expiry,
-            "plan": plan_name or (current or {}).get("plan") or "Admin Assigned",
-            "duration_text": duration_text or (current or {}).get("duration_text") or "",
-            "last_renewed_at": now,
-            "last_added_minutes": minutes,
-            "removed_by_admin": False,
-            "updated_at": now,
-        }, "$setOnInsert": {
-            "owner_id": int(owner_id), "user_id": int(user_id), "group_id": gid,
-            "target_chat_ids": [], "created_at": now,
-        }},
-        upsert=True, return_document=ReturnDocument.AFTER,
-    )
-    return result
 
 
 async def active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
