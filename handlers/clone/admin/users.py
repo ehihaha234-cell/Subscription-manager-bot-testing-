@@ -16,31 +16,23 @@ async def handle(self, update, context, q, owner, staff, a, role):
         user_id = int(a.replace('a_user_manage_', ''))
         context.user_data.clear()
         groups = await get_plan_groups(owner)
-        rows = [[InlineKeyboardButton('📦 Clone Subscription', callback_data=f'a_user_clone_manage_{user_id}')]]
+        rows = []
         for group in groups:
             gid = str(group.get('group_id'))
             targets = group.get('targets') or []
             label = ', '.join(str(x.get('title') or x.get('chat_id')) for x in targets) or gid
             sub = await get_plan_group_subscription(owner, user_id, gid)
-            if sub:
+            if sub and sub.get('active'):
                 rows.append([InlineKeyboardButton(f'📦 {label[:48]}', callback_data=f'a_user_pg_manage_{user_id}_{gid}')])
         rows.append([InlineKeyboardButton('⬅ Back', callback_data=f'a_user_view_{user_id}')])
-        await q.edit_message_text(
-            '🎁 Give / Extend Subscription\n\nSelect the subscription you want to extend:',
-            reply_markup=InlineKeyboardMarkup(rows),
+        text = (
+            '🎁 Give / Extend Subscription\n\n'
+            'Select the subscription you want to extend:'
+            if rows[:-1] else
+            '🎁 Give / Extend Subscription\n\n'
+            'No active Plan Group subscription found.'
         )
-        return True
-    if a.startswith('a_user_clone_manage_'):
-        user_id = int(a.replace('a_user_clone_manage_', ''))
-        context.user_data.clear()
-        context.user_data['wait_user_custom_duration'] = user_id
-        await q.edit_message_text(
-            '🎁 Give / Extend Clone Bot Subscription\n\n'
-            'Send a custom duration:\n'
-            '30m, 12h, 7d, 3mo or 1y.\n\n'
-            'Existing active validity will be preserved and the new duration will be added.',
-            reply_markup=self.back(f'a_user_view_{user_id}'),
-        )
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
         return True
     if a.startswith('a_user_pg_manage_'):
         parts = a.split('_', 5)
@@ -132,33 +124,94 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a.startswith('a_user_remove_'):
         user_id = int(a.replace('a_user_remove_', ''))
+        context.user_data.clear()
+        groups = await get_plan_groups(owner)
+        rows = []
+        for group in groups:
+            gid = str(group.get('group_id'))
+            targets = group.get('targets') or []
+            label = ', '.join(str(x.get('title') or x.get('chat_id')) for x in targets) or gid
+            sub = await get_plan_group_subscription(owner, user_id, gid)
+            if sub and sub.get('active'):
+                rows.append([InlineKeyboardButton(f'❌ {label[:48]}', callback_data=f'a_user_pg_remove_{user_id}_{gid}')])
+        rows.append([InlineKeyboardButton('⬅ Back', callback_data=f'a_user_view_{user_id}')])
+        text = (
+            '❌ Remove Subscription\n\n'
+            'Select the subscription you want to remove:'
+            if rows[:-1] else
+            '❌ Remove Subscription\n\n'
+            'No active Plan Group subscription found.'
+        )
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+        return True
 
-        # Clone-wide subscription and Plan Group subscriptions are separate.
-        # Removing a user must deactivate both records and remove the user from
-        # every target chat belonging to their Plan Group subscriptions.
-        await remove_subscription(owner, user_id)
-        plan_group_result = await remove_plan_group_subscriptions(owner, user_id)
+    if a.startswith('a_user_pg_remove_'):
+        parts = a.split('_', 5)
+        if len(parts) != 6:
+            await q.edit_message_text('❌ Invalid action.')
+            return True
+        user_id = int(parts[4])
+        gid = parts[5]
+        sub = await get_plan_group_subscription(owner, user_id, gid)
+        group = await get_plan_group(owner, gid)
+        if not sub or not sub.get('active') or not group:
+            await q.edit_message_text(
+                '❌ Plan Group subscription not found.',
+                reply_markup=self.back(f'a_user_view_{user_id}'),
+            )
+            return True
 
-        for chat_id in plan_group_result.get('target_chat_ids', []):
+        result = await remove_plan_group_subscription(owner, user_id, gid)
+        if not result:
+            await q.edit_message_text(
+                '❌ Plan Group subscription is already inactive.',
+                reply_markup=self.back(f'a_user_view_{user_id}'),
+            )
+            return True
+
+        target_ids = []
+        for value in result.get('target_chat_ids') or group.get('chat_ids') or []:
             try:
+                target_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        target_ids = list(dict.fromkeys(target_ids))
+
+        # Remove only from chats owned by the selected Plan Group. If another
+        # active Plan Group still covers the same chat, keep the user's access.
+        removed_chat_ids = []
+        for chat_id in target_ids:
+            try:
+                if await active_plan_group_subscriptions_for_chat(owner, user_id, chat_id):
+                    continue
                 member = await context.bot.get_chat_member(chat_id, user_id)
                 if getattr(member, 'status', '') in {'creator', 'administrator'}:
                     continue
                 await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
                 await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+                removed_chat_ids.append(chat_id)
             except TelegramError as exc:
                 logger.warning(
-                    'Admin subscription removal failed owner=%s user=%s chat=%s: %s',
-                    owner, user_id, chat_id, exc,
+                    'Admin Plan Group removal failed owner=%s user=%s group=%s chat=%s: %s',
+                    owner, user_id, gid, chat_id, exc,
                 )
             except Exception:
                 logger.exception(
-                    'Unexpected admin subscription removal failure owner=%s user=%s chat=%s',
-                    owner, user_id, chat_id,
+                    'Unexpected Admin Plan Group removal failure owner=%s user=%s group=%s chat=%s',
+                    owner, user_id, gid, chat_id,
                 )
 
+        targets = group.get('targets') or []
+        target_names = [str(x.get('title') or x.get('chat_id')) for x in targets]
         try:
-            await context.bot.send_message(user_id, '❌ Your subscription was removed by admin.')
+            lines = [
+                '❌ Your subscription was removed by admin.',
+                '',
+                f"📦 Plan: {sub.get('plan') or 'Plan Group'}",
+                '🔊 Group/Channel:',
+            ]
+            lines.extend(f'• {name}' for name in target_names)
+            await context.bot.send_message(user_id, '\n'.join(lines))
         except Exception:
             pass
         await self.show_user_details(q, owner, user_id)
