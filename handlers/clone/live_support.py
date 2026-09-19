@@ -538,6 +538,44 @@ class CloneLiveSupportMixin:
                 )
                 return
 
+            if context.user_data.get("wait_user_plan_group_duration"):
+                state = context.user_data.get("wait_user_plan_group_duration") or {}
+                user_id=int(state.get("user_id") or 0)
+                group_id=str(state.get("group_id") or "")
+                value=text.strip().lower()
+                try:
+                    if value.endswith("mo"):
+                        amount=int(value[:-2]); duration_minutes=amount*30*1440
+                    elif value.endswith("y"):
+                        amount=int(value[:-1]); duration_minutes=amount*365*1440
+                    elif value.endswith("m"):
+                        amount=int(value[:-1]); duration_minutes=amount
+                    elif value.endswith("h"):
+                        amount=int(value[:-1]); duration_minutes=amount*60
+                    elif value.endswith("d"):
+                        amount=int(value[:-1]); duration_minutes=amount*1440
+                    else:
+                        raise ValueError
+                    if amount <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    await update.effective_message.reply_text("❌ Invalid duration. Use: 30m, 12h, 7d, 3mo or 1y.", reply_markup=self.back(f"a_user_view_{user_id}"))
+                    return
+                sub=await get_plan_group_subscription(owner,user_id,group_id)
+                group=await get_plan_group(owner,group_id)
+                if not sub or not group:
+                    context.user_data.clear(); await update.effective_message.reply_text("❌ Plan Group subscription not found.", reply_markup=self.back(f"a_user_view_{user_id}")); return
+                target_ids=[int(x) for x in (sub.get("target_chat_ids") or group.get("chat_ids") or [])]
+                result=await extend_plan_group_subscription(owner,user_id,group_id,duration_minutes,plan_name=sub.get("plan") or "Admin Assigned",duration_text=value)
+                delivery=await self.deliver_subscription_access(owner,user_id,{"target_chat_ids":target_ids})
+                context.user_data.clear()
+                try:
+                    await context.bot.send_message(user_id,"🎉 Plan Group subscription extended by admin.\n" f"Plan: {sub.get('plan') or 'Admin Assigned'}\n" f"Duration added: {value}\n" f"New Expiry: {self.format_dt(result.get('expiry_date'))}\n\n" f"New invite links sent: {delivery.get('sent',0)}\n" f"Already joined: {delivery.get('already_member',0)}")
+                except Exception:
+                    pass
+                await self.show_user_details(_MessageQueryAdapter(update.effective_message),owner,user_id)
+                return
+
             if context.user_data.get("wait_user_custom_duration"):
                 user_id=int(context.user_data["wait_user_custom_duration"])
                 value=text.strip().lower()
