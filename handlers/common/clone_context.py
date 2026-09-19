@@ -82,7 +82,7 @@ from database.seller_data import (
     register_referral, count_all_referrals, count_successful_referrals,
     mark_referral_rewarded, finalize_referral_reward,
     release_referral_reward, get_user_by_username, set_user_ban,
-    remove_subscription, remove_plan_group_subscriptions, extend_plan_group_subscription,
+    remove_subscription, remove_plan_group_subscription, remove_plan_group_subscriptions, extend_plan_group_subscription,
     add_payment_notification_messages, get_payment_notification_messages,
 )
 
