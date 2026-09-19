@@ -15,11 +15,53 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a.startswith('a_user_manage_'):
         user_id = int(a.replace('a_user_manage_', ''))
         context.user_data.clear()
+        groups = await get_plan_groups(owner)
+        rows = [[InlineKeyboardButton('📦 Clone Subscription', callback_data=f'a_user_clone_manage_{user_id}')]]
+        for group in groups:
+            gid = str(group.get('group_id'))
+            targets = group.get('targets') or []
+            label = ', '.join(str(x.get('title') or x.get('chat_id')) for x in targets) or gid
+            sub = await get_plan_group_subscription(owner, user_id, gid)
+            if sub:
+                rows.append([InlineKeyboardButton(f'📦 {label[:48]}', callback_data=f'a_user_pg_manage_{user_id}_{gid}')])
+        rows.append([InlineKeyboardButton('⬅ Back', callback_data=f'a_user_view_{user_id}')])
+        await q.edit_message_text(
+            '🎁 Give / Extend Subscription\n\nSelect the subscription you want to extend:',
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return True
+    if a.startswith('a_user_clone_manage_'):
+        user_id = int(a.replace('a_user_clone_manage_', ''))
+        context.user_data.clear()
         context.user_data['wait_user_custom_duration'] = user_id
         await q.edit_message_text(
             '🎁 Give / Extend Clone Bot Subscription\n\n'
             'Send a custom duration:\n'
             '30m, 12h, 7d, 3mo or 1y.\n\n'
+            'Existing active validity will be preserved and the new duration will be added.',
+            reply_markup=self.back(f'a_user_view_{user_id}'),
+        )
+        return True
+    if a.startswith('a_user_pg_manage_'):
+        parts = a.split('_', 5)
+        if len(parts) != 6:
+            await q.edit_message_text('❌ Invalid action.')
+            return True
+        user_id = int(parts[4])
+        gid = parts[5]
+        sub = await get_plan_group_subscription(owner, user_id, gid)
+        group = await get_plan_group(owner, gid)
+        if not sub or not group:
+            await q.edit_message_text('❌ Plan Group subscription not found.', reply_markup=self.back(f'a_user_view_{user_id}'))
+            return True
+        context.user_data.clear()
+        context.user_data['wait_user_plan_group_duration'] = {'user_id': user_id, 'group_id': gid}
+        targets = group.get('targets') or []
+        label = ', '.join(str(x.get('title') or x.get('chat_id')) for x in targets) or gid
+        expiry = sub.get('expiry_date')
+        await q.edit_message_text(
+            f'🎁 Extend Plan Group Subscription\n\n📦 Group/Channel: {label}\n📅 Current Expiry: {self.format_dt(expiry)}\n\n'
+            'Send a custom duration:\n30m, 12h, 7d, 3mo or 1y.\n\n'
             'Existing active validity will be preserved and the new duration will be added.',
             reply_markup=self.back(f'a_user_view_{user_id}'),
         )
