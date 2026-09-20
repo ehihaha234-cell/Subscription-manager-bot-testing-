@@ -61,6 +61,10 @@ class ClonePlansMixin:
 
         if context is not None:
             context.user_data["selected_child_target_chat_ids"] = target_chat_ids
+            # Keep the exact plan-list screen so Payment -> Back can return
+            # to the list the user actually selected from, instead of rebuilding
+            # the global plan list.
+            context.user_data["selected_child_plans_back_text"] = "\n".join(lines)
         kb=[]
         lines=[f"📋 Available Plans\n\n💱 Currency: {currency_symbol(currency)} {currency}\n"]
         if target_chat_ids:
