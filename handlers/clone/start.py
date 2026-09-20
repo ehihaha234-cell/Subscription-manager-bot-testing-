@@ -3,7 +3,18 @@
 from handlers.common.clone_context import *
 
 
-from utils.branding import branding_settings_for_owner
+_START_SETTINGS_CACHE = {}
+_START_SETTINGS_CACHE_TTL = 5.0
+
+async def _get_start_settings(owner):
+    now = time.monotonic()
+    cached = _START_SETTINGS_CACHE.get(int(owner))
+    if cached and (now - cached[0]) < _START_SETTINGS_CACHE_TTL:
+        return cached[1]
+    value = await get_seller_settings(owner)
+    _START_SETTINGS_CACHE[int(owner)] = (now, value)
+    return value
+
 
 class _StartFeatureQuery:
     """Small callback-query adapter used by Clone Bot deep-link starts."""
@@ -84,16 +95,15 @@ class CloneStartMixin:
                 staff = None
 
             user_task = asyncio.create_task(upsert_user(owner, update.effective_user))
-            settings_task = asyncio.create_task(get_seller_settings(owner))
-            branding_task = asyncio.create_task(branding_settings_for_owner(owner))
+            settings_task = asyncio.create_task(_get_start_settings(owner))
 
             if staff_task is not None:
-                user_record, settings, branding_result, staff = await asyncio.gather(
-                    user_task, settings_task, branding_task, staff_task
+                user_record, settings, staff = await asyncio.gather(
+                    user_task, settings_task, staff_task
                 )
             else:
-                user_record, settings, branding_result = await asyncio.gather(
-                    user_task, settings_task, branding_task
+                user_record, settings = await asyncio.gather(
+                    user_task, settings_task
                 )
 
             if staff:
@@ -175,7 +185,6 @@ class CloneStartMixin:
                 context,
                 settings,
                 update.effective_user,
-                branding_result=branding_result,
             )
 
             referrer_id=None
