@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from handlers.common.clone_context import MAIN_BOT_USERNAME
 from database.seller_subscriptions import get_config, effective_plan
+import asyncio
+import time
+
+_SELLER_BRANDING_CACHE = {}
+_SELLER_BRANDING_TASKS = {}
+_SELLER_BRANDING_TTL = 30.0
 
 SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -33,17 +39,41 @@ async def append_branding(text: str) -> str:
 
 
 async def branding_settings_for_owner(owner_id: int) -> tuple[bool, str]:
-    """Return effective branding visibility for a seller's current plan."""
-    cfg = await get_config()
-    global_enabled = bool(cfg.get("branding_enabled", True))
-    text = str(cfg.get("branding_text") or "").strip() or default_branding_text()
+    """Return effective branding visibility for a seller's current plan.
+
+    A short TTL cache avoids making every user /start wait for the same
+    branding/config database reads. Concurrent callers share one in-flight
+    lookup, so a burst of users does not create duplicate queries.
+    """
+    owner_id = int(owner_id)
+    now = time.monotonic()
+    cached = _SELLER_BRANDING_CACHE.get(owner_id)
+    if cached and now - cached[0] < _SELLER_BRANDING_TTL:
+        return cached[1], cached[2]
+
+    task = _SELLER_BRANDING_TASKS.get(owner_id)
+    if task is None or task.done():
+        async def _load():
+            cfg = await get_config()
+            global_enabled = bool(cfg.get("branding_enabled", True))
+            text = str(cfg.get("branding_text") or "").strip() or default_branding_text()
+            try:
+                plan, _assignment = await effective_plan(owner_id)
+                plan_enabled = bool(plan.get("branding_enabled", True))
+            except Exception:
+                plan_enabled = True
+            return global_enabled and plan_enabled, text
+        task = asyncio.create_task(_load())
+        _SELLER_BRANDING_TASKS[owner_id] = task
+
     try:
-        plan, _assignment = await effective_plan(int(owner_id))
-        plan_enabled = bool(plan.get("branding_enabled", True))
-    except Exception:
-        # Branding lookup must never break a clone welcome message.
-        plan_enabled = True
-    return global_enabled and plan_enabled, text
+        enabled, text = await task
+    finally:
+        if _SELLER_BRANDING_TASKS.get(owner_id) is task and task.done():
+            _SELLER_BRANDING_TASKS.pop(owner_id, None)
+
+    _SELLER_BRANDING_CACHE[owner_id] = (time.monotonic(), enabled, text)
+    return enabled, text
 
 
 async def append_seller_branding(text: str, owner_id: int) -> str:
