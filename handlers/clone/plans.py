@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 # Short-lived per-owner menu cache. It only removes repeated MongoDB reads
 # during rapid user navigation; TTL is intentionally tiny to avoid stale UI.
 _MENU_CACHE = {}
