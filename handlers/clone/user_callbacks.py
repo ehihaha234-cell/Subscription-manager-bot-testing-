@@ -24,6 +24,19 @@ class CloneUserCallbacksMixin:
             return
         await q.answer()
         for handler in _USER_HANDLERS:
-            if await handler.handle(self, update, context, q, owner, action):
+            try:
+                if await handler.handle(self, update, context, q, owner, action):
+                    return
+            except Exception:
+                logger.exception(
+                    "Clone user callback failed owner=%s user=%s action=%s",
+                    owner, getattr(q.from_user, "id", None), action,
+                )
+                try:
+                    await q.message.reply_text(
+                        "⚠️ Temporary problem. Please try again."
+                    )
+                except Exception:
+                    pass
                 return
         return
