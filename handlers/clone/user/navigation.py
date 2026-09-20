@@ -215,6 +215,33 @@ async def handle(self, update, context, q, owner, action):
             return True
         await self.show_plans(q, owner, True, context, target_chat_ids=group.get('chat_ids') or [])
         return True
+    if action == 'c_payment_back':
+        saved_text = context.user_data.get('selected_child_plans_back_text')
+        saved_markup = context.user_data.get('selected_child_plans_back_markup')
+        if saved_text:
+            try:
+                message = q.message
+                has_media = bool(
+                    getattr(message, 'photo', None)
+                    or getattr(message, 'video', None)
+                    or getattr(message, 'document', None)
+                    or getattr(message, 'animation', None)
+                    or getattr(message, 'audio', None)
+                )
+                if has_media:
+                    await message.delete()
+                    await context.bot.send_message(
+                        chat_id=message.chat_id,
+                        text=saved_text,
+                        reply_markup=saved_markup,
+                    )
+                else:
+                    await q.edit_message_text(saved_text, reply_markup=saved_markup)
+                return True
+            except Exception:
+                logger.exception('Could not restore previous plan list from payment screen')
+        await self.show_plans(q, owner, True, context)
+        return True
     if action == 'c_plans':
         payment_photo = bool(
             getattr(q.message, 'photo', None)

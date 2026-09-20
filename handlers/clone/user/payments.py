@@ -60,6 +60,14 @@ async def _claim_precreated_razorpay_qr(tx: dict, plan: dict, owner: int, curren
 async def handle(self, update, context, q, owner, action):
     back_keyboard = self.back(feature_back_callback(context))
     if action.startswith('c_select_'):
+        # The current message is the exact plan list the user came from.
+        # Store its markup so Payment -> Back can restore that same list.
+        try:
+            if q.message is not None:
+                context.user_data['selected_child_plans_back_markup'] = q.message.reply_markup
+                context.user_data['selected_child_plans_back_chat_id'] = int(q.message.chat_id)
+        except Exception:
+            pass
         plan = await get_plan(owner, action.replace('c_select_', ''))
         if not plan:
             await q.answer('Plan not found', show_alert=True)
@@ -156,7 +164,7 @@ async def handle(self, update, context, q, owner, action):
                         chat_id=q.message.chat_id,
                         photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                         caption=text,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
                     )
                     if not cached_file_id and getattr(sent, 'photo', None):
                         try:
@@ -203,7 +211,7 @@ async def handle(self, update, context, q, owner, action):
             text = f'{text}\n\n{notice}' if text else notice
         if not enabled and (not manual_enabled) and not (stars_enabled and stars_price > 0):
             text = '⚠️ No payment method is currently available. Please contact support.'
-        rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_buy')])
+        rows.append([InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')])
         kb = InlineKeyboardMarkup(rows)
         if qr_file_id and manual_enabled:
             try:
@@ -304,7 +312,7 @@ async def handle(self, update, context, q, owner, action):
                     chat_id=q.message.chat_id,
                     photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                     caption=text,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
                 )
                 if not cached_file_id and getattr(sent, 'photo', None):
                     try:
@@ -319,7 +327,7 @@ async def handle(self, update, context, q, owner, action):
                     payment_message_id=int(sent.message_id), payment_message_type='photo',
                 )
                 return True
-            await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
+            await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]))
             await update_gateway_transaction(
                 tx['transaction_id'], payment_message_chat_id=int(q.message.chat_id),
                 payment_message_id=int(q.message.message_id), payment_message_type='text',
@@ -327,7 +335,7 @@ async def handle(self, update, context, q, owner, action):
         except GatewayError as exc:
             await self.safe_query_message(q, f'❌ Gateway error: {exc}', back_keyboard)
         return True
-        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_buy')]]))
+        await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]))
         return True
     if action == 'c_upload':
         context.user_data['waiting_child_screenshot'] = True
