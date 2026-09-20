@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from handlers.common.clone_context import MAIN_BOT_USERNAME
+from database.seller_subscriptions import get_config, effective_plan
 import asyncio
-from database.seller_subscriptions import get_config, get_assignment
+import time
+
+_BRANDING_CACHE = None
+_BRANDING_CACHE_TS = 0.0
+_OWNER_PLAN_CACHE = {}
+_OWNER_PLAN_CACHE_TTL = 15.0
+
+async def _branding_config_cached():
+    global _BRANDING_CACHE, _BRANDING_CACHE_TS
+    now = time.monotonic()
+    if _BRANDING_CACHE is not None and (now - _BRANDING_CACHE_TS) < 15.0:
+        return _BRANDING_CACHE
+    value = await get_config()
+    _BRANDING_CACHE = value
+    _BRANDING_CACHE_TS = now
+    return value
+
+async def _effective_plan_cached(owner_id):
+    now = time.monotonic()
+    key = int(owner_id)
+    cached = _OWNER_PLAN_CACHE.get(key)
+    if cached and (now - cached[0]) < _OWNER_PLAN_CACHE_TTL:
+        return cached[1]
+    value = await effective_plan(key)
+    _OWNER_PLAN_CACHE[key] = (now, value)
+    return value
 
 SEPARATOR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -17,7 +41,7 @@ def default_branding_text() -> str:
 
 
 async def branding_settings() -> tuple[bool, str]:
-    cfg = await get_config()
+    cfg = await _branding_config_cached()
     enabled = bool(cfg.get("branding_enabled", True))
     text = str(cfg.get("branding_text") or "").strip() or default_branding_text()
     return enabled, text
@@ -36,36 +60,17 @@ async def append_branding(text: str) -> str:
 
 
 async def branding_settings_for_owner(owner_id: int) -> tuple[bool, str]:
-    """Return effective branding visibility with independent reads in parallel."""
+    """Return effective branding visibility for a seller's current plan."""
+    cfg = await _branding_config_cached()
+    global_enabled = bool(cfg.get("branding_enabled", True))
+    text = str(cfg.get("branding_text") or "").strip() or default_branding_text()
     try:
-        cfg, assignment = await asyncio.gather(
-            get_config(),
-            get_assignment(int(owner_id)),
-        )
-        global_enabled = bool(cfg.get("branding_enabled", True))
-        text = str(cfg.get("branding_text") or "").strip() or default_branding_text()
-
-        plan_enabled = True
-        if assignment:
-            expiry = assignment.get("expiry_date")
-            now = datetime.now(timezone.utc)
-            if expiry and getattr(expiry, "tzinfo", None) is None:
-                expiry = expiry.replace(tzinfo=timezone.utc)
-            if expiry and expiry <= now:
-                plan_id = "free"
-            else:
-                plan_id = assignment.get("plan_id", "free")
-            if plan_id != "free":
-                paid = next(
-                    (p for p in cfg.get("paid_plans", []) if p.get("plan_id") == plan_id),
-                    None,
-                )
-                if paid and paid.get("active", True):
-                    plan_enabled = bool(paid.get("branding_enabled", True))
-        return global_enabled and plan_enabled, text
+        plan, _assignment = await _effective_plan_cached(int(owner_id))
+        plan_enabled = bool(plan.get("branding_enabled", True))
     except Exception:
-        # Branding must never delay/fail the welcome.
-        return True, default_branding_text()
+        # Branding lookup must never break a clone welcome message.
+        plan_enabled = True
+    return global_enabled and plan_enabled, text
 
 
 async def append_seller_branding(text: str, owner_id: int) -> str:
