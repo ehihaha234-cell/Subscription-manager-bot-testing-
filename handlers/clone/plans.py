@@ -1,6 +1,5 @@
 import asyncio
 import time
-
 # Short-lived per-owner menu cache. It only removes repeated MongoDB reads
 # during rapid user navigation; TTL is intentionally tiny to avoid stale UI.
 _MENU_CACHE = {}
@@ -85,6 +84,12 @@ class ClonePlansMixin:
         ])
 
         markup = InlineKeyboardMarkup(kb)
+        # Keep the exact plans already rendered on this page in memory.
+        # c_select_* can use this snapshot and avoid a MongoDB round-trip.
+        if context is not None:
+            context.user_data["visible_child_plans"] = {
+                str(p.get("plan_id")): p for p in plans if p.get("plan_id")
+            }
         if force_new_message:
             try:
                 await q.message.delete()
