@@ -70,27 +70,28 @@ class CloneStartMixin:
     async def child_start(self,update:Update,context:ContextTypes.DEFAULT_TYPE):
         owner=self.owner(context)
 
-        # Detect seller locally. For non-sellers, staff lookup runs in parallel
-        # with the user/settings reads so it never adds a sequential DB round-trip.
-        staff = None
-        if int(update.effective_user.id) == int(self.seller_account(context)):
-            staff = {"role": "seller", "status": "active", "permissions": ["*"]}
-            staff_task = None
-        else:
-            staff_task = asyncio.create_task(self.staff_record(update, context))
-
+        # /start critical path: all independent database work begins together.
+        # Seller identity is local; normal users only need the staff lookup to
+        # determine whether they are an active admin/staff member.
         try:
-            # Only data needed to decide what the user sees is on the /start
-            # critical path. Live Support settings are not used by send_welcome.
-            user_task=asyncio.create_task(upsert_user(owner,update.effective_user))
-            settings_task=asyncio.create_task(get_seller_settings(owner))
-            tasks=[user_task, settings_task]
+            staff_task = None
+            if int(update.effective_user.id) == int(self.seller_account(context)):
+                staff = {"role": "seller", "status": "active", "permissions": ["*"]}
+            else:
+                staff_task = asyncio.create_task(self.staff_record(update, context))
+                staff = None
+
+            user_task = asyncio.create_task(upsert_user(owner, update.effective_user))
+            settings_task = asyncio.create_task(get_seller_settings(owner))
+
             if staff_task is not None:
-                tasks.append(staff_task)
-            results=await asyncio.gather(*tasks)
-            user_record,settings=results[:2]
-            if staff_task is not None:
-                staff=results[2]
+                user_record, settings, staff = await asyncio.gather(
+                    user_task, settings_task, staff_task
+                )
+            else:
+                user_record, settings = await asyncio.gather(
+                    user_task, settings_task
+                )
 
             if staff:
                 context.user_data.clear()
@@ -151,6 +152,7 @@ class CloneStartMixin:
                 return
 
             # Defaults are normally created when the clone bot is connected.
+            # Only perform the expensive migration path when settings are missing.
             if not settings:
                 record=await get_bot_by_data_owner_id(owner)
                 settings=await ensure_seller_defaults(
@@ -164,20 +166,13 @@ class CloneStartMixin:
             if start_payload and await self._open_start_feature(update, context, owner, start_payload):
                 return
 
-            # User-visible response stays exactly the same.
+            # Send the user-visible welcome as soon as required data is ready.
             await self.send_welcome(
                 update.effective_message,
                 context,
                 settings,
                 update.effective_user,
             )
-
-            # Warm Plans in the background while the user reads the welcome.
-            try:
-                from handlers.clone.plans import preload_plan_menu
-                self._start_background(preload_plan_menu(owner))
-            except Exception:
-                logger.exception("Plan menu prefetch setup failed owner=%s", owner)
 
             referrer_id=None
             if context.args:
@@ -194,10 +189,31 @@ class CloneStartMixin:
                 )
             )
         except Forbidden as exc:
-            logger.info("Clone /start blocked for user=%s: %s", update.effective_user.id, exc)
-        except Exception:
-            logger.exception("Clone /start failed owner=%s user=%s", owner, update.effective_user.id)
+            # Telegram returns 403 when a user has blocked the clone bot.
+            # Do not try to send the error message back to the same blocked
+            # chat, and do not turn this expected condition into a traceback.
+            logger.info(
+                "Clone /start skipped because user blocked bot owner=%s user=%s: %s",
+                owner,
+                getattr(update.effective_user, "id", None),
+                exc,
+            )
+            return
+        except Exception as exc:
+            logger.exception(
+                "Child /start failed owner=%s runtime=%s",
+                owner,
+                WELCOME_RUNTIME_VERSION,
+            )
             try:
-                await update.effective_message.reply_text("⚠️ Temporary problem. Please try again.")
-            except Exception:
-                pass
+                await update.effective_message.reply_text(
+                    "❌ Welcome message could not be sent.\n"
+                    f"Runtime: {WELCOME_RUNTIME_VERSION}\n"
+                    f"Error: {str(exc)[:250]}"
+                )
+            except Forbidden:
+                logger.info(
+                    "Could not send /start error because user blocked bot owner=%s user=%s",
+                    owner,
+                    getattr(update.effective_user, "id", None),
+                )
