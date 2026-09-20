@@ -16,15 +16,16 @@ from utils.branding import append_seller_branding, SEPARATOR
 # Welcome Message editor can evolve independently from every other editor.
 # The stored schema and feature callback names remain backward compatible.
 # ---------------------------------------------------------------------------
+# Dedicated callback namespace for buttons created by the Welcome Message editor.
+# Legacy c_* callbacks remain supported by the runtime, but newly created
+# Welcome feature buttons use wf_* so they cannot collide with other clone
+# callback routes.
 WELCOME_FEATURE_CALLBACKS: dict[str, str] = {
-    "plans": "c_plans",
-    "buy": "c_buy",
-    "profile": "c_profile",
-    "renew": "c_renew",
-    "referral": "c_referral",
-    "referral_unlock": "c_referral_unlock",
-    "support": "c_support",
-    "home": "c_home",
+    "profile": "wf_profile",
+    "referral": "wf_referral",
+    "referral_unlock": "wf_referral_unlock",
+    "support": "wf_support",
+    "home": "wf_home",
 }
 
 
@@ -44,8 +45,6 @@ def welcome_url_buttons_header() -> str:
         "Button title - popup: Popup text\n"
         "or\n"
         "Button title - alert: Popup text\n\n"
-        "• Add a button with a link to the group rules:\n"
-        "Button title - rules\n\n"
         "• Add a share button:\n"
         "Button title - share: Text to be shared\n\n"
         "• Add a button with copyable text:\n"
@@ -54,7 +53,7 @@ def welcome_url_buttons_header() -> str:
         "• Add a feature button:\n"
         "Button title - feature: feature_name\n\n"
         "Available feature names:\n"
-        "buy, profile, renew, referral, referral_unlock, support, home\n\n"
+        "profile, referral, referral_unlock, support, home\n\n"
         "• HOW TO ADD PLAN BUTTONS SEPERATE GROUPS:\n"
         "Button title - feature: plans_(PLAN_ID)\n"
         "Example: Premium Channel - feature: plans_1001\n\n"
@@ -62,7 +61,9 @@ def welcome_url_buttons_header() -> str:
         "Go to 📦 manage plan.\n"
         "Each separate plan group will have its own 4-digit PLAN ID.\n"
         "Example: PLAN ID 👉 1001\n"
-        "Use that ID as feature: plans_1001."
+        "Use that ID as feature: plans_1001.\n\n"
+        "ℹ️ Existing seller buttons created earlier with feature: plans remain supported. "
+        "New feature: plans buttons cannot be created here."
     )
 
 
@@ -79,17 +80,17 @@ def _parse_welcome_button_target(target: str, line_no: int, button_no: int) -> d
         return {"text_type": "url", "value": f"https://t.me/{username}"}
     if target.startswith("feature:"):
         feature = target.split(":", 1)[1].strip().lower()
-        if feature == "plans":
-            raise ValueError(location + "'feature: plans' is no longer available for new buttons. Use feature: plans_(PLAN_ID), for example feature: plans_1001")
         if feature.startswith("plans_"):
             plan_list_id = feature.split("_", 1)[1].strip()
             if len(plan_list_id) != 4 or not plan_list_id.isdigit():
                 raise ValueError(location + "PLAN ID must be exactly 4 digits. Example: feature: plans_1001")
             return {"text_type": "callback", "value": f"c_plans_list_{plan_list_id}"}
         callback = WELCOME_FEATURE_CALLBACKS.get(feature)
-        if not callback or feature == "plans":
-            supported = "buy, profile, renew, referral, referral_unlock, support, home"
-            raise ValueError(location + f"unknown feature '{feature}'. Available: {supported} or plans_(PLAN_ID)")
+        if not callback:
+            raise ValueError(
+                location
+                + f"unknown feature '{feature}'. Available: {', '.join(WELCOME_FEATURE_CALLBACKS)} or plans_(PLAN_ID)"
+            )
         return {"text_type": "callback", "value": callback}
     if target.startswith("plans:"):
         raw_ids = target.split(":", 1)[1].strip()
@@ -140,22 +141,6 @@ def parse_welcome_buttons(text: str) -> list[list[dict[str, str]]]:
     return rows
 
 
-def _legacy_feature_callback(value: str) -> str | None:
-    """Normalize old saved feature-button records without changing their data."""
-    raw = str(value or "").strip().lower()
-    if raw.startswith("feature:"):
-        raw = raw.split(":", 1)[1].strip()
-    if raw.startswith("plans_"):
-        plan_id = raw.split("_", 1)[1].strip()
-        if len(plan_id) == 4 and plan_id.isdigit():
-            return f"c_plans_list_{plan_id}"
-        return None
-    # Legacy seller/admin buttons may already be stored as c_* callbacks.
-    if raw == "plans":
-        return "c_plans"
-    return WELCOME_FEATURE_CALLBACKS.get(raw)
-
-
 def build_welcome_keyboard(rows: Iterable[Iterable[dict[str, Any]]] | None) -> InlineKeyboardMarkup | None:
     if not rows:
         return None
@@ -168,12 +153,8 @@ def build_welcome_keyboard(rows: Iterable[Iterable[dict[str, Any]]] | None) -> I
             value = str(item.get("value") or "")
             if kind == "url" and value:
                 built.append(InlineKeyboardButton(text, url=value))
-            elif kind in {"callback", "feature"}:
-                # Support both the current schema and legacy saved feature
-                # records. This keeps old seller-created feature: plans buttons
-                # working while the editor no longer accepts new feature: plans.
-                callback = _legacy_feature_callback(value) if kind == "feature" or value.lower().startswith("feature:") else value
-                built.append(InlineKeyboardButton(text, callback_data=callback or "c_home"))
+            elif kind == "callback":
+                built.append(InlineKeyboardButton(text, callback_data=value or "c_home"))
             elif kind == "plans":
                 # Keep callback_data short even when several Telegram chat IDs
                 # are configured. The original value remains in the saved
