@@ -172,6 +172,13 @@ class CloneStartMixin:
                 update.effective_user,
             )
 
+            # Warm Plans in the background while the user reads the welcome.
+            try:
+                from handlers.clone.plans import preload_plan_menu
+                self._start_background(preload_plan_menu(owner))
+            except Exception:
+                logger.exception("Plan menu prefetch setup failed owner=%s", owner)
+
             referrer_id=None
             if context.args:
                 arg=context.args[0]

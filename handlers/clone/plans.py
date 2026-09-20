@@ -1,3 +1,28 @@
+# Short-lived per-owner menu cache. It only removes repeated MongoDB reads
+# during rapid user navigation; TTL is intentionally tiny to avoid stale UI.
+_MENU_CACHE = {}
+_MENU_CACHE_TTL = 5.0
+
+async def _cached_plan_data(owner, group_id=None):
+    key=(int(owner), str(group_id) if group_id is not None else "")
+    now=time.monotonic()
+    hit=_MENU_CACHE.get(key)
+    if hit and now-hit[0] < _MENU_CACHE_TTL:
+        return hit[1], hit[2]
+    plans_task=asyncio.create_task(
+        get_plans(owner,True, group_id=group_id) if group_id else get_plans(owner,True)
+    )
+    settings_task=asyncio.create_task(get_seller_settings(owner))
+    plans,settings=await asyncio.gather(plans_task,settings_task)
+    _MENU_CACHE[key]=(time.monotonic(),plans,settings)
+    return plans,settings
+
+async def preload_plan_menu(owner):
+    try:
+        await _cached_plan_data(owner, None)
+    except Exception:
+        logger.exception("Plan menu prefetch failed owner=%s", owner)
+
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
@@ -6,11 +31,7 @@ from handlers.common.feature_navigation import feature_back_callback
 
 class ClonePlansMixin:
     async def show_plans(self, q, owner, select=False, context=None, force_new_message=False, target_chat_ids=None, group_id=None):
-        plans_task=asyncio.create_task(
-            get_plans(owner,True, group_id=group_id) if group_id else get_plans(owner,True)
-        )
-        settings_task=asyncio.create_task(get_seller_settings(owner))
-        plans,settings=await asyncio.gather(plans_task,settings_task)
+        plans,settings=await _cached_plan_data(owner, group_id)
         target_chat_ids=[int(x) for x in (target_chat_ids or [])]
         if target_chat_ids:
             wanted=set(target_chat_ids)
