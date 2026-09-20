@@ -60,44 +60,37 @@ async def _claim_precreated_razorpay_qr(tx: dict, plan: dict, owner: int, curren
 async def handle(self, update, context, q, owner, action):
     back_keyboard = self.back(feature_back_callback(context))
     if action.startswith('c_select_'):
-        plan_id = action.replace('c_select_', '').strip()
-
-        # These reads are independent. Do them together so selecting a plan
-        # does not wait through three/four sequential MongoDB round-trips.
-        plan_task = asyncio.create_task(get_plan(owner, plan_id))
-        gateway_task = asyncio.create_task(get_gateway_config('seller', owner, decrypt=True))
-        settings_task = asyncio.create_task(get_seller_settings(owner))
-        bot_id = int(context.application.bot_data.get('seller_bot_id') or 0)
-        qr_task = asyncio.create_task(get_bot_payment_qr(bot_id)) if bot_id else None
-
-        if qr_task is not None:
-            plan, gateway_cfg, s, qr_file_id = await asyncio.gather(
-                plan_task, gateway_task, settings_task, qr_task
-            )
-        else:
-            plan, gateway_cfg, s = await asyncio.gather(
-                plan_task, gateway_task, settings_task
-            )
-            qr_file_id = None
-
+        plan = await get_plan(owner, action.replace('c_select_', ''))
         if not plan:
             await q.answer('Plan not found', show_alert=True)
             return True
-
         context.user_data['selected_child_plan'] = plan
+        bot_id = int(context.application.bot_data.get('seller_bot_id') or 0)
+        # These reads are independent; fetch them together so the callback does
+        # not wait through several sequential MongoDB round-trips.
+        gateway_task = asyncio.create_task(get_gateway_config('seller', owner, decrypt=True))
+        settings_task = asyncio.create_task(get_seller_settings(owner))
+        qr_task = asyncio.create_task(get_bot_payment_qr(bot_id)) if bot_id else None
+        gateway_cfg, s, qr_file_id = await asyncio.gather(
+            gateway_task,
+            settings_task,
+            qr_task if qr_task is not None else asyncio.sleep(0, result=''),
+        )
         gateways = gateway_cfg.get('gateways') or {}
         razorpay_settings = gateways.get('razorpay') or {}
         if (razorpay_settings.get('enabled') and
                 str(razorpay_settings.get('checkout_mode') or 'upi_qr').lower() == 'upi_qr' and
                 bot_id):
-            # This cleanup is independent of the seller-settings/QR reads above.
-            # Await it once, immediately before creating the new transaction.
-            try:
-                await cancel_previous_razorpay_qr_for_same_plan(
-                    context.bot, owner, q.from_user.id, bot_id, str(plan['plan_id'])
-                )
-            except Exception:
-                logger.exception('Could not replace previous Razorpay QR for same plan')
+            # Same plan: replace the user's previous QR. Other plans remain visible
+            # and usable until their own QR expires.
+            async def _cancel_previous_qr():
+                try:
+                    await cancel_previous_razorpay_qr_for_same_plan(
+                        context.bot, owner, q.from_user.id, bot_id, str(plan['plan_id'])
+                    )
+                except Exception:
+                    logger.exception('Could not replace previous Razorpay QR for same plan')
+            asyncio.create_task(_cancel_previous_qr())
         if not qr_file_id:
             qr_file_id = str(s.get('upi_qr_file_id') or '')
         currency = normalize_currency(s.get('currency')) or 'INR'
@@ -217,7 +210,12 @@ async def handle(self, update, context, q, owner, action):
                 await q.message.delete()
             except TelegramError:
                 pass
-            await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+            try:
+                await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+            except TelegramError:
+                # Keep the callback usable even if an old/invalid QR file_id exists.
+                logger.exception('Stored manual payment QR could not be sent; falling back to text')
+                await self.safe_query_message(q, text, kb)
         else:
             await self.safe_query_message(q, text, kb)
         return True
