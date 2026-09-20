@@ -71,10 +71,17 @@ def _parse_target(target: str, line_no: int, button_no: int) -> dict[str, str]:
 
     if target.startswith("feature:"):
         feature = target.split(":", 1)[1].strip().lower()
+        if feature == "plans":
+            raise ValueError(location + "'feature: plans' is no longer available for new buttons. Use feature: plans_(PLAN_ID), for example feature: plans_1001")
+        if feature.startswith("plans_"):
+            plan_list_id = feature.split("_", 1)[1].strip()
+            if len(plan_list_id) != 4 or not plan_list_id.isdigit():
+                raise ValueError(location + "PLAN ID must be exactly 4 digits. Example: feature: plans_1001")
+            return {"text_type": "callback", "value": f"c_plans_list_{plan_list_id}"}
         callback = FEATURE_CALLBACKS.get(feature)
-        if not callback:
-            supported = ", ".join(FEATURE_CALLBACKS)
-            raise ValueError(location + f"unknown feature '{feature}'. Available: {supported}")
+        if not callback or feature == "plans":
+            supported = "buy, profile, renew, referral, referral_unlock, support, home"
+            raise ValueError(location + f"unknown feature '{feature}'. Available: {supported} or plans_(PLAN_ID)")
         return {"text_type": "callback", "value": callback}
 
     for prefix, action in (("popup:", "popup"), ("alert:", "alert"), ("share:", "share"), ("copy:", "copy")):
@@ -118,6 +125,20 @@ def parse_editor_buttons(text: str) -> list[list[dict[str, str]]]:
     return rows
 
 
+def _legacy_feature_callback(value: str) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("feature:"):
+        raw = raw.split(":", 1)[1].strip()
+    if raw.startswith("plans_"):
+        plan_id = raw.split("_", 1)[1].strip()
+        if len(plan_id) == 4 and plan_id.isdigit():
+            return f"c_plans_list_{plan_id}"
+        return None
+    if raw == "plans":
+        return "c_plans"
+    return FEATURE_CALLBACKS.get(raw)
+
+
 def build_editor_keyboard(
     rows: Iterable[Iterable[dict[str, Any]]] | None,
     clone_username: str = "",
@@ -135,8 +156,9 @@ def build_editor_keyboard(
             if kind == "url":
                 if value:
                     built.append(InlineKeyboardButton(text, url=value))
-            elif kind == "callback":
-                built.append(InlineKeyboardButton(text, callback_data=value or "c_home"))
+            elif kind in {"callback", "feature"}:
+                callback = _legacy_feature_callback(value) if kind == "feature" or value.lower().startswith("feature:") else value
+                built.append(InlineKeyboardButton(text, callback_data=callback or "c_home"))
             elif kind == "copy":
                 built.append(InlineKeyboardButton(text, copy_text=CopyTextButton(value[:256])))
             elif kind == "share":
