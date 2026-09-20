@@ -61,9 +61,7 @@ def welcome_url_buttons_header() -> str:
         "Go to 📦 manage plan.\n"
         "Each separate plan group will have its own 4-digit PLAN ID.\n"
         "Example: PLAN ID 👉 1001\n"
-        "Use that ID as feature: plans_1001.\n\n"
-        "ℹ️ Existing seller buttons created earlier with feature: plans remain supported. "
-        "New feature: plans buttons cannot be created here."
+        "Use that ID as feature: plans_1001."
     )
 
 
