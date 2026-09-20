@@ -240,3 +240,24 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
 
     return False
+
+
+# --- Point 4: current Plan Group targets ---
+async def _current_plan_group_target_chat_ids(db, owner_id, plan_group_id, fallback=None):
+    """Return the current connected chat IDs for a Plan Group.
+    Falls back to the stored subscription targets if the group cannot be resolved.
+    """
+    fallback = list(fallback or [])
+    try:
+        group = await db.plan_groups.find_one(
+            {"owner_id": owner_id, "group_id": plan_group_id},
+            {"target_chat_ids": 1, "chat_ids": 1, "connected_chat_ids": 1},
+        )
+        if group:
+            for key in ("target_chat_ids", "chat_ids", "connected_chat_ids"):
+                ids = group.get(key)
+                if ids:
+                    return list(dict.fromkeys(ids))
+    except Exception:
+        pass
+    return list(dict.fromkeys(fallback))
