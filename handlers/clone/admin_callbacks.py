@@ -24,6 +24,15 @@ class CloneAdminCallbacksMixin:
         # completely unresponsive.
         role = staff_record.get("role", "moderator")
 
+        # Clear pending User Management input states whenever navigation returns
+        # to a user-details screen. This prevents a duration/ban-reason message
+        # sent after Back from being processed as the previous pending action.
+        if action.startswith("a_user_view_"):
+            context.user_data.pop("wait_user_group_duration", None)
+            context.user_data.pop("wait_user_group_duration_gid", None)
+            context.user_data.pop("user_custom_duration_text", None)
+            context.user_data.pop("wait_user_ban_reason", None)
+
         # Informational/status buttons intentionally perform no navigation.
         # They still need a registered callback path so Telegram's spinner closes.
         if action == "a_noop":
