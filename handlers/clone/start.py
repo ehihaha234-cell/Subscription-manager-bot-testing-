@@ -83,14 +83,18 @@ class CloneStartMixin:
 
             user_task = asyncio.create_task(upsert_user(owner, update.effective_user))
             settings_task = asyncio.create_task(get_seller_settings(owner))
+            # Welcome branding performs its own config/plan reads. Start that
+            # lookup now, in parallel with the normal /start reads.
+            from utils.branding import branding_settings_for_owner
+            branding_task = asyncio.create_task(branding_settings_for_owner(owner))
 
             if staff_task is not None:
-                user_record, settings, staff = await asyncio.gather(
-                    user_task, settings_task, staff_task
+                user_record, settings, staff, _branding = await asyncio.gather(
+                    user_task, settings_task, staff_task, branding_task
                 )
             else:
-                user_record, settings = await asyncio.gather(
-                    user_task, settings_task
+                user_record, settings, _branding = await asyncio.gather(
+                    user_task, settings_task, branding_task
                 )
 
             if staff:
