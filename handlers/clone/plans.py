@@ -59,12 +59,6 @@ class ClonePlansMixin:
             )
             return
 
-        if context is not None:
-            context.user_data["selected_child_target_chat_ids"] = target_chat_ids
-            # Keep the exact plan-list screen so Payment -> Back can return
-            # to the list the user actually selected from, instead of rebuilding
-            # the global plan list.
-            context.user_data["selected_child_plans_back_text"] = "\n".join(lines)
         kb=[]
         lines=[f"📋 Available Plans\n\n💱 Currency: {currency_symbol(currency)} {currency}\n"]
         if target_chat_ids:
@@ -89,6 +83,12 @@ class ClonePlansMixin:
         ])
 
         markup = InlineKeyboardMarkup(kb)
+        if context is not None:
+            context.user_data["selected_child_target_chat_ids"] = target_chat_ids
+            # Save the exact list opened by the user. Payment -> Back restores
+            # this same list instead of rebuilding the global plan list.
+            context.user_data["selected_child_plans_back_text"] = "\n".join(lines)
+            context.user_data["selected_child_plans_back_markup"] = markup
         if force_new_message:
             try:
                 await q.message.delete()
