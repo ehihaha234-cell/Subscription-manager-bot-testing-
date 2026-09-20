@@ -7,7 +7,7 @@ import hashlib
 
 from telegram import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
-from utils.branding import append_seller_branding
+from utils.branding import append_seller_branding, SEPARATOR
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +243,7 @@ class CloneWelcomeEditorMixin:
     def build_welcome_keyboard(rows):
         return build_welcome_keyboard(rows)
 
-    async def send_welcome(self,message,context,settings,user):
+    async def send_welcome(self,message,context,settings,user,branding_result=None):
         # Seller ka editable welcome text optional hai. Agar seller text remove
         # kare, tab bhi default welcome title aur permanent SaaS branding dikhegi.
         seller_text=(settings.get("welcome_message") or "").strip()
@@ -258,7 +258,18 @@ class CloneWelcomeEditorMixin:
             welcome_text="👋 WELCOME TO OUR SUBSCRIPTION BOT"
 
         # Platform branding is controlled by the seller's current plan.
-        text=await append_seller_branding(welcome_text, self.seller_account(context))
+        if branding_result is None:
+            text=await append_seller_branding(welcome_text, self.seller_account(context))
+        else:
+            enabled, branding = branding_result
+            if enabled and branding:
+                text = (
+                    welcome_text
+                    if branding.casefold() in welcome_text.casefold()
+                    else f"{welcome_text}\n\n{SEPARATOR}\n\n{branding}"
+                )
+            else:
+                text = welcome_text
 
         # Seller ke welcome buttons fully removable hain. Empty list ka matlab
         # welcome message ke niche koi button nahi dikhana.
