@@ -26,4 +26,4 @@ class CloneUserCallbacksMixin:
         for handler in _USER_HANDLERS:
             if await handler.handle(self, update, context, q, owner, action):
                 return
-        await q.answer("Button action not found", show_alert=True)
+        return

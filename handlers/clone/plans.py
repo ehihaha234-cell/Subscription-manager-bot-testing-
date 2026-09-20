@@ -6,7 +6,11 @@ from handlers.common.feature_navigation import feature_back_callback
 
 class ClonePlansMixin:
     async def show_plans(self, q, owner, select=False, context=None, force_new_message=False, target_chat_ids=None, group_id=None):
-        plans=await get_plans(owner,True, group_id=group_id) if group_id else await get_plans(owner,True)
+        plans_task=asyncio.create_task(
+            get_plans(owner,True, group_id=group_id) if group_id else get_plans(owner,True)
+        )
+        settings_task=asyncio.create_task(get_seller_settings(owner))
+        plans,settings=await asyncio.gather(plans_task,settings_task)
         target_chat_ids=[int(x) for x in (target_chat_ids or [])]
         if target_chat_ids:
             wanted=set(target_chat_ids)
@@ -19,7 +23,6 @@ class ClonePlansMixin:
                 if not assigned or assigned == wanted:
                     filtered.append(plan)
             plans=filtered
-        settings=await get_seller_settings(owner)
         currency=normalize_currency(settings.get("currency")) or "INR"
         back_target = feature_back_callback(context) if context is not None else "c_home"
         back_keyboard=self.back(back_target)
