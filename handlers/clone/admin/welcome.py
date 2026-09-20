@@ -87,9 +87,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             '• {TIME} = current time\n'
             '• {WEEKDAY} = week day\n'
             '• {MENTION} = link to the user profile\n'
-            '• {USERNAME} = username\n'
-            '• {GROUPNAME} = group name\n'
-            '• {RULES} = group rules/description',
+            '• {USERNAME} = username',
             reply_markup=self.welcome_text_menu(bool(s.get('welcome_message')))
         )
         return True

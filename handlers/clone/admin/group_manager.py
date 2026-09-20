@@ -43,9 +43,7 @@ GROUP_VARIABLES = (
     "{TIME} = current time\n"
     "{WEEKDAY} = week day\n"
     "{MENTION} = link to the user profile\n"
-    "{USERNAME} = username\n"
-    "{GROUPNAME} = group name\n"
-    "{RULES} = group rules/description"
+    "{USERNAME} = username"
 )
 
 def group_text_prompt(title: str) -> str:
