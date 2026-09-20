@@ -49,6 +49,41 @@ async def _callback_group_allowed(owner, group_id):
         return False
 
 
+# --- Point 1: restore access after admin extension ---
+async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, group_id):
+    """For an expired subscription that was just extended, send access links
+    for current Plan Group targets where the user is not already a member.
+    """
+    group = await get_plan_group(owner, str(group_id))
+    if not group:
+        return
+    for target in (group.get("targets") or []):
+        try:
+            chat_id = int(target.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            member = await bot.get_chat_member(chat_id, int(user_id))
+            if getattr(member, "status", "") in {"member", "administrator", "creator", "restricted"}:
+                continue
+        except Exception:
+            pass
+        try:
+            invite = await bot.create_chat_invite_link(
+                chat_id=chat_id,
+                name=f"Subscription restore {user_id}",
+            )
+            await bot.send_message(
+                int(user_id),
+                f"🔗 Access link: {invite.invite_link}",
+            )
+        except Exception:
+            logger.exception(
+                "Failed restoring Plan Group access owner=%s user=%s chat=%s",
+                owner, user_id, chat_id,
+            )
+
+
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_users':
         context.user_data.clear()
@@ -192,6 +227,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
             amount=0,
             duration_text=duration_text,
             target_chat_ids=target_ids,
+        )
+        await _restore_plan_group_access_after_admin_extend(
+            context.bot, owner, user_id, gid
         )
         context.user_data.clear()
         try:
