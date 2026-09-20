@@ -420,7 +420,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(
             CallbackQueryHandler(
                 self.child_callback,
-                pattern=r"^(c_|seller_current_plan$|seller_upgrade_plan$|w_)",
+                pattern=r"^(c_|wf_|seller_current_plan$|seller_upgrade_plan$|w_)",
             )
         )
         app.add_handler(
