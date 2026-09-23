@@ -8,6 +8,7 @@ from handlers.clone.forced_join_runtime import forced_join_request, forced_join_
 from handlers.clone.business_official_runtime import handle_business_connection, handle_business_message, handle_deleted_business_messages
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler, ChatMemberHandler
 from telegram.request import HTTPXRequest
+from uuid import uuid4
 
 
 class CloneRuntimeAppMixin:
@@ -213,12 +214,67 @@ class CloneRuntimeAppMixin:
             except (TypeError, ValueError):
                 await message.reply_text("❌ Invalid duration. Use: 30m, 12h, 7d, 3mo or 1y.")
                 raise ApplicationHandlerStop
-            sub = await get_plan_group_subscription(owner, user_id, group_id)
             group = await get_plan_group(owner, group_id)
-            if not sub or not group:
+            if not group:
                 context.user_data.clear()
-                await message.reply_text("❌ Plan Group subscription not found.")
+                await message.reply_text("❌ Plan Group not found or is no longer active.")
                 raise ApplicationHandlerStop
+
+            targets = group.get("targets") or []
+            target_ids = []
+            for item in targets:
+                try:
+                    target_ids.append(int(item.get("chat_id")))
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            if not target_ids:
+                target_ids = [int(x) for x in (group.get("chat_ids") or [])]
+            if not target_ids:
+                context.user_data.clear()
+                await message.reply_text("❌ This Plan Group has no connected Group/Channel.")
+                raise ApplicationHandlerStop
+
+            # Unified Give / Extend behavior: no previous subscription -> create;
+            # active -> extend; expired -> reactivate from now.
+            previous = await get_plan_group_subscription(owner, user_id, group_id)
+            previous_expiry = (previous or {}).get("expiry_date")
+            if previous_expiry and getattr(previous_expiry, "tzinfo", None) is None:
+                previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            was_active = bool(
+                previous
+                and previous.get("active")
+                and previous_expiry
+                and previous_expiry > now
+            )
+
+            result = await fulfill_plan_group_subscription(
+                owner, user_id,
+                f"admin_extend:{owner}:{user_id}:{group_id}:{uuid4().hex}",
+                group_id,
+                (previous or {}).get("plan") or "Admin Subscription",
+                duration_minutes,
+                amount=0,
+                duration_text=value,
+                target_chat_ids=target_ids,
+            )
+
+            from handlers.clone.admin.users import _restore_plan_group_access_after_admin_extend
+            await _restore_plan_group_access_after_admin_extend(
+                context.bot, owner, user_id, group_id
+            )
+            context.user_data.clear()
+
+            status_text = "extended" if was_active else ("reactivated" if previous else "created")
+            await message.reply_text(
+                "✅ Subscription updated successfully.\n\n"
+                f"📦 Plan Group: {', '.join(str(x.get('title') or x.get('chat_id')) for x in targets) or group_id}\n"
+                f"📅 Duration added: {value}\n"
+                f"🔄 Status: {status_text.title()}\n"
+                f"⏳ New expiry: {self.format_dt(result.get('expiry_date'))}",
+            )
+            await self.show_user_details(_MessageQueryAdapter(message), owner, user_id)
+            raise ApplicationHandlerStop
             target_ids = [int(x) for x in (sub.get("target_chat_ids") or group.get("chat_ids") or [])]
             result = await extend_plan_group_subscription(
                 owner, user_id, group_id, duration_minutes,
