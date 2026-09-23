@@ -1,6 +1,7 @@
 """Plan Group based User Management callbacks."""
 
 from handlers.common.clone_context import *
+from uuid import uuid4
 
 
 def _duration_minutes(value: str):
@@ -51,37 +52,60 @@ async def _callback_group_allowed(owner, group_id):
 
 # --- Point 1: restore access after admin extension ---
 async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, group_id):
-    """For an expired subscription that was just extended, send access links
-    for current Plan Group targets where the user is not already a member.
+    """Send fresh Plan Group invite links after Give/Extend.
+
+    This is intentionally used for all three states: no previous subscription,
+    active subscription, and expired subscription. Expired/kicked users are
+    unbanned first so the generated invite can be used normally.
     """
     group = await get_plan_group(owner, str(group_id))
     if not group:
-        return
+        return {"sent": 0, "links": []}
+
+    links = []
     for target in (group.get("targets") or []):
         try:
             chat_id = int(target.get("chat_id"))
         except (TypeError, ValueError):
             continue
+        title = str(target.get("title") or chat_id)
         try:
             member = await bot.get_chat_member(chat_id, int(user_id))
-            if getattr(member, "status", "") in {"member", "administrator", "creator", "restricted"}:
-                continue
+            if getattr(member, "status", "") == "kicked":
+                try:
+                    await bot.unban_chat_member(chat_id, int(user_id), only_if_banned=True)
+                except Exception:
+                    pass
         except Exception:
             pass
         try:
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
-                name=f"Subscription restore {user_id}",
+                member_limit=1,
+                name=f"Subscription access {user_id}",
             )
+            links.append(f"📢 {title}\n{invite.invite_link}")
+        except Exception:
+            logger.exception(
+                "Failed creating Plan Group access link owner=%s user=%s chat=%s",
+                owner, user_id, chat_id,
+            )
+
+    if links:
+        try:
             await bot.send_message(
                 int(user_id),
-                f"🔗 Access link: {invite.invite_link}",
+                "🎉 Your subscription has been updated.\n\n"
+                "🔗 Fresh private invite link(s):\n\n"
+                + "\n\n".join(links),
+                disable_web_page_preview=True,
             )
         except Exception:
             logger.exception(
-                "Failed restoring Plan Group access owner=%s user=%s chat=%s",
-                owner, user_id, chat_id,
+                "Failed sending Plan Group access links owner=%s user=%s",
+                owner, user_id,
             )
+    return {"sent": len(links), "links": links}
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
@@ -212,37 +236,68 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer('Duration expired. Start Extend Subscription again.', show_alert=True)
             return True
 
-        sub = await get_plan_group_subscription(owner, user_id, gid)
-        if not sub:
-            await q.edit_message_text('❌ Plan Group subscription not found.', reply_markup=self.back(f'a_user_view_{user_id}'))
+        # Give / Extend uses one unified operation:
+        # - no previous subscription -> create it (Give)
+        # - active subscription -> add duration to current expiry (Extend)
+        # - expired subscription -> reactivate from now and add duration
+        # The Plan Group selected above is always the target scope.
+        group = await get_plan_group(owner, gid)
+        targets = (group or {}).get('targets') or []
+        target_ids = []
+        for item in targets:
+            try:
+                target_ids.append(int(item.get('chat_id')))
+            except (TypeError, ValueError, AttributeError):
+                pass
+        if not target_ids:
+            target_ids = [int(x) for x in ((group or {}).get('chat_ids') or [])]
+        if not target_ids:
+            await q.edit_message_text(
+                '❌ This Plan Group has no connected Group/Channel.',
+                reply_markup=self.back(f'a_user_view_{user_id}'),
+            )
             return True
 
-        target_ids = [int(x) for x in (sub.get('target_chat_ids') or [])]
+        previous = await get_plan_group_subscription(owner, user_id, gid)
+        previous_expiry = (previous or {}).get('expiry_date')
+        if previous_expiry and getattr(previous_expiry, 'tzinfo', None) is None:
+            previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        was_active = bool(
+            previous
+            and previous.get('active')
+            and previous_expiry
+            and previous_expiry > now
+        )
+
         result = await fulfill_plan_group_subscription(
             owner, user_id,
             f'admin_extend:{owner}:{user_id}:{gid}:{uuid4().hex}',
             gid,
-            sub.get('plan') or 'Admin Extension',
+            (previous or {}).get('plan') or 'Admin Subscription',
             duration_minutes,
             amount=0,
             duration_text=duration_text,
             target_chat_ids=target_ids,
         )
-        await _restore_plan_group_access_after_admin_extend(
-            context.bot, owner, user_id, gid
-        )
+
+        # All three cases must deliver fresh invite links: new subscription,
+        # active extension, and expired-subscription reactivation.
+        await _restore_plan_group_access_after_admin_extend(context.bot, owner, user_id, gid)
         context.user_data.clear()
+
+        status_text = 'extended' if was_active else ('reactivated' if previous else 'created')
         try:
-            await context.bot.send_message(
-                user_id,
-                '🎉 Plan Group subscription extended by admin.\n'
-                f"Plan: {sub.get('plan') or 'Plan'}\n"
-                f'Duration added: {duration_text}\n'
-                f'New expiry: {self.format_dt(result.get("expiry_date"), await self.seller_timezone(owner))}',
+            await q.edit_message_text(
+                '✅ Subscription updated successfully.\n\n'
+                f'📦 Plan Group: {await _group_label(owner, result.get("subscription") or {"group_id": gid, "target_chat_ids": target_ids})}\n'
+                f'📅 Duration added: {duration_text}\n'
+                f'🔄 Status: {status_text.title()}\n'
+                f'⏳ New expiry: {self.format_dt(result.get("expiry_date"), await self.seller_timezone(owner))}',
+                reply_markup=self.back(f'a_user_view_{user_id}'),
             )
         except Exception:
-            pass
-        await self.show_user_details(q, owner, user_id)
+            await self.show_user_details(q, owner, user_id)
         return True
 
     if a.startswith('a_user_group_remove_'):
