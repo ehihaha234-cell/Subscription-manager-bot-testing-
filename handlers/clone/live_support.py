@@ -2,6 +2,7 @@
 
 from handlers.common.clone_context import *
 from handlers.clone.admin.live_support import _live_support_parse_buttons
+from uuid import uuid4
 
 
 # One FIFO lock per seller/user pair. Telegram can dispatch several updates
@@ -573,34 +574,13 @@ class CloneLiveSupportMixin:
                     )
                     return
 
-                # This flow is an EXTENSION only. Never create a new
-                # subscription when the selected Plan Group has no existing
-                # subscription for this user.
-                sub = await get_plan_group_subscription(owner, user_id, gid)
-                if not sub:
-                    context.user_data.clear()
-                    await update.effective_message.reply_text(
-                        "❌ No subscription found for this Plan Group.\n\n"
-                        "Use Give Subscription first, then use Extend Subscription.",
-                        reply_markup=self.back(f"a_user_view_{user_id}"),
-                    )
-                    return
-
-                # Keep the exact target chats stored on the user's subscription
-                # when available. Fall back to the current Plan Group targets
-                # only for older subscription records.
+                targets = group.get("targets") or []
                 target_ids = []
-                for value_chat in (sub.get("target_chat_ids") or []):
+                for item in targets:
                     try:
-                        target_ids.append(int(value_chat))
-                    except (TypeError, ValueError):
+                        target_ids.append(int(item.get("chat_id")))
+                    except (TypeError, ValueError, AttributeError):
                         pass
-                if not target_ids:
-                    for item in (group.get("targets") or []):
-                        try:
-                            target_ids.append(int(item.get("chat_id")))
-                        except (TypeError, ValueError, AttributeError):
-                            pass
                 if not target_ids:
                     target_ids = [int(x) for x in (group.get("chat_ids") or [])]
 
@@ -612,79 +592,49 @@ class CloneLiveSupportMixin:
                     )
                     return
 
-                try:
-                    result = await fulfill_plan_group_subscription(
-                        owner,
-                        user_id,
-                        f"admin_extend:{owner}:{user_id}:{gid}:{uuid4().hex}",
-                        gid,
-                        sub.get("plan") or "Admin Extension",
-                        duration_minutes,
-                        amount=0,
-                        duration_text=value,
-                        target_chat_ids=target_ids,
-                    )
-
-                    # If the subscription had already expired, restore access
-                    # as part of the same extension flow. For an active member
-                    # this simply reports that the user is already joined.
-                    try:
-                        delivery = await self.deliver_subscription_access(
-                            owner, user_id, {"target_chat_ids": target_ids}
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Plan Group extension access delivery failed owner=%s user=%s group=%s",
-                            owner, user_id, gid,
-                        )
-                        delivery = {"sent": 0, "already_member": 0}
-                except Exception as exc:
-                    logger.exception(
-                        "Plan Group extension failed owner=%s user=%s group=%s",
-                        owner, user_id, gid,
-                    )
-                    await update.effective_message.reply_text(
-                        f"❌ Subscription extension failed.\n\n{type(exc).__name__}: {str(exc)[:220]}",
-                        reply_markup=self.back(f"a_user_view_{user_id}"),
-                    )
-                    return
-
-                context.user_data.clear()
-                expiry_text = self.format_dt(
-                    result.get("expiry_date"),
-                    await self.seller_timezone(owner),
+                # Give / Extend is intentionally one operation.  A missing
+                # subscription is created, an active one is extended from its
+                # current expiry, and an expired one is reactivated from now.
+                previous = await get_plan_group_subscription(owner, user_id, gid)
+                previous_expiry = (previous or {}).get('expiry_date')
+                if previous_expiry and getattr(previous_expiry, 'tzinfo', None) is None:
+                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                was_active = bool(
+                    previous
+                    and previous.get('active')
+                    and previous_expiry
+                    and previous_expiry > now
                 )
 
-                # Confirm to the admin and notify the affected user.
-                await update.effective_message.reply_text(
-                    "✅ Subscription Extended Successfully\n\n"
-                    f"📦 Plan Group: {await _group_label(owner, sub)}\n"
-                    f"👤 User ID: {user_id}\n"
-                    f"⏳ Duration added: {value}\n"
-                    f"📅 New expiry: {expiry_text}",
-                    reply_markup=self.back(f"a_user_view_{user_id}"),
-                )
-
-                try:
-                    await context.bot.send_message(
-                        user_id,
-                        "🎉 Plan Group subscription extended by admin.\n"
-                        f"Plan: {sub.get('plan') or 'Plan'}\n"
-                        f"Duration added: {value}\n"
-                        f"New expiry: {expiry_text}\n\n"
-                        f"Access links sent: {delivery.get('sent', 0)}\n"
-                        f"Already joined: {delivery.get('already_member', 0)}",
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to notify user after Plan Group extension owner=%s user=%s group=%s",
-                        owner, user_id, gid,
-                    )
-
-                await self.show_user_details(
-                    _MessageQueryAdapter(update.effective_message),
+                result = await fulfill_plan_group_subscription(
                     owner,
                     user_id,
+                    f"admin_extend:{owner}:{user_id}:{gid}:{uuid4().hex}",
+                    gid,
+                    (previous or {}).get('plan') or 'Admin Subscription',
+                    duration_minutes,
+                    amount=0,
+                    duration_text=value,
+                    target_chat_ids=target_ids,
+                )
+
+                # Fresh invite links are delivered for every case: new, active
+                # extension, and expired-subscription reactivation.
+                from handlers.clone.admin.users import _restore_plan_group_access_after_admin_extend
+                await _restore_plan_group_access_after_admin_extend(
+                    context.bot, owner, user_id, gid
+                )
+                context.user_data.clear()
+
+                status_text = 'extended' if was_active else ('reactivated' if previous else 'created')
+                await update.effective_message.reply_text(
+                    '✅ Subscription updated successfully.\n\n'
+                    f'📦 Plan Group: {", ".join(str(x.get("title") or x.get("chat_id")) for x in targets) or gid}\n'
+                    f'📅 Duration added: {value}\n'
+                    f'🔄 Status: {status_text.title()}\n'
+                    f'⏳ New expiry: {self.format_dt(result.get("expiry_date"), await self.seller_timezone(owner))}',
+                    reply_markup=self.back(f'a_user_view_{user_id}'),
                 )
                 return
 
