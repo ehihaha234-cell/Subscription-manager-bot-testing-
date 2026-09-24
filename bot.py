@@ -35,6 +35,7 @@ from handlers.platform_features import handlers as platform_feature_handlers
 from handlers.profile import profile_callback
 from handlers.referral import referral_callback
 from handlers.seller import seller_handlers
+from handlers.seller_stars import seller_stars_handlers
 from handlers.seller_subscription_management import (
     handlers as seller_subscription_management_handlers,
 )
@@ -300,6 +301,10 @@ def register_handlers(application: Application) -> None:
     """Register handlers in a deterministic priority order."""
     for handler in seller_handlers():
         application.add_handler(handler, group=-10)
+    # Main SaaS seller-plan Telegram Stars checkout/fulfillment.
+    # Keep this before generic successful-payment routing.
+    for handler in seller_stars_handlers():
+        application.add_handler(handler, group=-11)
 
     application.add_handler(start_command())
     application.add_handler(help_handler())
