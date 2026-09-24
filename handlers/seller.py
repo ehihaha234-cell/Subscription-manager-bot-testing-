@@ -34,6 +34,7 @@ from database.seller_bots import (
 from database.seller_subscriptions import (
     create_plan_request,
     current_plan_text,
+    get_paid_plan,
     effective_plan,
     seller_usage,
     get_config,
