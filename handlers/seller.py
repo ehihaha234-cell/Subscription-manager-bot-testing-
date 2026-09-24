@@ -4,7 +4,7 @@ import io
 import time
 from html import escape
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile, LabeledPrice
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
@@ -1709,6 +1709,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gateway_cfg = await get_gateway_config("owner", 0, decrypt=True)
         gateways = gateway_cfg.get("gateways") or {}
         enabled_gateways = [g for g in SUPPORTED_GATEWAYS if bool((gateways.get(g) or {}).get("enabled"))]
+        stars_enabled = bool(gateway_cfg.get("stars_enabled", False))
         default_gateway = str(gateway_cfg.get("default_gateway") or "")
         if default_gateway in enabled_gateways:
             enabled_gateways.remove(default_gateway)
@@ -1717,6 +1718,22 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows = []
         text = ""
+
+        # Telegram Stars is a native Telegram payment method, so it is handled
+        # separately from Razorpay/Cashfree and does not require INR gateway credentials.
+        stars_price = int(plan.get("stars_price", 0) or 0)
+        if stars_enabled and stars_price > 0:
+            rows.append([InlineKeyboardButton(
+                f"⭐ Pay {stars_price} Stars",
+                callback_data=f"seller_star_{plan_id}",
+            )])
+            text = (
+                f"⭐ Telegram Stars Payment\n\n"
+                f"Plan: {plan.get('name')}\n"
+                f"Stars: ⭐{stars_price}\n"
+                f"Duration: {int(plan.get('duration_days', 30) or 30)} days\n\n"
+                "Pay securely with Telegram Stars."
+            )
         if enabled_gateways:
             gateway = enabled_gateways[0]
             tx = await create_gateway_transaction(
@@ -1747,7 +1764,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"{text}\n\n{manual_text}" if text else f"💳 Payment\n\n{manual_text}"
             rows.append([InlineKeyboardButton("📤 Upload Payment Screenshot", callback_data=f"seller_manual_{request_type}_{plan_id}")])
 
-        if not enabled_gateways and not manual_enabled:
+        if not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
             text = "⚠️ No payment method is currently available. Please contact support."
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="seller_upgrade_plan")])
         kb = InlineKeyboardMarkup(rows)
@@ -1760,6 +1777,25 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(q.message.chat_id, cfg["payment_qr_file_id"], caption=text, reply_markup=kb)
         else:
             await q.edit_message_text(text, reply_markup=kb)
+        return
+
+    if action.startswith("seller_star_"):
+        plan_id = action.replace("seller_star_", "", 1)
+        plan = await get_paid_plan(plan_id)
+        gateway_cfg = await get_gateway_config("owner", 0, decrypt=True)
+        stars_price = int((plan or {}).get("stars_price", 0) or 0)
+        if not gateway_cfg.get("stars_enabled") or not plan or stars_price <= 0:
+            await q.answer("Telegram Stars is unavailable for this plan.", show_alert=True)
+            return
+        await context.bot.send_invoice(
+            chat_id=q.from_user.id,
+            title=f"{plan.get('name', 'Seller Plan')} Subscription",
+            description=f"{int(plan.get('duration_days', 30) or 30)} days seller subscription",
+            payload=f"stars:{q.from_user.id}:{q.from_user.id}:{plan_id}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(plan.get("name", "Seller Plan"), stars_price)],
+        )
         return
 
     if action.startswith("seller_manual_"):
@@ -2900,7 +2936,7 @@ def _decision_result_text(purchase: dict) -> str:
 
 def seller_handlers():
     return [
-        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?|backup(?:_.*)?)$"),
+        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|star_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?|backup(?:_.*)?)$"),
         CommandHandler("replace", _backup_restore_command),
         CommandHandler("merge", _backup_restore_command),
         MessageHandler(filters.Document.ALL, _receive_clone_backup),
