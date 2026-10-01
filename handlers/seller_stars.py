@@ -10,6 +10,7 @@ from database.payment_gateways import get_gateway_config
 from database.seller_subscriptions import (
     get_paid_plan,
     process_verified_plan_purchase,
+    choose_verified_plan_purchase,
 )
 from handlers.seller import plan_change_keyboard
 
@@ -108,13 +109,24 @@ async def seller_stars_success(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         if purchase.get("status") == "decision_required":
+            # Telegram Stars seller-plan purchases are fully automatic.
+            # Do not leave a verified Stars payment waiting for a manual
+            # plan-change decision; activate the purchased plan immediately.
+            activated_purchase, applied = await choose_verified_plan_purchase(
+                purchase["payment_id"], owner_id, "replace_now"
+            )
+            if not activated_purchase or activated_purchase.get("status") != "activated":
+                raise ValueError("Telegram Stars subscription activation did not complete")
+
+            expiry = activated_purchase.get("expiry_date")
+            expiry_text = expiry.strftime("%d %b %Y, %I:%M %p UTC") if hasattr(expiry, "strftime") else "-"
             await update.effective_message.reply_text(
                 "✅ Telegram Stars Payment Successful\n\n"
-                f"📦 Purchased Plan: {plan.get('name', plan_id)}\n"
+                f"📦 Plan: {plan.get('name', plan_id)}\n"
                 f"⭐ Stars Paid: {int(payment.total_amount)}\n"
-                f"⌛ Duration: {int(plan.get('duration_days', 30))} Days\n\n"
-                "Your purchased plan is different from your current plan. Choose how you want to activate it below.",
-                reply_markup=plan_change_keyboard(purchase["payment_id"]),
+                f"⌛ Duration: {int(plan.get('duration_days', 30))} Days\n"
+                f"📅 Expiry: {expiry_text}\n\n"
+                "🎉 Your seller subscription has been activated automatically.",
             )
             return
 
