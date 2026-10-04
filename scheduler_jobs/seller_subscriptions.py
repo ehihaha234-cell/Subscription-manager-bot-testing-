@@ -126,7 +126,7 @@ async def run_seller_subscription_reminders(bot):
             # database failure cannot block the reminder forever.
             continue
 
-        await _send_admin_copies(bot, owner_id, text)
+        # Expiry reminders are seller-only. Do not send reminder copies to the owner.
 
         try:
             warning = await usage_warning(owner_id, 0.8)
