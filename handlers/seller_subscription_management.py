@@ -253,7 +253,28 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pid=a.split("_",2)[2]; status="approved" if a.startswith("subpay_ok_") else "rejected"
         pay=await decide_seller_payment(pid,status,q.from_user.id)
         if not pay: await q.answer("Already processed",show_alert=True); return
-        if status=="approved": await assign_plan_with_history(pay["owner_id"],pay["plan_id"],pay["duration_days"],"payment",pay["amount"],q.from_user.id)
+        if status=="approved":
+            assignment = await assign_plan_with_history(pay["owner_id"],pay["plan_id"],pay["duration_days"],"payment",pay["amount"],q.from_user.id)
+            expiry = assignment.get("expiry_date")
+            expiry_text = expiry.strftime("%d %b %Y, %I:%M %p UTC") if hasattr(expiry, "strftime") else "-"
+            owner_notice = (
+                "💳 Seller Plan Activated\n\n"
+                f"Seller ID: {int(pay['owner_id'])}\n"
+                f"Plan: {pay['plan_name']}\n"
+                f"Duration: {int(pay['duration_days'])} Days\n"
+                f"Payment: ₹{float(pay['amount']):g}\n"
+                "Source: Manual Payment\n"
+                f"Expiry: {expiry_text}"
+            )
+            for admin_id in {int(value) for value in ADMIN_IDS}:
+                try:
+                    await context.bot.send_message(admin_id, owner_notice)
+                except Exception:
+                    logger.exception(
+                        "Seller paid-plan activation owner notice failed seller_id=%s admin_id=%s",
+                        pay["owner_id"],
+                        admin_id,
+                    )
         try:
             await context.bot.send_message(
                 pay["owner_id"],
