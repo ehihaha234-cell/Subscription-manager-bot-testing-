@@ -1031,7 +1031,7 @@ async def get_payment_notification_messages(owner_id, payment_id):
     )
     return (payment or {}).get("notification_messages") or []
 
-async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,gateway_payment_id=""):
+async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,gateway_payment_id="",stars_amount=None):
     now=datetime.now(timezone.utc)
     doc={
         "owner_id":int(owner_id),"payment_id":str(transaction_id),"user_id":int(user_id),
@@ -1051,6 +1051,36 @@ async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,
         payment["_created_now"] = result.upserted_id is not None
     return payment
 async def get_payment(owner_id,payment_id): return await c(PAYMENTS).find_one({"owner_id":owner_id,"payment_id":payment_id})
+
+async def record_payment_subscription_snapshot(owner_id, payment_id, join_date=None, expiry_date=None):
+    """Store the subscription dates belonging to a successful payment.
+
+    These snapshots keep Owner Payment History accurate even after the user
+    later renews, expires, or changes subscriptions.
+    """
+    fields = {"updated_at": datetime.now(timezone.utc)}
+    if join_date is not None:
+        fields["join_date"] = join_date
+    if expiry_date is not None:
+        fields["expiry_date"] = expiry_date
+    result = await c(PAYMENTS).update_one(
+        {"owner_id": int(owner_id), "payment_id": str(payment_id)},
+        {"$set": fields},
+    )
+    return result.modified_count > 0
+
+async def get_owner_payment_history_page(page=0, per_page=10):
+    """Return platform-wide approved clone payments, newest first.
+
+    ``owner_id`` is the clone's data scope, so the caller can map it back to
+    the exact seller/clone through seller_bots.
+    """
+    page = max(0, int(page or 0))
+    per_page = max(1, min(50, int(per_page or 10)))
+    query = {"status": "approved"}
+    total = await c(PAYMENTS).count_documents(query)
+    rows = await c(PAYMENTS).find(query).sort([("created_at", -1), ("updated_at", -1)]).skip(page * per_page).limit(per_page).to_list(length=per_page)
+    return rows, total
 async def pending_payments(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":"pending"}).sort("created_at",-1).to_list(length=50)
 async def payment_history(owner_id): return await c(PAYMENTS).find({"owner_id":owner_id,"status":{"$in":["approved","rejected"]}}).sort("updated_at",-1).to_list(length=50)
 async def set_payment_status(owner_id,payment_id,status,admin_id,admin_name=None):
