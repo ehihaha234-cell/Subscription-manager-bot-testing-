@@ -256,4 +256,30 @@ async def find_seller_by_identifier(identifier):
                 if bot_record:
                     return await _repair_missing_seller(user_id, user)
 
+    # 5) Any user who has started the Main Bot is searchable in Seller
+    # Management, even when they never connected a clone bot or their old bot
+    # was removed/expired. The users collection is the authoritative Main Bot
+    # registration source.
+    profile = None
+    if raw.lstrip("+").isdigit():
+        try:
+            numeric_id = int(raw)
+        except (TypeError, ValueError):
+            numeric_id = None
+        if numeric_id is not None:
+            profile = await db["users"].find_one({"user_id": numeric_id})
+            if profile:
+                return await _repair_missing_seller(numeric_id, profile)
+
+    if username and not any(ch.isspace() for ch in username):
+        user = await db["users"].find_one({"username": at_exact})
+        if user:
+            user_id = user.get("user_id")
+            try:
+                user_id = int(user_id)
+            except (TypeError, ValueError):
+                user_id = None
+            if user_id is not None:
+                return await _repair_missing_seller(user_id, user)
+
     return None

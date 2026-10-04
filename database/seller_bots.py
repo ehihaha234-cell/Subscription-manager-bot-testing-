@@ -414,7 +414,44 @@ async def bot_exists(owner_id: int):
 
 
 async def total_bots():
-    """Count currently connected clone bots, excluding preserved removed records."""
+    """Count currently configured clone bots, excluding preserved removed records."""
     return await seller_bots_collection().count_documents(
         {"active": True, "status": {"$ne": "removed"}}
     )
+
+
+async def clone_bot_runtime_counts():
+    """Return exact configured/running/offline-error clone bot counts.
+
+    A configured bot is an active, non-removed clone record. A configured bot
+    is considered running only when its persisted runtime_status is ``running``;
+    every other configured state is grouped into Offline/Error.
+    """
+    collection = seller_bots_collection()
+    match = {"active": True, "status": {"$ne": "removed"}}
+    rows = await collection.aggregate([
+        {"$match": match},
+        {
+            "$group": {
+                "_id": None,
+                "configured": {"$sum": 1},
+                "running": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": [{"$toLower": {"$ifNull": ["$runtime_status", ""]}}, "running"]},
+                            1,
+                            0,
+                        ]
+                    }
+                },
+            }
+        },
+    ]).to_list(length=1)
+    row = rows[0] if rows else {}
+    configured = int(row.get("configured", 0) or 0)
+    running = int(row.get("running", 0) or 0)
+    return {
+        "configured": configured,
+        "running": running,
+        "offline_error": max(0, configured - running),
+    }
