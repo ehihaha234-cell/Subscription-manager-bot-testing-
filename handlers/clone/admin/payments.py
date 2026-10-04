@@ -266,6 +266,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     amount=p.get('amount'), duration_text=p.get('duration_text')
                 )
             expiry = manual_fulfillment.get('expiry_date')
+            await record_payment_subscription_snapshot(
+                owner, pid,
+                (manual_fulfillment.get('subscription') or {}).get('start_date') or now,
+                expiry,
+            )
             referral = await mark_referral_rewarded(owner, p['user_id'], payment_id=pid)
             if referral:
                 settings = await get_seller_settings(owner)
