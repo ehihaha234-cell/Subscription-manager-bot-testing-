@@ -83,7 +83,7 @@ from database.seller_data import (
     mark_referral_rewarded, finalize_referral_reward,
     release_referral_reward, get_user_by_username, set_user_ban,
     remove_subscription, remove_plan_group_subscriptions, remove_plan_group_subscription, get_user_plan_group_subscriptions,
-    add_payment_notification_messages, get_payment_notification_messages,
+    add_payment_notification_messages, get_payment_notification_messages, record_payment_subscription_snapshot,
 )
 
 logger=logging.getLogger(__name__)
