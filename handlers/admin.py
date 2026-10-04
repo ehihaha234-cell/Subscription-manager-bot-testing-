@@ -658,6 +658,16 @@ async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kind = query.data.removeprefix("admin_stats_")
         await _render_ranking(query, kind)
 
+    elif query.data == "admin_stats_payments":
+        await _render_payment_history(query, 0)
+
+    elif query.data.startswith("admin_stats_payments_page_"):
+        try:
+            page = max(0, int(query.data.rsplit("_", 1)[-1]))
+        except (TypeError, ValueError):
+            page = 0
+        await _render_payment_history(query, page)
+
     elif query.data in {
         "admin_stats_lifetime_refresh",
         "admin_stats_today_refresh",
@@ -968,10 +978,106 @@ async def _render_main_statistics(query, *, force=False):
         [InlineKeyboardButton("🏆 Lifetime Seller Ranking", callback_data="admin_stats_lifetime")],
         [InlineKeyboardButton("📅 Today Seller Ranking", callback_data="admin_stats_today")],
         [InlineKeyboardButton("👥 Top 10 Clone Bot Highest User", callback_data="admin_stats_users")],
+        [InlineKeyboardButton("💳 Payment History", callback_data="admin_stats_payments")],
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_stats_refresh")],
         [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
     ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def _render_payment_history(query, page=0):
+    """Render all clone-bot approved payments, ten records per page."""
+    from database.seller_data import get_owner_payment_history_page
+    rows, total = await get_owner_payment_history_page(page, 10)
+    total_pages = max(1, (int(total) + 9) // 10)
+    page = min(max(0, int(page)), total_pages - 1)
+
+    # The page can become empty if a payment is removed between count and read.
+    if not rows and page != 0:
+        rows, total = await get_owner_payment_history_page(page - 1, 10)
+        page = max(0, page - 1)
+        total_pages = max(1, (int(total) + 9) // 10)
+
+    if not rows:
+        text = "💳 <b>Payment History</b>\n\n📭 No payment history found."
+    else:
+        db = get_database()
+        scope_ids = []
+        for p in rows:
+            try:
+                scope_ids.append(int(p.get("owner_id")))
+            except (TypeError, ValueError):
+                pass
+        scope_ids = list(dict.fromkeys(scope_ids))
+        bot_rows = await db["seller_bots"].find(
+            {"data_owner_id": {"$in": scope_ids}},
+            {"data_owner_id": 1, "owner_id": 1, "bot_name": 1, "bot_username": 1, "bot_id": 1},
+        ).to_list(length=None) if scope_ids else []
+        bot_by_scope = {int(b.get("data_owner_id")): b for b in bot_rows if b.get("data_owner_id") is not None}
+        seller_ids = list(dict.fromkeys(int(b.get("owner_id")) for b in bot_rows if b.get("owner_id") is not None))
+        seller_rows = await db["sellers"].find(
+            {"owner_id": {"$in": seller_ids}},
+            {"owner_id": 1, "first_name": 1, "username": 1},
+        ).to_list(length=None) if seller_ids else []
+        seller_by_id = {int(x.get("owner_id")): x for x in seller_rows if x.get("owner_id") is not None}
+
+        def dt(value):
+            if not value:
+                return "-"
+            if getattr(value, "tzinfo", None) is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(IST).strftime("%d %b %Y, %I:%M %p IST")
+
+        blocks = []
+        start_no = page * 10
+        for idx, p in enumerate(rows, start=1):
+            scope = int(p.get("owner_id") or 0)
+            bot = bot_by_scope.get(scope, {})
+            seller_id = int(bot.get("owner_id") or scope or 0)
+            seller = seller_by_id.get(seller_id, {})
+            user_id = int(p.get("user_id") or 0)
+            user = await get_user(user_id) or {}
+            full_name = str(user.get("first_name") or user.get("name") or p.get("user_name") or "Unknown")
+            username = str(user.get("username") or p.get("username") or "").lstrip("@")
+            bot_name = str(bot.get("bot_name") or "Unknown Clone Bot")
+            bot_username = str(bot.get("bot_username") or "").lstrip("@")
+            seller_name = str(seller.get("first_name") or seller.get("username") or "Unknown Seller")
+            seller_username = str(seller.get("username") or "").lstrip("@")
+            join_date = p.get("join_date")
+            expiry = p.get("expiry_date")
+            created = p.get("created_at") or p.get("updated_at")
+            if join_date is None:
+                join_date = created
+            if expiry is None and created is not None:
+                try:
+                    expiry = created + __import__("datetime").timedelta(minutes=int(p.get("duration_minutes") or 0))
+                except Exception:
+                    expiry = None
+            amount = float(p.get("amount") or 0)
+            stars = int(p.get("stars_amount") or 0)
+            amount_text = f"₹{amount:g}" if amount > 0 else (f"⭐{stars} Stars" if stars > 0 else "₹0")
+            blocks.append(
+                f"<b>{start_no + idx}.</b>\n"
+                f"💰 Plan Amount: {escape(amount_text)}\n"
+                f"📅 Date &amp; Time: {dt(created)}\n"
+                f"👤 User: {escape(full_name)} ({user_id})" + (f" (@{escape(username)})" if username else "") + "\n"
+                f"🤖 Clone Bot: {escape(bot_name)}" + (f" (@{escape(bot_username)})" if bot_username else "") + "\n"
+                f"👨‍💼 Seller: {escape(seller_name)}" + (f" (@{escape(seller_username)})" if seller_username else "") + "\n"
+                f"📅 Join Date: {dt(join_date)}\n"
+                f"⌛ Expiry Date: {dt(expiry)}\n"
+                f"⏳ Duration: {escape(str(p.get('duration_text') or '-'))}"
+            )
+        text = f"💳 <b>Payment History</b> — {page + 1}/{total_pages}\n\n" + "\n\n".join(blocks)
+
+    buttons = []
+    if page > 0 and page < total_pages - 1:
+        buttons.append([InlineKeyboardButton("👈 Prev", callback_data=f"admin_stats_payments_page_{page-1}"), InlineKeyboardButton("Next 👉", callback_data=f"admin_stats_payments_page_{page+1}")])
+    elif page > 0:
+        buttons.append([InlineKeyboardButton("👈 Prev", callback_data=f"admin_stats_payments_page_{page-1}")])
+    elif page < total_pages - 1:
+        buttons.append([InlineKeyboardButton("Next 👉", callback_data=f"admin_stats_payments_page_{page+1}")])
+    buttons.append([InlineKeyboardButton("⬅ Back", callback_data="admin_stats")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 
 async def _render_ranking(query, kind, *, force=False):
