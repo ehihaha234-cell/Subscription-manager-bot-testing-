@@ -87,11 +87,115 @@ async def unsuspend_seller(owner_id: int):
 
 
 async def get_all_sellers():
-    return await sellers_collection().find().to_list(length=None)
+    """Return the complete seller registry without losing legacy sellers.
+
+    Seller Management must not depend only on the current ``sellers`` rows.
+    A seller remains a seller after a clone bot is removed/expired, and older
+    databases can have a clone/trial record without a corresponding seller
+    document.  Reconcile the registry from all durable seller signals:
+    - existing seller documents
+    - every clone owner (including removed clone records)
+    - seller plan assignments (including free trials)
+    - seller subscription payment records
+
+    Main-bot users are deliberately NOT added here; they are searchable, but
+    only users with seller activity are shown/count as sellers.
+    """
+    collection = sellers_collection()
+    db = get_database()
+
+    existing = await collection.find().to_list(length=None)
+    by_id = {}
+    for seller in existing:
+        try:
+            sid = int(seller.get("owner_id"))
+        except (TypeError, ValueError):
+            continue
+        by_id[sid] = seller
+
+    candidate_ids = set(by_id)
+
+    # A clone remains historical seller evidence even after it is marked
+    # removed, so do not filter on active/status here.
+    bot_rows = await db["seller_bots"].find(
+        {}, {"owner_id": 1, "seller_account_id": 1, "seller_id": 1}
+    ).to_list(length=None)
+    for row in bot_rows:
+        for key in ("owner_id", "seller_account_id", "seller_id"):
+            try:
+                value = int(row.get(key))
+            except (TypeError, ValueError):
+                value = 0
+            if value:
+                candidate_ids.add(value)
+
+    # A trial or paid seller plan is also durable seller evidence.
+    assignment_rows = await db["seller_plan_assignments"].find(
+        {}, {"owner_id": 1}
+    ).to_list(length=None)
+    for row in assignment_rows:
+        try:
+            value = int(row.get("owner_id"))
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            candidate_ids.add(value)
+
+    payment_rows = await db["seller_subscription_payments"].find(
+        {}, {"seller_id": 1}
+    ).to_list(length=None)
+    for row in payment_rows:
+        try:
+            value = int(row.get("seller_id"))
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            candidate_ids.add(value)
+
+    missing_ids = [sid for sid in candidate_ids if sid not in by_id]
+    if missing_ids:
+        profiles = await db["users"].find(
+            {"user_id": {"$in": missing_ids}},
+            {"user_id": 1, "first_name": 1, "last_name": 1, "username": 1,
+             "created_at": 1, "joined_at": 1, "updated_at": 1},
+        ).to_list(length=None)
+        profile_by_id = {}
+        for profile in profiles:
+            try:
+                profile_by_id[int(profile.get("user_id"))] = profile
+            except (TypeError, ValueError):
+                pass
+
+        now = datetime.now(timezone.utc)
+        for sid in missing_ids:
+            profile = profile_by_id.get(sid, {})
+            document = {
+                "owner_id": sid,
+                "first_name": profile.get("first_name") or profile.get("name") or "Unknown",
+                "username": profile.get("username") or profile.get("telegram_username"),
+                "active": True,
+                "approved": True,
+                "suspended": False,
+                "plan": None,
+                "expiry_date": None,
+                "created_at": profile.get("created_at") or profile.get("joined_at") or now,
+                "updated_at": profile.get("updated_at") or now,
+            }
+            await collection.update_one(
+                {"owner_id": sid},
+                {"$setOnInsert": document},
+                upsert=True,
+            )
+            by_id[sid] = await collection.find_one({"owner_id": sid}) or document
+
+    return list(by_id.values())
 
 
 async def total_sellers():
-    return await sellers_collection().count_documents({})
+    # Keep the dashboard count in sync with the same reconciled registry used
+    # by Seller List, so a legacy/missing seller record cannot make the count
+    # smaller than the actual seller population.
+    return len(await get_all_sellers())
 
 async def find_seller_by_identifier(identifier):
     """Find a seller by Telegram ID or username across all seller-related data.
@@ -269,7 +373,9 @@ async def find_seller_by_identifier(identifier):
         if numeric_id is not None:
             profile = await db["users"].find_one({"user_id": numeric_id})
             if profile:
-                return await _repair_missing_seller(numeric_id, profile)
+                # Search must include every Main Bot user, but searching alone
+                # must not turn an ordinary user into a Seller List entry.
+                return {**profile, "owner_id": int(numeric_id)}
 
     if username and not any(ch.isspace() for ch in username):
         user = await db["users"].find_one({"username": at_exact})
@@ -280,6 +386,8 @@ async def find_seller_by_identifier(identifier):
             except (TypeError, ValueError):
                 user_id = None
             if user_id is not None:
-                return await _repair_missing_seller(user_id, user)
+                # Search-only result: keep the Main Bot profile intact without
+                # creating a persistent seller record for an ordinary user.
+                return {**user, "owner_id": int(user_id)}
 
     return None
