@@ -434,7 +434,25 @@ async def _owner_access_link_for_channel(bot_record: dict, channel: dict) -> str
 async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = None):
     seller = await get_seller(owner_id)
     if not seller:
-        return None, None
+        # Seller Search intentionally includes every Main Bot user.  Such a
+        # user may have no clone bot and no seller registry row yet, so build a
+        # read-only seller profile from the Main Bot users collection instead of
+        # returning "Seller not found".
+        profile = await users_collection().find_one({"user_id": int(owner_id)})
+        if not profile:
+            return None, None
+        seller = {
+            "owner_id": int(owner_id),
+            "first_name": profile.get("first_name") or profile.get("name") or "Unknown",
+            "username": profile.get("username") or profile.get("telegram_username"),
+            "active": False,
+            "approved": False,
+            "suspended": False,
+            "plan": None,
+            "expiry_date": None,
+            "created_at": profile.get("created_at") or profile.get("joined_at"),
+            "updated_at": profile.get("updated_at") or profile.get("created_at") or profile.get("joined_at"),
+        }
 
     bots = await get_management_bots(owner_id)
     if selected_bot_id is not None:
