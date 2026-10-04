@@ -1065,6 +1065,12 @@ async def fulfill_transaction(tx: dict) -> None:
                 plan.get("duration_text"),
             )
         expiry = subscription_result.get("expiry_date")
+        from database.seller_data import record_payment_subscription_snapshot
+        await record_payment_subscription_snapshot(
+            seller_id, tx["transaction_id"],
+            (subscription_result.get("subscription") or {}).get("start_date") or datetime.now(timezone.utc),
+            expiry,
+        )
 
         invoice = await create_invoice(seller_id, tx["payer_user_id"], payment, "Seller")
         await audit("child_gateway_payment_paid", tx["payer_user_id"], seller_id, {"transaction_id": tx["transaction_id"], "gateway": tx["gateway"], "invoice_no": invoice.get("invoice_no")})
