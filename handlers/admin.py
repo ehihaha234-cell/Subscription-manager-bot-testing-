@@ -1036,9 +1036,24 @@ async def _render_payment_history(query, page=0):
             seller_id = int(bot.get("owner_id") or scope or 0)
             seller = seller_by_id.get(seller_id, {})
             user_id = int(p.get("user_id") or 0)
-            user = await get_user(user_id) or {}
-            full_name = str(user.get("first_name") or user.get("name") or p.get("user_name") or "Unknown")
-            username = str(user.get("username") or p.get("username") or "").lstrip("@")
+            # Clone subscribers are stored in the seller_data user collection under
+            # the clone bot owner_id scope. Looking them up in the main-bot users
+            # collection can return nothing, which caused "Unknown" and missing
+            # usernames in Owner Payment History.
+            user = await get_seller_user(scope, user_id) or {}
+            full_name = str(
+                user.get("first_name")
+                or user.get("name")
+                or user.get("full_name")
+                or p.get("user_name")
+                or "Unknown"
+            )
+            username = str(
+                user.get("username")
+                or user.get("telegram_username")
+                or p.get("username")
+                or ""
+            ).lstrip("@")
             bot_name = str(bot.get("bot_name") or "Unknown Clone Bot")
             bot_username = str(bot.get("bot_username") or "").lstrip("@")
             seller_name = str(seller.get("first_name") or seller.get("username") or "Unknown Seller")
