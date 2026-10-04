@@ -52,7 +52,7 @@ class ClonePaymentDeliveryMixin:
                 if previous_expiry and previous_expiry.tzinfo is None:
                     previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
                 was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
-            await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference)
+            await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference, stars_amount=payment.total_amount)
             if group_id:
                 result = await fulfill_plan_group_subscription(
                     owner, user_id, f'stars:{reference}', group_id,
@@ -65,6 +65,11 @@ class ClonePaymentDeliveryMixin:
                     plan['duration_minutes'], amount=0,
                     duration_text=plan['duration_text'],
                 )
+            await record_payment_subscription_snapshot(
+                owner, reference,
+                (result.get('subscription') or {}).get('start_date') or now,
+                result.get('expiry_date'),
+            )
             details = {
                 'plan_name': plan['name'],
                 'amount': 0,
