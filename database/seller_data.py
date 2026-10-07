@@ -1932,7 +1932,8 @@ async def stats(owner_id):
     (
         total_users,
         active_users_today,
-        active_subscribers,
+        normal_active_subscriber_ids,
+        plan_group_active_subscriber_ids,
         plans,
         channels,
         pending,
@@ -1941,13 +1942,25 @@ async def stats(owner_id):
     ) = await asyncio.gather(
         c(USERS).count_documents({"owner_id": owner_id}),
         c(USERS).count_documents(active_today_query),
-        c(SUBS).count_documents(active_subscription_query),
+        c(SUBS).distinct("user_id", active_subscription_query),
+        c(PLAN_GROUP_SUBS).distinct("user_id", active_subscription_query),
         c(PLANS).count_documents({"owner_id": owner_id}),
         c(CHANNELS).count_documents({"owner_id": owner_id, "active": True}),
         c(PAYMENTS).count_documents({"owner_id": owner_id, "status": "pending"}),
         c(PAYMENTS).aggregate(total_revenue_pipeline).to_list(length=1),
         c(PAYMENTS).aggregate(today_revenue_pipeline).to_list(length=1),
     )
+
+    # Active subscribers can live in either the normal subscription collection
+    # or the separate Plan Group subscription collection.  Count unique users
+    # so a user subscribed to multiple plans/groups consumes only one slot.
+    active_subscriber_ids = set()
+    for value in [*(normal_active_subscriber_ids or []), *(plan_group_active_subscriber_ids or [])]:
+        try:
+            active_subscriber_ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    active_subscribers = len(active_subscriber_ids)
 
     total_revenue = float(total_revenue_rows[0].get("total", 0) or 0) if total_revenue_rows else 0.0
     today_revenue = float(today_revenue_rows[0].get("total", 0) or 0) if today_revenue_rows else 0.0
