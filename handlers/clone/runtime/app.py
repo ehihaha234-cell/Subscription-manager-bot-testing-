@@ -328,10 +328,15 @@ class CloneRuntimeAppMixin:
 
         seller_account_id = self.seller_account(context)
         plan_cfg, _ = await effective_plan(seller_account_id)
-        active_now = await active_subscriptions(owner)
-        already_active = any(int(x.get("user_id")) == user_id for x in active_now)
+        # The seller subscriber limit is seller-account scoped. Count both
+        # normal and Plan Group subscriptions across all clone-data scopes.
+        # A user already active anywhere under this seller does not consume a
+        # second subscriber slot when their subscription is extended.
+        active_subscriber_ids = await seller_active_subscriber_ids(seller_account_id)
+        already_active = user_id in active_subscriber_ids
+        seller_active_count = len(active_subscriber_ids)
         sub_limit = int(plan_cfg.get("active_subscriber_limit", 25))
-        if not already_active and sub_limit >= 0 and len(active_now) >= sub_limit:
+        if not already_active and sub_limit >= 0 and seller_active_count >= sub_limit:
             await message.reply_text(await plan_limit_warning(seller_account_id))
             raise ApplicationHandlerStop
 
