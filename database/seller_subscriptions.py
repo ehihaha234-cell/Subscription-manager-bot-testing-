@@ -13,7 +13,7 @@ DEFAULT_FREE = {
     "price": 0.0,
     "duration_days": 0,
     "bot_limit": 1,
-    "active_subscriber_limit": 25,
+    "active_subscriber_limit": 30,
     "channel_limit": 1,
     "plan_limit": 2,
     "admin_limit": 1,
@@ -277,19 +277,82 @@ async def plan_limit_warning(owner_id: int):
     )
 
 
+async def seller_active_subscriber_ids(owner_id: int):
+    """Return unique active subscriber IDs across every clone-data scope.
+
+    Seller limits are seller-account scoped, while subscriber documents are
+    stored under each clone bot's ``data_owner_id``.  Plan Group subscriptions
+    are stored separately from normal subscriptions, so both collections must
+    be included.  A user subscribed to multiple groups/bots is counted once.
+    """
+    owner_id = int(owner_id)
+    now = datetime.now(timezone.utc)
+
+    from database.mongo import get_database
+    from database.seller_bots import get_bots
+
+    bot_records = await get_bots(owner_id)
+    scopes = {owner_id}
+    for record in bot_records or []:
+        try:
+            scope = record.get("data_owner_id")
+            if scope is None:
+                scope = record.get("owner_id")
+            if scope is not None:
+                scopes.add(int(scope))
+        except (TypeError, ValueError):
+            continue
+
+    db = get_database()
+    scope_list = sorted(scopes)
+
+    normal_ids, group_ids = await asyncio.gather(
+        db["seller_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": {"$in": scope_list},
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
+        db["seller_plan_group_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": {"$in": scope_list},
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
+    )
+
+    user_ids = set()
+    for value in [*(normal_ids or []), *(group_ids or [])]:
+        try:
+            user_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if user_id:
+            user_ids.add(user_id)
+    return user_ids
+
+
+async def seller_active_subscriber_count(owner_id: int) -> int:
+    return len(await seller_active_subscriber_ids(owner_id))
+
+
 async def seller_usage(owner_id: int):
     from database.seller_bots import count_owner_bots
-    from database.seller_data import active_subscriptions, get_channels, get_plans
+    from database.seller_data import get_channels, get_plans
 
-    bot_count, subscriptions, channels, plans = await asyncio.gather(
+    bot_count, active_subscriber_count, channels, plans = await asyncio.gather(
         count_owner_bots(owner_id),
-        active_subscriptions(owner_id),
+        seller_active_subscriber_count(owner_id),
         get_channels(owner_id),
         get_plans(owner_id),
     )
     return {
         "bot_count": bot_count,
-        "active_subscriber_count": len(subscriptions),
+        "active_subscriber_count": active_subscriber_count,
         "channel_count": len(channels),
         "plan_count": len(plans),
     }
