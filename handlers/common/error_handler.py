@@ -15,17 +15,20 @@ logger = logging.getLogger(__name__)
 USER_ERROR_MESSAGE = (
     "⚠️ A temporary problem occurred. Please try again in a few seconds."
 )
+CALLBACK_ERROR_MESSAGE = "⚠️ Something went wrong. Please try again."
 
 
 def _update_context(update: object) -> dict[str, Any]:
     if not isinstance(update, Update):
         return {}
 
+    query = update.callback_query
     return {
         "update_id": update.update_id,
         "user_id": getattr(update.effective_user, "id", None),
         "chat_id": getattr(update.effective_chat, "id", None),
-        "callback": getattr(update.callback_query, "data", None),
+        "callback": getattr(query, "data", None),
+        "message_id": getattr(getattr(query, "message", None), "message_id", None),
     }
 
 
@@ -49,7 +52,9 @@ async def report_exception(
         mask_sensitive(error_text),
     )
 
-    message = mask_sensitive(f"source={source} context={context} error={error}")[:1800]
+    message = mask_sensitive(
+        f"source={source} context={context} error={error}"
+    )[:1800]
     try:
         await asyncio.wait_for(
             create_log(log_type="error", message=message),
@@ -58,20 +63,49 @@ async def report_exception(
     except asyncio.CancelledError:
         raise
     except Exception:
-        logger.warning("Could not persist error log to MongoDB.", exc_info=True)
+        logger.warning(
+            "Could not persist error log to MongoDB.",
+            exc_info=True,
+        )
 
 
 async def notify_update_error(update: object) -> None:
-    """Send one safe generic response when the update supports replies."""
-    if not isinstance(update, Update) or not update.effective_message:
+    """Notify the user without creating duplicate chat messages for callbacks."""
+    if not isinstance(update, Update):
+        return
+
+    query = update.callback_query
+    if query is not None:
+        # Callback failures should be shown as an alert, not as a new chat
+        # message. This prevents the repeated generic messages seen after
+        # button clicks and keeps the original menu intact.
+        try:
+            await asyncio.wait_for(
+                query.answer(CALLBACK_ERROR_MESSAGE, show_alert=True),
+                timeout=5,
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug(
+                "Could not send callback error alert.",
+                exc_info=True,
+            )
+
+    message = update.effective_message
+    if message is None:
         return
 
     try:
         await asyncio.wait_for(
-            update.effective_message.reply_text(USER_ERROR_MESSAGE),
+            message.reply_text(USER_ERROR_MESSAGE),
             timeout=8,
         )
     except asyncio.CancelledError:
         raise
     except Exception:
-        logger.debug("Could not send user-facing error message.", exc_info=True)
+        logger.debug(
+            "Could not send user-facing error message.",
+            exc_info=True,
+        )

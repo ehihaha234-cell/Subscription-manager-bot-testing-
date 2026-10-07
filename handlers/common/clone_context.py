@@ -16,6 +16,7 @@ from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandl
 from database.seller_subscriptions import (
     effective_plan, plan_limit_warning, current_plan_text, get_config,
     seller_access_state, usage_warning, bot_runtime_allowed,
+    seller_active_subscriber_count, seller_active_subscriber_ids,
 )
 from database.payment_gateways import (
     SUPPORTED_GATEWAYS, create_gateway_transaction, get_gateway_config,
