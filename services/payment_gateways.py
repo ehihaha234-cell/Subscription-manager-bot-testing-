@@ -41,7 +41,7 @@ from database.payment_gateways import (
     claim_active_razorpay_qr_transaction_for_cancel,
 )
 from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan, get_plans, create_automatic_payment, get_subscription
-from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase
+from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase, seller_subscriber_limit_status
 from database.seller_bots import get_decrypted_bot_token, get_bots
 from database.platform_features import create_invoice, audit
 
@@ -1021,6 +1021,29 @@ async def fulfill_transaction(tx: dict) -> None:
         plan = await get_plan(seller_id, tx["metadata"]["plan_id"])
         if not plan:
             raise GatewayError("Child subscription plan no longer exists")
+        seller_account_id = int((tx.get('metadata') or {}).get('seller_account_id') or seller_id)
+        scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
+        limit_status = await seller_subscriber_limit_status(seller_account_id, int(tx["payer_user_id"]), scope_owner_id=scope_owner_id)
+        if limit_status.get("at_limit") and not limit_status.get("already_active"):
+            await mark_transaction_failed(tx["transaction_id"], "seller subscriber limit reached")
+            try:
+                from services.bot_manager import bot_manager
+                notice = await bot_manager.notify_subscriber_limit(
+                    seller_id,
+                    int(tx["payer_user_id"]),
+                    plan.get("name", "Subscription"),
+                    tx.get("amount", 0),
+                )
+                await audit(
+                    "child_gateway_subscriber_limit",
+                    tx["payer_user_id"],
+                    seller_id,
+                    {"transaction_id": tx["transaction_id"], **notice},
+                )
+            except Exception as exc:
+                logger.exception("Subscriber-limit notification failed transaction=%s", tx["transaction_id"])
+            return
+
         payment = await create_automatic_payment(
             seller_id, tx["payer_user_id"], plan, tx["gateway"],
             tx["transaction_id"], tx.get("gateway_payment_id", ""),
