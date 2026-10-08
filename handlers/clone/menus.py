@@ -12,44 +12,14 @@ class CloneMenusMixin:
         ])
 
     @staticmethod
-    def admin_menu(role="seller"):
-        """Render the correct panel for seller/admin/moderator.
-
-        Seller: full panel including Staff Management.
-        Admin: full seller panel except Staff Management.
-        Moderator: exactly the four requested rows.
-        """
-        role = str(role or "seller").lower()
-
-        if role == "moderator":
-            return InlineKeyboardMarkup([
-                [InlineKeyboardButton("👤 Seller Profile", callback_data="a_seller_profile")],
-                [
-                    InlineKeyboardButton("📨 Pending Payments", callback_data="a_pending"),
-                    InlineKeyboardButton("📜 Payment History", callback_data="a_history"),
-                ],
-                [InlineKeyboardButton("👥 User Management", callback_data="a_users")],
-                [InlineKeyboardButton("📜 Terms & Policy", callback_data="a_terms")],
-            ])
-
-        rows = [
-            [InlineKeyboardButton("👤 Seller Profile", callback_data="a_seller_profile")],
+    def admin_menu():
+        """Compact clone-bot seller panel. Existing callbacks are preserved."""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("👤 Profile", callback_data="a_seller_profile")],
             [InlineKeyboardButton("📦 Manage Plans", callback_data="a_plans"), InlineKeyboardButton("💳 Payment Settings", callback_data="a_payment")],
             [InlineKeyboardButton("📨 Pending Payments", callback_data="a_pending"), InlineKeyboardButton("📜 Payment History", callback_data="a_history")],
             [InlineKeyboardButton("📢 Channels / Groups", callback_data="a_channels"), InlineKeyboardButton("⚙️ Bot Settings", callback_data="a_settings")],
-        ]
-
-        if role == "seller":
-            rows.append([
-                InlineKeyboardButton("👥 User Management", callback_data="a_users"),
-                InlineKeyboardButton("👮 Staff Management", callback_data="a_staff"),
-            ])
-        else:
-            rows.append([
-                InlineKeyboardButton("👥 User Management", callback_data="a_users"),
-            ])
-
-        rows.extend([
+            [InlineKeyboardButton("👥 User Management", callback_data="a_users"), InlineKeyboardButton("👮 Staff Management", callback_data="a_staff")],
             [InlineKeyboardButton("📣 Broadcast", callback_data="a_broadcast")],
             [InlineKeyboardButton("🛡 Group Manager", callback_data="gm_home"), InlineKeyboardButton("🔒 Content Protection", callback_data="cp_home")],
             [InlineKeyboardButton("💬 Live Support", callback_data="a_live_support"), InlineKeyboardButton("💼 Business Automation", callback_data="ba_home")],
@@ -58,7 +28,6 @@ class CloneMenusMixin:
             [InlineKeyboardButton("📜 Terms & Policy", callback_data="a_terms")],
             [InlineKeyboardButton("🆘 Help & Commands", callback_data="a_help")],
         ])
-        return InlineKeyboardMarkup(rows)
 
     async def admin_panel_text(self, owner_id:int, seller_user=None):
         """Build the final live summary shown above the clone-bot admin buttons."""
@@ -152,7 +121,7 @@ class CloneMenusMixin:
 
     @staticmethod
     def plans_admin_menu():
-        return InlineKeyboardMarkup([[InlineKeyboardButton("➕ Create New Plan",callback_data="a_plan_add")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
+        return InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add Plan",callback_data="a_plan_add")],[InlineKeyboardButton("📋 View Plans",callback_data="a_plan_list")],[InlineKeyboardButton("⬅ Back",callback_data="a_home")]])
 
     @staticmethod
     def channels_menu():
