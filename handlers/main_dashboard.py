@@ -34,7 +34,7 @@ from database.sellers import (
 from database.users import total_users, users_collection
 from services.bot_manager import bot_manager
 from services.clone_backup import create_clone_backup
-from database.seller_subscriptions import effective_plan, seller_usage, seller_active_subscriber_count
+from database.seller_subscriptions import effective_plan, seller_usage, seller_active_subscriber_count, clone_active_subscriber_count
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from database.mongo import get_database
@@ -483,21 +483,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     for index, bot in enumerate(bots, 1):
         scope = int(bot.get("data_owner_id") or owner_id)
         users = await db["seller_users"].count_documents({"owner_id": scope})
-        normal_active_ids, group_active_ids = await asyncio.gather(
-            db["seller_subscriptions"].distinct(
-                "user_id", {"owner_id": scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-            db["seller_plan_group_subscriptions"].distinct(
-                "user_id", {"owner_id": scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-        )
-        active_ids = set()
-        for value in [*(normal_active_ids or []), *(group_active_ids or [])]:
-            try:
-                active_ids.add(int(value))
-            except (TypeError, ValueError):
-                continue
-        active = len(active_ids)
+        active = await clone_active_subscriber_count(scope)
         channels = await db["seller_channels"].count_documents({"owner_id": scope, "active": True})
         plans = await db["seller_plans"].count_documents({"owner_id": scope, "active": {"$ne": False}})
         pending = await db["seller_payments"].count_documents({"owner_id": scope, "status": "pending"})
@@ -557,24 +543,8 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         )
 
     if selected_bot_id is not None and bots:
-        # Selected clone profile: Clone Bots is seller-wide, while every other
-        # usage/stat count below belongs only to this selected clone scope.
         selected_scope = int(bots[0].get("data_owner_id") or owner_id)
-        selected_normal, selected_group = await asyncio.gather(
-            db["seller_subscriptions"].distinct(
-                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-            db["seller_plan_group_subscriptions"].distinct(
-                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-        )
-        active_ids = set()
-        for value in [*(selected_normal or []), *(selected_group or [])]:
-            try:
-                active_ids.add(int(value))
-            except (TypeError, ValueError):
-                continue
-        active_count = len(active_ids)
+        active_count = await clone_active_subscriber_count(selected_scope)
         total_users_count = await db["seller_users"].count_documents({"owner_id": selected_scope})
         channel_count = await db["seller_channels"].count_documents({"owner_id": selected_scope, "active": True})
         plan_count = await db["seller_plans"].count_documents({"owner_id": selected_scope, "active": {"$ne": False}})
@@ -1134,24 +1104,8 @@ async def _owner_clone_backup_form(record):
     )
 
     if selected_bot_id is not None and bots:
-        # Selected clone profile: Clone Bots is seller-wide, while every other
-        # usage/stat count below belongs only to this selected clone scope.
         selected_scope = int(bots[0].get("data_owner_id") or owner_id)
-        selected_normal, selected_group = await asyncio.gather(
-            db["seller_subscriptions"].distinct(
-                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-            db["seller_plan_group_subscriptions"].distinct(
-                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
-            ),
-        )
-        active_ids = set()
-        for value in [*(selected_normal or []), *(selected_group or [])]:
-            try:
-                active_ids.add(int(value))
-            except (TypeError, ValueError):
-                continue
-        active_count = len(active_ids)
+        active_count = await clone_active_subscriber_count(selected_scope)
         total_users_count = await db["seller_users"].count_documents({"owner_id": selected_scope})
         channel_count = await db["seller_channels"].count_documents({"owner_id": selected_scope, "active": True})
         plan_count = await db["seller_plans"].count_documents({"owner_id": selected_scope, "active": {"$ne": False}})
