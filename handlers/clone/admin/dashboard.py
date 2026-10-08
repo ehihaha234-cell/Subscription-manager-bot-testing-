@@ -1,23 +1,33 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
+from database.seller_bots import count_owner_bots
+from database.seller_subscriptions import clone_active_subscriber_count
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_home':
         context.user_data.clear()
-        await q.edit_message_text(
-            await self.admin_panel_text(owner, q.from_user),
-            reply_markup=self.admin_menu(role),
-            parse_mode='HTML',
-        )
+        await q.edit_message_text(await self.admin_panel_text(owner, q.from_user), reply_markup=self.admin_menu(), parse_mode='HTML')
         return True
     if a == 'a_seller_profile':
         timezone_name = await self.seller_timezone(owner)
         seller_account_id = self.seller_account(context)
         plan, assignment = await effective_plan(seller_account_id)
-        usage = await stats(owner)
-        bot_record = await get_bot_by_data_owner_id(owner) or {}
+        # IMPORTANT: this profile is opened inside one specific clone bot.
+        # `owner` is that clone's persistent data scope.  Only Clone Bots is
+        # seller-account scoped; subscriber/channel/plan usage must never be
+        # aggregated across the seller's other clone bots.
+        clone_scope_id = int(owner)
+        usage = await stats(clone_scope_id)
+        clone_bot_count = await count_owner_bots(seller_account_id)
+        usage['active'] = await clone_active_subscriber_count(clone_scope_id)
+        usage['channels'] = await get_database()["seller_channels"].count_documents(
+            {"owner_id": clone_scope_id, "active": True}
+        )
+        usage['plans'] = await get_database()["seller_plans"].count_documents(
+            {"owner_id": clone_scope_id}
+        )
         expiry = (assignment or {}).get('expiry_date')
         if expiry and getattr(expiry, 'tzinfo', None) is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
@@ -40,12 +50,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
             except Exception:
                 return str(value)
         username_text = f'@{q.from_user.username}' if q.from_user.username else 'Not set'
-        text = f"👤 Seller Profile\n\n🆔 Seller ID: {seller_account_id}\n👤 Name: {q.from_user.full_name or 'Unknown'}\n📝 Username: {username_text}"
+        text = f"👤 Profile\n\n🆔 Seller ID: {seller_account_id}\n👤 Name: {q.from_user.full_name or 'Unknown'}\n📝 Username: {username_text}"
         referral_data = await seller_referral_stats(seller_account_id)
         main_bot_username = os.getenv('MAIN_BOT_USERNAME', 'Subscripti0n_Manage_bot').lstrip('@')
         referral_link = f'https://t.me/{main_bot_username}?start=refseller_{seller_account_id}'
 
-        text += f"\n\n💎 Plan Details\nPlan: {plan.get('name', 'Free')}\nStatus: {status}\nExpiry: {self.format_dt(expiry, timezone_name)}\nRemaining: {remaining_text}\n\n📊 Usage & Limits\n🤖 Clone Bots: {(1 if bot_record else 0)} / {lim(plan.get('bot_limit', 1))}\n👥 Active Subscribers: {usage.get('active', 0)} / {lim(plan.get('active_subscriber_limit', 25))}\n📢 Channels / Groups: {usage.get('channels', 0)} / {lim(plan.get('channel_limit', 1))}\n📦 Subscription Plans: {usage.get('plans', 0)} / {lim(plan.get('plan_limit', 2))}\n\n👥 Total Users: {usage.get('users', 0)}\n💳 Pending Payments: {usage.get('pending', 0)}\n💰 Revenue: {format_currency((await get_seller_settings(owner)).get('currency'), usage.get('revenue', 0))}"
+        text += f"\n\n💎 Plan Details\nPlan: {plan.get('name', 'Free')}\nStatus: {status}\nExpiry: {self.format_dt(expiry, timezone_name)}\nRemaining: {remaining_text}\n\n📊 Usage & Limits\n🤖 Clone Bots: {clone_bot_count} / {lim(plan.get('bot_limit', 1))}\n👥 Active Subscribers: {usage.get('active', 0)} / {lim(plan.get('active_subscriber_limit', 25))}\n📢 Channels / Groups: {usage.get('channels', 0)} / {lim(plan.get('channel_limit', 1))}\n📦 Subscription Plans: {usage.get('plans', 0)} / {lim(plan.get('plan_limit', 2))}\n\n👥 Total Users: {usage.get('users', 0)}\n💳 Pending Payments: {usage.get('pending', 0)}\n💰 Revenue: {format_currency((await get_seller_settings(owner)).get('currency'), usage.get('revenue', 0))}"
         text += (
             f"\n\n🤝 Seller Referral Program"
             f"\n\n👥 Sellers Joined: {referral_data.get('total', 0)}"
@@ -55,16 +65,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
             f"\n\nThe owner controls reward days and reward plan from "
             f"Owner Dashboard → Subscription Management."
         )
-        if role == "moderator":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton('⬅ Moderator Panel', callback_data='a_home')],
-            ])
-        else:
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton('💎 Buy / Change Plan', url=f'https://t.me/{main_bot_username}?start=sellerplan')],
-                [InlineKeyboardButton('📤 Share Referral Link', url=f'https://t.me/share/url?url={referral_link}')],
-                [InlineKeyboardButton('⬅ Seller Admin Panel', callback_data='a_home')],
-            ])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('💎 Buy / Change Plan', url=f'https://t.me/{main_bot_username}?start=sellerplan')],
+            [InlineKeyboardButton('📤 Share Referral Link', url=f'https://t.me/share/url?url={referral_link}')],
+            [InlineKeyboardButton('⬅ Seller Admin Panel', callback_data='a_home')],
+        ])
         await q.edit_message_text(text, reply_markup=kb, disable_web_page_preview=True)
         return True
     if a == 'a_seller_plan_history':

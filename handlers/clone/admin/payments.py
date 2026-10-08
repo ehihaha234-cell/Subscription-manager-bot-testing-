@@ -224,14 +224,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
             return True
         try:
             seller_account_id = self.seller_account(context)
-            plan_cfg, _ = await effective_plan(seller_account_id)
-            active_now = await active_subscriptions(owner)
-            already_active = any((int(x.get('user_id')) == int(p['user_id']) for x in active_now))
-            sub_limit = int(plan_cfg.get('active_subscriber_limit', 25))
-            if not already_active and sub_limit >= 0 and (len(active_now) >= sub_limit):
+            limit_status = await seller_subscriber_limit_status(seller_account_id, int(p['user_id']), scope_owner_id=owner)
+            if limit_status.get('at_limit') and not limit_status.get('already_active'):
                 await release_processing_payment(owner, pid, 'seller subscriber limit reached')
-                await q.answer('Seller plan limit reached', show_alert=True)
-                await context.bot.send_message(seller_account_id, await plan_limit_warning(seller_account_id), reply_markup=self.limit_keyboard('a_pending'))
+                await q.answer('Subscriber limit reached', show_alert=True)
+                await self.notify_subscriber_limit(
+                    seller_account_id,
+                    int(p['user_id']),
+                    p.get('plan') or 'Subscription',
+                    p.get('amount'),
+                )
                 return True
             group_id = str(p.get('group_id') or '').strip()
             target_ids = set()
