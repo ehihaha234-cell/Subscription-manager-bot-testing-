@@ -336,6 +336,73 @@ async def seller_active_subscriber_ids(owner_id: int):
     return user_ids
 
 
+async def clone_active_subscriber_ids(owner_id: int):
+    """Return active subscriber IDs for exactly one clone data scope.
+
+    Unlike seller_active_subscriber_ids(), this function never expands the
+    scope to the seller's other clone bots. It is intended for clone-specific
+    profile/usage displays and future per-clone limit checks.
+    """
+    owner_id = int(owner_id)
+    now = datetime.now(timezone.utc)
+    db = get_database()
+
+    normal_ids, group_ids = await asyncio.gather(
+        db["seller_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": owner_id,
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
+        db["seller_plan_group_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": owner_id,
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
+    )
+
+    user_ids = set()
+    for value in [*(normal_ids or []), *(group_ids or [])]:
+        try:
+            user_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if user_id:
+            user_ids.add(user_id)
+    return user_ids
+
+
+async def clone_active_subscriber_count(owner_id: int) -> int:
+    """Return active subscribers belonging only to one clone data scope."""
+    return len(await clone_active_subscriber_ids(owner_id))
+
+
+async def seller_subscriber_limit_status(owner_id: int, user_id: int) -> dict:
+    """Return seller-wide active subscriber usage for one prospective user.
+
+    Both normal and Plan Group subscriptions are included through
+    ``seller_active_subscriber_ids``. A user already active anywhere under
+    the seller does not consume another slot when purchasing/extending a plan.
+    """
+    owner_id = int(owner_id)
+    user_id = int(user_id)
+    plan, _ = await effective_plan(owner_id)
+    active_ids = await seller_active_subscriber_ids(owner_id)
+    limit = int(plan.get("active_subscriber_limit", 25))
+    return {
+        "count": len(active_ids),
+        "limit": limit,
+        "already_active": user_id in active_ids,
+        "at_limit": limit >= 0 and len(active_ids) >= limit,
+        "plan_name": str(plan.get("name") or "Free").strip(),
+    }
+
+
 async def seller_active_subscriber_count(owner_id: int) -> int:
     return len(await seller_active_subscriber_ids(owner_id))
 

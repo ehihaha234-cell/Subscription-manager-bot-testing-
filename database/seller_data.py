@@ -1929,11 +1929,16 @@ async def stats(owner_id):
         }}}}},
     ]
 
+    # Use the same seller-level active-subscriber source used by Seller Search /
+    # Seller Profile so every dashboard surface shows exactly the same number.
+    # This includes normal subscriptions + Plan Group subscriptions across the
+    # seller's clone bots, de-duplicated by Telegram user ID and excluding expired records.
+    from database.seller_subscriptions import seller_active_subscriber_count
+
     (
         total_users,
         active_users_today,
-        normal_active_subscriber_ids,
-        plan_group_active_subscriber_ids,
+        active_subscribers,
         plans,
         channels,
         pending,
@@ -1942,25 +1947,13 @@ async def stats(owner_id):
     ) = await asyncio.gather(
         c(USERS).count_documents({"owner_id": owner_id}),
         c(USERS).count_documents(active_today_query),
-        c(SUBS).distinct("user_id", active_subscription_query),
-        c(PLAN_GROUP_SUBS).distinct("user_id", active_subscription_query),
+        seller_active_subscriber_count(owner_id),
         c(PLANS).count_documents({"owner_id": owner_id}),
         c(CHANNELS).count_documents({"owner_id": owner_id, "active": True}),
         c(PAYMENTS).count_documents({"owner_id": owner_id, "status": "pending"}),
         c(PAYMENTS).aggregate(total_revenue_pipeline).to_list(length=1),
         c(PAYMENTS).aggregate(today_revenue_pipeline).to_list(length=1),
     )
-
-    # Active subscribers can live in either the normal subscription collection
-    # or the separate Plan Group subscription collection.  Count unique users
-    # so a user subscribed to multiple plans/groups consumes only one slot.
-    active_subscriber_ids = set()
-    for value in [*(normal_active_subscriber_ids or []), *(plan_group_active_subscriber_ids or [])]:
-        try:
-            active_subscriber_ids.add(int(value))
-        except (TypeError, ValueError):
-            continue
-    active_subscribers = len(active_subscriber_ids)
 
     total_revenue = float(total_revenue_rows[0].get("total", 0) or 0) if total_revenue_rows else 0.0
     today_revenue = float(today_revenue_rows[0].get("total", 0) or 0) if today_revenue_rows else 0.0
