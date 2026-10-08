@@ -113,6 +113,16 @@ async def handle(self, update, context, q, owner, action):
         stars_enabled = bool(gateway_cfg.get('stars_enabled', False))
         rows = []
         text = ''
+        seller_account_id = self.seller_account(context)
+        limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
+        if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'))
+            await self.safe_query_message(
+                q,
+                '⚠️ Subscriber is limited\\n\\nThis seller has reached the maximum active subscriber limit. Please try again later.',
+                back_keyboard,
+            )
+            return True
         if enabled:
             gateway = enabled[0]
             tx = await create_gateway_transaction(
@@ -124,8 +134,8 @@ async def handle(self, update, context, q, owner, action):
                     'plan_name': plan['name'],
                     'description': f"{plan['name']} subscription",
                     'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
-                'group_id': str(plan.get('group_id') or ''),
-                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
+                    'data_owner_id': int(owner),
+                    'seller_account_id': int(self.seller_account(context)),
                     'group_id': str(plan.get('group_id') or ''),
                     'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
                 },
@@ -255,6 +265,16 @@ async def handle(self, update, context, q, owner, action):
         if not plan:
             await q.answer('Plan not found', show_alert=True)
             return True
+        seller_account_id = self.seller_account(context)
+        limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
+        if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'))
+            await self.safe_query_message(
+                q,
+                '⚠️ Subscriber is limited\\n\\nThis seller has reached the maximum active subscriber limit. Please try again later.',
+                back_keyboard,
+            )
+            return True
         s = await get_seller_settings(owner)
         currency = normalize_currency(s.get('currency')) or 'INR'
         if currency != 'INR':
@@ -275,6 +295,8 @@ async def handle(self, update, context, q, owner, action):
                 'plan_id': plan_id, 'plan_name': plan['name'],
                 'description': f"{plan['name']} subscription",
                 'bot_id': int(context.application.bot_data.get('seller_bot_id') or 0),
+                'data_owner_id': int(owner),
+                'seller_account_id': int(self.seller_account(context)),
                 'group_id': str(plan.get('group_id') or ''),
                 'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
             },
