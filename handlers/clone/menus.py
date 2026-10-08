@@ -11,7 +11,7 @@ class CloneMenusMixin:
             [InlineKeyboardButton("🎁 Referral",callback_data="c_referral"),InlineKeyboardButton("📞 Support",callback_data="c_support")],
         ])
 
-    def admin_menu(self):
+    def admin_menu(self, role=None):
         """Compact clone-bot seller panel. Existing callbacks are preserved."""
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("👤 Profile", callback_data="a_seller_profile")],
