@@ -1488,7 +1488,7 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "When a new seller joins through your link, your seller-plan reward is added automatically.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?url={link}")],
-                [InlineKeyboardButton("⬅ Seller Profile", callback_data="main_seller_profile")],
+                [InlineKeyboardButton("⬅ Profile", callback_data="main_seller_profile")],
             ]),
             disable_web_page_preview=True,
         )
