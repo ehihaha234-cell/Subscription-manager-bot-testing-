@@ -5,6 +5,58 @@ from database.business_delivery import list_business_contact_routes, log_busines
 
 
 class ClonePaymentDeliveryMixin:
+    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount) -> dict:
+        """Tell the buyer and seller that the seller's subscriber limit is full."""
+        owner_id = int(owner_id)
+        user_id = int(user_id)
+        running = self.get_running(owner_id)
+        if not running:
+            record = await get_bot_by_data_owner_id(owner_id)
+            started = await self.start_bot(int(record["bot_id"])) if record else False
+            running = self.get_running(owner_id) if started else None
+        if not running:
+            return {"sent": 0, "error": "Clone bot is not running"}
+
+        seller_account_id = int(running.application.bot_data.get("seller_account_id", owner_id))
+        status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner_id)
+        count = int(status.get("count", 0))
+        limit = int(status.get("limit", 0))
+        pct = 100 if limit == 0 else int((count / limit) * 100) if limit > 0 else 0
+        pct = min(100, max(0, pct))
+        plan_name = html.escape(str(plan_name or "Subscription"))
+        amount_text = str(amount if amount is not None else "-")
+        main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
+        buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Buy / Change Plan", url=buy_url),
+             InlineKeyboardButton("👤 Profile", callback_data="a_seller_profile")]
+        ])
+        seller_text = (
+            f"🚨 New user is trying to purchase your plan\n\n"
+            f"📦 Plan: {plan_name}\n"
+            f"💰 Price: {amount_text}\n\n"
+            f"⚠️ Warning: Your subscribers are at {count} / {limit} ({pct}%)\n"
+            f"Please renew your seller plan."
+        )
+        buyer_text = (
+            "⚠️ Subscriber is limited\n\n"
+            "This seller has reached the maximum active subscriber limit. "
+            "Please try again later."
+        )
+        bot = running.application.bot
+        sent = 0
+        try:
+            await bot.send_message(user_id, buyer_text)
+            sent += 1
+        except Exception:
+            logger.debug("Could not notify limited subscriber user=%s", user_id, exc_info=True)
+        try:
+            await bot.send_message(seller_account_id, seller_text, reply_markup=keyboard)
+            sent += 1
+        except Exception:
+            logger.exception("Could not notify seller subscriber limit owner=%s", seller_account_id)
+        return {"sent": sent, "count": count, "limit": limit}
+
     async def stars_precheckout(self, update, context):
         query = update.pre_checkout_query
         try:
@@ -18,6 +70,12 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not cfg.get('stars_enabled') or not plan or expected <= 0 or query.currency != 'XTR' or query.total_amount != expected:
                 raise ValueError('plan changed')
+            seller_account_id = int(context.application.bot_data.get("seller_account_id") or owner)
+            limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
+            if limit_status.get('at_limit') and not limit_status.get('already_active'):
+                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected)
+                await query.answer(ok=False, error_message='Subscriber is limited. Please try again later.')
+                return
             await query.answer(ok=True)
         except Exception:
             await query.answer(ok=False, error_message='This Stars invoice is no longer valid. Reopen the payment page.')
@@ -52,6 +110,12 @@ class ClonePaymentDeliveryMixin:
                 if previous_expiry and previous_expiry.tzinfo is None:
                     previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
                 was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
+            seller_account_id = self.seller_account(context)
+            limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
+            if limit_status.get('at_limit') and not limit_status.get('already_active'):
+                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected)
+                await update.effective_message.reply_text('⚠️ Subscriber limit reached. Payment was received but this subscription could not be activated. Please contact the seller.')
+                return
             await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference, stars_amount=payment.total_amount)
             if group_id:
                 result = await fulfill_plan_group_subscription(
