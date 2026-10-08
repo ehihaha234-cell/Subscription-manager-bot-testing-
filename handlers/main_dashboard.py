@@ -454,7 +454,8 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             "updated_at": profile.get("updated_at") or profile.get("created_at") or profile.get("joined_at"),
         }
 
-    bots = await get_management_bots(owner_id)
+    all_management_bots = await get_management_bots(owner_id)
+    bots = list(all_management_bots)
     if selected_bot_id is not None:
         bots = [b for b in bots if int(b.get("bot_id") or 0) == int(selected_bot_id)]
         if not bots:
@@ -469,10 +470,12 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
 
     total_users_count = channel_count = plan_count = 0
     pending_count = success_count = 0
-    # Use the same seller-wide active-subscriber logic as Seller Profile/limits.
-    # This includes normal subscriptions + Plan Group subscriptions and
-    # de-duplicates users across clone bots/groups.
-    active_count = await seller_active_subscriber_count(owner_id)
+    # Seller-level profile shows seller-wide figures only when no specific
+    # clone is selected.  When Owner opens Manage Clone Bot -> Profile, all
+    # clone-specific usage must come strictly from that selected bot scope.
+    active_count = 0
+    if selected_bot_id is None:
+        active_count = await seller_active_subscriber_count(owner_id)
     today_revenue = total_revenue_value = 0.0
     bot_lines = []
     running_count = paused_count = 0
@@ -553,6 +556,29 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             + ("\n".join(channel_lines) if channel_lines else "   None")
         )
 
+    if selected_bot_id is not None and bots:
+        selected_scope = int(bots[0].get("data_owner_id") or owner_id)
+        selected_normal, selected_group = await asyncio.gather(
+            db["seller_subscriptions"].distinct(
+                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
+            ),
+            db["seller_plan_group_subscriptions"].distinct(
+                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
+            ),
+        )
+        active_ids = set()
+        for value in [*(selected_normal or []), *(selected_group or [])]:
+            try:
+                active_ids.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        active_count = len(active_ids)
+        total_users_count = await db["seller_users"].count_documents({"owner_id": selected_scope})
+        channel_count = await db["seller_channels"].count_documents({"owner_id": selected_scope, "active": True})
+        plan_count = await db["seller_plans"].count_documents({"owner_id": selected_scope, "active": {"$ne": False}})
+        pending_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "pending"})
+        success_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "approved"})
+
     expiry = (assignment or {}).get("expiry_date")
     if expiry and expiry.tzinfo is None: expiry = expiry.replace(tzinfo=timezone.utc)
     activated = (assignment or {}).get("created_at")
@@ -616,7 +642,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         f"💳 Last Payment Method: {escape(payment_method)}\n"
         f"🧾 Last Transaction ID: <code>{escape(transaction_id)}</code>\n\n"
         "📊 Usage & Limitations — All Clone Bots\n"
-        f"🤖 Clone Bots: {len(bots)} / {limit_value('bot_limit',1)}\n"
+        f"🤖 Clone Bots: {len(all_management_bots)} / {limit_value('bot_limit',1)}\n"
         f"👥 Active Subscribers: {active_count} / {limit_value('active_subscriber_limit',25)}\n"
         f"📢 Channels / Groups: {channel_count} / {limit_value('channel_limit',1)}\n"
         f"📦 Subscription Plans: {plan_count} / {limit_value('plan_limit',2)}\n"
@@ -1104,6 +1130,29 @@ async def _owner_clone_backup_form(record):
         f'<a href="tg://user?id={seller_id}">{escape(seller_name)}</a>'
         if seller_id else escape(seller_name)
     )
+
+    if selected_bot_id is not None and bots:
+        selected_scope = int(bots[0].get("data_owner_id") or owner_id)
+        selected_normal, selected_group = await asyncio.gather(
+            db["seller_subscriptions"].distinct(
+                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
+            ),
+            db["seller_plan_group_subscriptions"].distinct(
+                "user_id", {"owner_id": selected_scope, "active": True, "expiry_date": {"$gt": now}}
+            ),
+        )
+        active_ids = set()
+        for value in [*(selected_normal or []), *(selected_group or [])]:
+            try:
+                active_ids.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        active_count = len(active_ids)
+        total_users_count = await db["seller_users"].count_documents({"owner_id": selected_scope})
+        channel_count = await db["seller_channels"].count_documents({"owner_id": selected_scope, "active": True})
+        plan_count = await db["seller_plans"].count_documents({"owner_id": selected_scope, "active": {"$ne": False}})
+        pending_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "pending"})
+        success_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "approved"})
 
     expiry = (assignment or {}).get("expiry_date")
     plan_status = "Active"
