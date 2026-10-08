@@ -12,7 +12,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
         return True
     if a == 'a_seller_profile':
         timezone_name = await self.seller_timezone(owner)
-        seller_account_id = self.seller_account(context)
+        # `owner` is the clone data-scope ID, not necessarily the seller's Telegram ID.
+        # Resolve the real seller account from the clone record so Clone Bots shows
+        # the seller's total connected clones while the other usage values stay
+        # strictly scoped to this selected clone.
+        bot_record = await get_bot_by_data_owner_id(int(owner)) or {}
+        seller_account_id = int(
+            bot_record.get("seller_account_id")
+            or bot_record.get("owner_id")
+            or self.seller_account(context)
+        )
         plan, assignment = await effective_plan(seller_account_id)
         # IMPORTANT: this profile is opened inside one specific clone bot.
         # `owner` is that clone's persistent data scope.  Only Clone Bots is
