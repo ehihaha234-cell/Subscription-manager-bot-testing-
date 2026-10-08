@@ -1,12 +1,10 @@
 import asyncio
 import logging
-import io
-import time
 from html import escape
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile, LabeledPrice
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import InvalidToken, TelegramError
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from uuid import uuid4
@@ -34,10 +32,9 @@ from database.seller_bots import (
 from database.seller_subscriptions import (
     create_plan_request,
     current_plan_text,
-    get_paid_plan,
     effective_plan,
     seller_usage,
-    seller_active_subscriber_count,
+    clone_active_subscriber_count,
     get_config,
     plan_limit_warning,
     start_trial,
@@ -46,7 +43,6 @@ from database.seller_subscriptions import (
     pending_plan_purchase,
 )
 from services.bot_manager import bot_manager
-from services.business_automation_runtime import business_automation_runtime
 from services.invite_resend_lock import resend_invites_safely
 from database.subscription_guard import get_active_invite, save_invite
 from database.seller_data import (
@@ -66,7 +62,6 @@ from database.users import get_user as get_platform_user
 from database.payment_gateways import SUPPORTED_GATEWAYS, get_gateway_config, create_gateway_transaction
 from services.payment_gateways import create_checkout, GatewayError
 from utils.crypto import encrypt_secret, decrypt_secret
-from services.clone_backup import create_clone_backup, parse_clone_backup, restore_clone_backup
 
 
 logger = logging.getLogger(__name__)
@@ -124,33 +119,13 @@ async def send_seller_upgrade_plan(message, owner_id: int) -> None:
     cfg = await get_config()
     plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
     rows = []
-    lines = [
-        "💎 Buy / Change Seller Plan",
-        "",
-        "📊 Plan Limitations",
-        "• Clone Bots: seller-level limit",
-        "• Active Subscribers, Channels/Groups, Subscription Plans and Admins are per clone bot.",
-        "",
-    ]
+    lines = ["💎 Buy / Change Seller Plan", ""]
     current, _ = await effective_plan(owner_id)
     for plan in plans:
-        plan_name = plan.get('name', 'Plan')
-        price = plan.get('price', 0)
-        duration_days = plan.get('duration_days', 30)
         lines.append(
-            f"• {plan_name} — ₹{price:g} / {duration_days} days"
+            f"• {plan.get('name', 'Plan')} — ₹{plan.get('price', 0):g} / "
+            f"{plan.get('duration_days', 30)} days"
         )
-        lines.append(f"  🤖 Clone Bots: {_display_plan_limit(plan.get('bot_limit'))}")
-        lines.append(f"  👥 Active Subscribers: {_display_plan_limit(plan.get('active_subscriber_limit'))} / bot")
-        lines.append(f"  📢 Channels / Groups: {_display_plan_limit(plan.get('channel_limit'))} / bot")
-        lines.append(f"  📦 Subscription Plans: {_display_plan_limit(plan.get('plan_limit'))} / bot")
-        lines.append(f"  👨‍💼 Admins: {_display_plan_limit(plan.get('admin_limit'))} / bot")
-        if not bool(plan.get("branding_enabled", True)):
-            lines.append("  REMOVED BRAND TAG")
-        # Keep a clearly visible blank gap between every seller plan.
-        lines.append("")
-        lines.append("")
-        lines.append("")
         request_type = (
             "upgrade"
             if float(plan.get("price", 0)) >= float(current.get("price", 0))
@@ -344,8 +319,6 @@ def business_automation_keyboard(connected_count:int, enabled:bool):
     rows=[
         [InlineKeyboardButton("🔗 Connect Telegram Account", callback_data="seller_business_connect")],
         [InlineKeyboardButton(f"📱 Connected Accounts ({connected_count})", callback_data="seller_business_accounts")],
-        [InlineKeyboardButton("📢 Broadcast / Send Invite Link", callback_data="seller_business_broadcast")],
-        [InlineKeyboardButton("🔗 Resend Invite Links to Active Subscribers", callback_data="seller_business_resend_active")],
         [InlineKeyboardButton("👋 Welcome Message", callback_data="seller_business_welcome")],
         [InlineKeyboardButton("💬 Auto Reply & Reply Templates", callback_data="seller_business_replies")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="seller_business_settings")],
@@ -532,13 +505,9 @@ async def business_automation_text(owner_id:int):
     settings=await get_seller_settings(owner_id)
     connected=await count_business_accounts(owner_id)
     enabled=bool(settings.get("business_automation_enabled"))
-    accounts=await get_business_accounts(owner_id)
-    runtime_connected=sum(1 for item in accounts if business_automation_runtime.is_account_connected(owner_id, int(item.get("account_user_id") or 0)))
-    account_status = "🟢 Connected" if runtime_connected else "🔴 Not Connected"
     return (
         "💼 Business Automation\n\n"
         f"Status: {'🟢 Enabled' if enabled else '🔴 Disabled'}\n"
-        f"MTProto Account: {account_status}\n"
         f"Connected Accounts: {connected}\n\n"
         "All connected Telegram accounts use one shared configuration:\n"
         "• Same welcome message and media\n"
@@ -609,7 +578,7 @@ def selected_bot_markup(record):
         if username else InlineKeyboardButton("🛠 Open Admin Panel", callback_data=f"seller_open_admin_{bot_id}")
     )
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Seller Profile", callback_data=f"seller_selected_profile_{bot_id}")],
+        [InlineKeyboardButton("👤 Profile", callback_data=f"seller_selected_profile_{bot_id}")],
         [open_admin],
         [
             InlineKeyboardButton("⏸ Pause Bot" if active else "▶️ Resume Bot", callback_data=f"seller_{'pause' if active else 'resume'}_{bot_id}"),
@@ -618,7 +587,6 @@ def selected_bot_markup(record):
         [InlineKeyboardButton("🗑 Remove Bot", callback_data=f"seller_remove_{bot_id}")],
         [InlineKeyboardButton("📊 Statistics", callback_data=f"seller_selected_stats_{bot_id}")],
         [InlineKeyboardButton("🤝 Seller Referral", callback_data=f"seller_selected_referral_{bot_id}")],
-        [InlineKeyboardButton("💾 Backup & Restore", callback_data=f"seller_selected_backup_{bot_id}")],
         [InlineKeyboardButton("📜 Terms & Policy", callback_data=f"seller_selected_terms_{bot_id}")],
         [InlineKeyboardButton("🆘 Help & Commands", callback_data=f"seller_selected_help_{bot_id}")],
         [InlineKeyboardButton("⬅ Clone Bot List", callback_data="seller_bots_list")],
@@ -693,12 +661,19 @@ async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str
     joined = _aware_utc((seller or {}).get("created_at"))
     joined_text = joined.strftime("%d-%m-%Y") if joined else "-"
 
+    # Clone Bots is seller-level. Everything else is strictly scoped to the
+    # selected clone bot's persistent data_owner_id. Never use seller_account_id
+    # for these three counts, otherwise another clone's data can leak into this
+    # profile.
     bots_used = await count_owner_bots(seller_account_id)
-    # Seller limits are shared across all clone bots and both subscription
-    # storage models (normal + Plan Groups). Count unique active users.
-    active_subscribers = await seller_active_subscriber_count(seller_account_id)
-    channels_used = await db["seller_channels"].count_documents({"owner_id": scope_id, "active": True})
-    plans_used = await db["seller_plans"].count_documents({"owner_id": scope_id})
+    clone_scope_id = int(scope_id)
+    active_subscribers = await clone_active_subscriber_count(clone_scope_id)
+    channels_used = await db["seller_channels"].count_documents(
+        {"owner_id": clone_scope_id, "active": True}
+    )
+    plans_used = await db["seller_plans"].count_documents(
+        {"owner_id": clone_scope_id}
+    )
     total_users = await db["seller_users"].count_documents({"owner_id": scope_id})
     pending = await db["seller_payments"].count_documents({"owner_id": scope_id, "status": "pending"})
 
@@ -729,7 +704,7 @@ async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str
     bot_status = "🟢 Active" if record.get("active") else "🟡 Paused"
 
     return (
-        "👤 Seller Profile\n\n"
+        "👤 Profile\n\n"
         f"🆔 Seller ID: {owner_id}\n"
         f"👤 Name: {name}\n"
         f"📛 Username: {username}\n"
@@ -910,267 +885,11 @@ async def _business_log_out_account(record: dict) -> None:
         await client.disconnect()
 
 
-
-def _backup_menu(bot_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 Backup", callback_data=f"seller_backup_create_{int(bot_id)}")],
-        [InlineKeyboardButton("♻️ Restore", callback_data=f"seller_backup_restore_{int(bot_id)}")],
-        [InlineKeyboardButton("⬅ Back", callback_data=f"seller_select_{int(bot_id)}")],
-    ])
-
-
-def _backup_help(bot_id: int) -> str:
-    return (
-        "💾 Backup & Restore\n\n"
-        "Backup and restore your clone bot data.\n\n"
-        "📦 Backup\n"
-        "Create a backup file of this clone bot.\n\n"
-        "♻️ Restore\n"
-        "Send a backup file from another clone bot to restore its data here.\n\n"
-        "💡 Example:\n\n"
-        "Bot A\n"
-        "↓\n"
-        "📦 Create Backup\n"
-        "↓\n"
-        "backup_BotA.json.gz\n"
-        "↓\n"
-        "Bot B\n"
-        "↓\n"
-        "♻️ Restore → Send backup file\n\n"
-        "After the file is received, choose /replace or /merge."
-    )
-
-
-async def _backup_restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw = context.user_data.get("seller_backup_raw")
-    bot_id = int(context.user_data.get("seller_backup_target_bot_id") or 0)
-    if not raw or not bot_id:
-        await update.effective_message.reply_text("❌ No backup restore is waiting for confirmation.")
-        return
-    command = (update.effective_message.text or "").split()[0].lower()
-    mode = "merge" if command == "/merge" else "replace" if command == "/replace" else None
-    if mode is None:
-        await update.effective_message.reply_text("Use /replace or /merge.")
-        return
-    owner_id = int(update.effective_user.id)
-    record = await get_bot_by_bot_id(bot_id)
-    if not record or int(record.get("owner_id", 0)) != owner_id:
-        context.user_data.pop("seller_backup_raw", None)
-        await update.effective_message.reply_text("❌ Clone bot not found.")
-        return
-    scope_id = int(record.get("data_owner_id") or owner_id)
-    context.user_data.pop("seller_backup_raw", None)
-    context.user_data.pop("seller_backup_target_bot_id", None)
-    context.user_data.pop("seller_backup_waiting_file", None)
-    progress_message = await update.effective_message.reply_text(
-        "♻️ <b>Restoring Backup</b>\n\n"
-        "[░░░░░░░░░░] 0%\n\n"
-        "Processed: 0 / 0\n"
-        f"Mode: {mode.upper()}\n"
-        "Current: Preparing restore…\n\n"
-        "Please wait…",
-        parse_mode="HTML",
-    )
-    progress_state = {"last_done": -1, "step": 1}
-
-    async def _restore_progress(done: int, total: int, current: str):
-        if total > 0:
-            progress_state["step"] = max(1, (total + 19) // 20)
-        step = progress_state["step"]
-        if done != total and done != 0 and done - progress_state["last_done"] < step:
-            return
-        if done == progress_state["last_done"] and done != total:
-            return
-        progress_state["last_done"] = done
-        percent = 100 if total <= 0 else min(100, int((done / total) * 100))
-        filled = min(10, int((percent + 5) // 10))
-        bar = "█" * filled + "░" * (10 - filled)
-        try:
-            await progress_message.edit_text(
-                "♻️ <b>Restoring Backup</b>\n\n"
-                f"[{bar}] {percent}%\n\n"
-                f"Processed: {done:,} / {total:,}\n"
-                f"Mode: {mode.upper()}\n"
-                f"Current: {escape(str(current))}\n\n"
-                "Please wait…",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-    try:
-        result = await restore_clone_backup(
-            raw, target_scope=scope_id, mode=mode, progress_callback=_restore_progress
-        )
-    except Exception as exc:
-        await progress_message.edit_text(f"❌ Restore failed: {escape(str(exc))}", parse_mode="HTML")
-        return
-    if mode == "merge":
-        text = (
-            "✅ Backup merged successfully.\n\n"
-            f"📥 Backup records: {result['records']:,}\n"
-            f"➕ Added: {result['inserted']:,}\n"
-            f"↔️ Already existed: {result['existing']:,}\n"
-            f"⚠️ Skipped: {result['skipped']:,}"
-        )
-    else:
-        text = (
-            "✅ Backup restored successfully.\n\n"
-            f"📥 Backup records: {result['records']:,}\n"
-            f"➕ Restored: {result['inserted']:,}\n"
-            f"🗑️ Replaced existing records: {result['replaced']:,}\n"
-            f"⚠️ Skipped: {result['skipped']:,}"
-        )
-    await progress_message.edit_text(text, reply_markup=selected_back(bot_id))
-
-
-async def _receive_clone_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("seller_backup_waiting_file"):
-        return
-    bot_id = int(context.user_data.get("seller_backup_target_bot_id") or 0)
-    owner_id = int(update.effective_user.id)
-    record = await get_bot_by_bot_id(bot_id)
-    if not record or int(record.get("owner_id", 0)) != owner_id:
-        context.user_data.clear()
-        await update.effective_message.reply_text("❌ Clone bot not found.")
-        return
-    document = update.effective_message.document
-    if not document:
-        return
-    name = (document.file_name or "").lower()
-    if not (name.endswith(".json.gz") or name.endswith(".gz") or name.endswith(".json")):
-        await update.effective_message.reply_text("❌ Please send a valid backup file (.json.gz).")
-        return
-    if document.file_size and document.file_size > 20 * 1024 * 1024:
-        await update.effective_message.reply_text("❌ Backup file is too large.")
-        return
-    tg_file = await document.get_file()
-    data = bytes(await tg_file.download_as_bytearray())
-    try:
-        _, manifest, source = parse_clone_backup(data)
-    except Exception as exc:
-        await update.effective_message.reply_text(f"❌ Invalid backup file: {exc}")
-        return
-    context.user_data["seller_backup_waiting_file"] = False
-    context.user_data["seller_backup_raw"] = data
-    source_name = str(source.get("bot_username") or source.get("bot_id") or "Unknown")
-    await update.effective_message.reply_text(
-        "♻️ Restore Backup\n\n"
-        "Backup file received successfully.\n\n"
-        f"Source Bot: @{source_name.lstrip('@')}\n"
-        f"Records: {int(manifest.get('records', 0)):,}\n\n"
-        "Choose how you want to restore this backup:\n\n"
-        "/replace — Replace current bot data with backup data.\n\n"
-        "/merge — Merge backup data with current bot data.\n\n"
-        "⚠️ Replace removes the current bot's existing data.\n"
-        "✅ Merge keeps current data and adds backup data."
-    )
-
-
 async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     owner_id = int(q.from_user.id)
     action = q.data
-
-    if action.startswith("seller_selected_backup_"):
-        bot_id = int(action.rsplit("_", 1)[1])
-        record = await get_bot_by_bot_id(bot_id)
-        if not record or int(record.get("owner_id", 0)) != owner_id:
-            await q.answer("Clone bot not found.", show_alert=True)
-            return
-        context.user_data["selected_clone_bot_id"] = bot_id
-        context.user_data["seller_backup_target_bot_id"] = bot_id
-        await q.edit_message_text(_backup_help(bot_id), reply_markup=_backup_menu(bot_id))
-        return
-
-    if action.startswith("seller_backup_create_"):
-        bot_id = int(action.rsplit("_", 1)[1])
-        record = await get_bot_by_bot_id(bot_id)
-        if not record or int(record.get("owner_id", 0)) != owner_id:
-            await q.answer("Clone bot not found.", show_alert=True)
-            return
-        scope_id = int(record.get("data_owner_id") or owner_id)
-        await q.answer("Backup started…", show_alert=False)
-        progress_message = await q.message.reply_text(
-            "📦 <b>Creating Clone Bot Backup</b>\n\n"
-            "[░░░░░░░░░░] 0%\n\n"
-            "Backed up: 0 / 0\n"
-            "Current: Preparing backup…\n\n"
-            "Please wait…",
-            parse_mode="HTML",
-        )
-        progress_state = {"last_done": -1, "step": 1}
-
-        async def _backup_progress(done: int, total: int, current: str):
-            if total > 0:
-                progress_state["step"] = max(1, (total + 19) // 20)
-            step = progress_state["step"]
-            if done != total and done != 0 and done - progress_state["last_done"] < step:
-                return
-            if done == progress_state["last_done"] and done != total:
-                return
-            progress_state["last_done"] = done
-            percent = 100 if total <= 0 else min(100, int((done / total) * 100))
-            filled = min(10, int((percent + 5) // 10))
-            bar = "█" * filled + "░" * (10 - filled)
-            try:
-                await progress_message.edit_text(
-                    "📦 <b>Creating Clone Bot Backup</b>\n\n"
-                    f"[{bar}] {percent}%\n\n"
-                    f"Backed up: {done:,} / {total:,}\n"
-                    f"Current: {escape(str(current))}\n\n"
-                    "Please wait…",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
-
-        try:
-            raw, manifest = await create_clone_backup(
-                owner_id=scope_id,
-                bot_id=bot_id,
-                bot_username=record.get("bot_username") or "",
-                progress_callback=_backup_progress,
-            )
-            filename = f"clone-backup-{str(record.get('bot_username') or bot_id).lstrip('@')}.json.gz"
-            await context.bot.send_document(
-                q.message.chat_id,
-                InputFile(io.BytesIO(raw), filename=filename),
-                caption=f"✅ Backup created successfully.\nRecords: {manifest['records']:,}\nSHA-256: {manifest['sha256'][:16]}…",
-            )
-            await progress_message.edit_text(
-                "✅ <b>Backup created successfully.</b>\n\n"
-                f"📦 Records: {manifest['records']:,}\n"
-                "The backup file has been sent above.",
-                parse_mode="HTML",
-                reply_markup=_backup_menu(bot_id),
-            )
-        except Exception as exc:
-            await progress_message.edit_text(
-                f"❌ Backup failed: {escape(str(exc))}",
-                parse_mode="HTML",
-                reply_markup=_backup_menu(bot_id),
-            )
-        return
-
-    if action.startswith("seller_backup_restore_"):
-        bot_id = int(action.rsplit("_", 1)[1])
-        record = await get_bot_by_bot_id(bot_id)
-        if not record or int(record.get("owner_id", 0)) != owner_id:
-            await q.answer("Clone bot not found.", show_alert=True)
-            return
-        context.user_data["selected_clone_bot_id"] = bot_id
-        context.user_data["seller_backup_target_bot_id"] = bot_id
-        context.user_data["seller_backup_waiting_file"] = True
-        context.user_data.pop("seller_backup_raw", None)
-        await q.edit_message_text(
-            "♻️ Restore Backup\n\n"
-            "Please send the backup file from another clone bot.\n\n"
-            "After the file is received, you will choose /replace or /merge.",
-            reply_markup=selected_back(bot_id),
-        )
-        return
 
     # Normalize legacy single-clone dashboard callbacks to the selected clone.
     # New multi-clone callbacks already carry the bot_id suffix.
@@ -1645,32 +1364,11 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg = await get_config()
         plans = [p for p in cfg.get("paid_plans", []) if p.get("active", True)]
         rows = []
-        lines = [
-            "💎 Buy / Change Seller Plan",
-            "",
-            "📊 Plan Limitations",
-            "• Clone Bots: seller-level limit",
-            "• Active Subscribers, Channels/Groups, Subscription Plans and Admins are per clone bot.",
-            "",
-        ]
+        lines = ["💎 Buy / Change Seller Plan", ""]
         current, _ = await effective_plan(owner_id)
         for p in plans:
-            plan_name = p.get('name', 'Plan')
-            price = p.get('price', 0)
-            duration_days = p.get('duration_days', 30)
-            lines.append(f"• {plan_name} — ₹{price:g} / {duration_days} days")
-            lines.append(f"  🤖 Clone Bots: {_display_plan_limit(p.get('bot_limit'))}")
-            lines.append(f"  👥 Active Subscribers: {_display_plan_limit(p.get('active_subscriber_limit'))} / bot")
-            lines.append(f"  📢 Channels / Groups: {_display_plan_limit(p.get('channel_limit'))} / bot")
-            lines.append(f"  📦 Subscription Plans: {_display_plan_limit(p.get('plan_limit'))} / bot")
-            lines.append(f"  👨‍💼 Admins: {_display_plan_limit(p.get('admin_limit'))} / bot")
-            if not bool(p.get("branding_enabled", True)):
-                lines.append("  REMOVED BRAND TAG")
-            # Always keep a clear blank gap between each seller plan.
-            lines.append("")
-            lines.append("")
-            lines.append("")
-            typ = "upgrade" if float(price) >= float(current.get("price", 0)) else "downgrade"
+            lines.append(f"• {p.get('name','Plan')} — ₹{p.get('price',0):g} / {p.get('duration_days',30)} days")
+            typ = "upgrade" if float(p.get("price", 0)) >= float(current.get("price", 0)) else "downgrade"
             rows.append([InlineKeyboardButton(f"Select {p.get('name')}", callback_data=f"seller_buy_{typ}_{p.get('plan_id')}")])
         if action == "seller_upgrade_plan_profile":
             back_target = "main_seller_profile"
@@ -1711,7 +1409,6 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gateway_cfg = await get_gateway_config("owner", 0, decrypt=True)
         gateways = gateway_cfg.get("gateways") or {}
         enabled_gateways = [g for g in SUPPORTED_GATEWAYS if bool((gateways.get(g) or {}).get("enabled"))]
-        stars_enabled = bool(gateway_cfg.get("stars_enabled", False))
         default_gateway = str(gateway_cfg.get("default_gateway") or "")
         if default_gateway in enabled_gateways:
             enabled_gateways.remove(default_gateway)
@@ -1720,22 +1417,6 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rows = []
         text = ""
-
-        # Telegram Stars is a native Telegram payment method, so it is handled
-        # separately from Razorpay/Cashfree and does not require INR gateway credentials.
-        stars_price = int(plan.get("stars_price", 0) or 0)
-        if stars_enabled and stars_price > 0:
-            rows.append([InlineKeyboardButton(
-                f"⭐ Pay {stars_price} Stars",
-                callback_data=f"seller_star_{plan_id}",
-            )])
-            text = (
-                f"⭐ Telegram Stars Payment\n\n"
-                f"Plan: {plan.get('name')}\n"
-                f"Stars: ⭐{stars_price}\n"
-                f"Duration: {int(plan.get('duration_days', 30) or 30)} days\n\n"
-                "Pay securely with Telegram Stars."
-            )
         if enabled_gateways:
             gateway = enabled_gateways[0]
             tx = await create_gateway_transaction(
@@ -1766,7 +1447,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"{text}\n\n{manual_text}" if text else f"💳 Payment\n\n{manual_text}"
             rows.append([InlineKeyboardButton("📤 Upload Payment Screenshot", callback_data=f"seller_manual_{request_type}_{plan_id}")])
 
-        if not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
+        if not enabled_gateways and not manual_enabled:
             text = "⚠️ No payment method is currently available. Please contact support."
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="seller_upgrade_plan")])
         kb = InlineKeyboardMarkup(rows)
@@ -1779,25 +1460,6 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(q.message.chat_id, cfg["payment_qr_file_id"], caption=text, reply_markup=kb)
         else:
             await q.edit_message_text(text, reply_markup=kb)
-        return
-
-    if action.startswith("seller_star_"):
-        plan_id = action.replace("seller_star_", "", 1)
-        plan = await get_paid_plan(plan_id)
-        gateway_cfg = await get_gateway_config("owner", 0, decrypt=True)
-        stars_price = int((plan or {}).get("stars_price", 0) or 0)
-        if not gateway_cfg.get("stars_enabled") or not plan or stars_price <= 0:
-            await q.answer("Telegram Stars is unavailable for this plan.", show_alert=True)
-            return
-        await context.bot.send_invoice(
-            chat_id=q.from_user.id,
-            title=f"{plan.get('name', 'Seller Plan')} Subscription",
-            description=f"{int(plan.get('duration_days', 30) or 30)} days seller subscription",
-            payload=f"stars:{q.from_user.id}:{q.from_user.id}:{plan_id}",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice(plan.get("name", "Seller Plan"), stars_price)],
-        )
         return
 
     if action.startswith("seller_manual_"):
@@ -1846,36 +1508,6 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"   Status: {item.get('connection_status','connected').title()}"
                 )
         await q.edit_message_text("\n\n".join(lines),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
-        return
-
-    if action in {"seller_business_broadcast", "seller_business_resend_active"}:
-        accounts=await get_business_accounts(owner_id)
-        if not accounts:
-            await q.answer("Connect a Telegram account first.", show_alert=True)
-            return
-        account=next((item for item in accounts if business_automation_runtime.is_account_connected(owner_id, int(item.get("account_user_id") or 0))), accounts[0])
-        account_id=int(account.get("account_user_id") or 0)
-        if action == "seller_business_broadcast":
-            result=await business_automation_runtime.broadcast_invite(owner_id, account_id)
-            title="📢 Broadcast / Send Invite Link"
-        else:
-            result=await business_automation_runtime.resend_invite_to_active_subscribers(owner_id, account_id)
-            title="🔗 Resend Invite Links to Active Subscribers"
-        if not result.get("ok"):
-            reason=str(result.get("reason") or "unknown")
-            message={
-                "not_connected":"The MTProto account is not connected.",
-                "bot_link_missing":"The new bot username/link is not configured.",
-                "runtime_error":"The operation could not be completed. Check the logs and try again.",
-            }.get(reason,"The operation could not be completed.")
-            await q.edit_message_text(f"{title}\n\n❌ {message}",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
-            return
-        username=str(account.get("username") or "Connected Account").lstrip("@")
-        lines=[title,"",f"Account: @{username}",f"Total: {int(result.get('total',0))}",f"Sent: {int(result.get('sent',0))}",f"Failed: {int(result.get('failed',0))}"]
-        if "skipped" in result:
-            lines.append(f"Skipped / Could Not Resolve: {int(result.get('skipped',0))}")
-        lines.extend(["","Telegram restrictions can prevent delivery to some users. Failed or unresolved users do not stop the operation."])
-        await q.edit_message_text("\n".join(lines),reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Run Again",callback_data=action)],[InlineKeyboardButton("⬅ Business Automation",callback_data="seller_business")]]))
         return
 
     if action == "seller_business_connect":
@@ -2938,10 +2570,7 @@ def _decision_result_text(purchase: dict) -> str:
 
 def seller_handlers():
     return [
-        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|star_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?|backup(?:_.*)?)$"),
-        CommandHandler("replace", _backup_restore_command),
-        CommandHandler("merge", _backup_restore_command),
-        MessageHandler(filters.Document.ALL, _receive_clone_backup),
+        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
         MessageHandler(filters.PHOTO | filters.VIDEO, receive_seller_qr),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_seller_token),
     ]

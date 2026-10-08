@@ -34,7 +34,7 @@ from database.sellers import (
 from database.users import total_users, users_collection
 from services.bot_manager import bot_manager
 from services.clone_backup import create_clone_backup
-from database.seller_subscriptions import effective_plan, seller_usage
+from database.seller_subscriptions import effective_plan, seller_usage, seller_active_subscriber_count
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from database.mongo import get_database
@@ -79,7 +79,7 @@ def seller_dashboard_keyboard(record=None):
     if record:
         active = bool(record.get("active"))
         rows.extend([
-            [InlineKeyboardButton("👤 Seller Profile", callback_data="main_seller_profile")],
+            [InlineKeyboardButton("👤 Profile", callback_data="main_seller_profile")],
             [InlineKeyboardButton("🤖 My Bot", callback_data="seller_my_bot")],
             [
                 InlineKeyboardButton(
@@ -95,7 +95,7 @@ def seller_dashboard_keyboard(record=None):
             [InlineKeyboardButton("📜 Plan History", callback_data="seller_plan_history")],
         ])
     else:
-        rows.append([InlineKeyboardButton("👤 Seller Profile", callback_data="main_seller_profile")])
+        rows.append([InlineKeyboardButton("👤 Profile", callback_data="main_seller_profile")])
         rows.append([
             InlineKeyboardButton("➕ Create / Connect Clone Bot", callback_data="seller_connect")
         ])
@@ -467,8 +467,12 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_utc = start_local.astimezone(timezone.utc)
 
-    total_users_count = active_count = channel_count = plan_count = 0
+    total_users_count = channel_count = plan_count = 0
     pending_count = success_count = 0
+    # Use the same seller-wide active-subscriber logic as Seller Profile/limits.
+    # This includes normal subscriptions + Plan Group subscriptions and
+    # de-duplicates users across clone bots/groups.
+    active_count = await seller_active_subscriber_count(owner_id)
     today_revenue = total_revenue_value = 0.0
     bot_lines = []
     running_count = paused_count = 0
@@ -476,9 +480,21 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     for index, bot in enumerate(bots, 1):
         scope = int(bot.get("data_owner_id") or owner_id)
         users = await db["seller_users"].count_documents({"owner_id": scope})
-        active = await db["seller_subscriptions"].count_documents({
-            "owner_id": scope, "active": True, "expiry_date": {"$gt": now}
-        })
+        normal_active_ids, group_active_ids = await asyncio.gather(
+            db["seller_subscriptions"].distinct(
+                "user_id", {"owner_id": scope, "active": True, "expiry_date": {"$gt": now}}
+            ),
+            db["seller_plan_group_subscriptions"].distinct(
+                "user_id", {"owner_id": scope, "active": True, "expiry_date": {"$gt": now}}
+            ),
+        )
+        active_ids = set()
+        for value in [*(normal_active_ids or []), *(group_active_ids or [])]:
+            try:
+                active_ids.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        active = len(active_ids)
         channels = await db["seller_channels"].count_documents({"owner_id": scope, "active": True})
         plans = await db["seller_plans"].count_documents({"owner_id": scope, "active": {"$ne": False}})
         pending = await db["seller_payments"].count_documents({"owner_id": scope, "status": "pending"})
@@ -497,7 +513,6 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         today = float(today_pipeline[0].get("total", 0)) if today_pipeline else 0.0
 
         total_users_count += users
-        active_count += active
         channel_count += channels
         plan_count += plans
         pending_count += pending
