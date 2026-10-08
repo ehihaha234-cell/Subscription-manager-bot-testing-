@@ -407,7 +407,7 @@ async def moderate_seller_message(
         return False
 
     seller_id = context.application.bot_data.get("seller_account_id")
-    deleted = await MessageModerationService(int(resolved_owner), int(seller_id) if seller_id is not None else None).moderate(update, context)
+    deleted = await MessageModerationService(int(resolved_owner)).moderate(update, context)
     if deleted:
         raise ApplicationHandlerStop
     return False
