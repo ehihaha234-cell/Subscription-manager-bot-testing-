@@ -2,22 +2,29 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import io
 import json
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from database.mongo import get_database
 
-FORMAT = "telegram-saas-clone-backup"
-VERSION = 1
-MAX_BYTES = 20 * 1024 * 1024
-MAX_DECOMPRESSED = 100 * 1024 * 1024
-MAX_RECORDS = 100_000
-EXCLUDED = {"seller_bots", "backup_restore_locks"}
+CLONE_BACKUP_FORMAT = "telegram-saas-clone-backup"
+CLONE_BACKUP_VERSION = 1
 
-# Collections used by clone data. We discover all collections containing the
-# clone's owner_id/data_owner_id so new seller features are included too.
+# Clone-owned collections use data_owner_id/owner_id as their scope. Keep the
+# seller_bots identity separately so a restore can identify the clone.
+CLONE_COLLECTIONS = (
+    "seller_settings",
+    "seller_users",
+    "seller_payments",
+    "seller_subscriptions",
+    "seller_plan_group_subscriptions",
+    "seller_plans",
+    "seller_channels",
+    "seller_staff",
+    "seller_invoices",
+)
+
 
 def _json_default(value: Any) -> Any:
     if isinstance(value, datetime):
@@ -27,254 +34,60 @@ def _json_default(value: Any) -> Any:
         from bson import ObjectId
         if isinstance(value, ObjectId):
             return {"$oid": str(value)}
-    except ImportError:
+    except Exception:
         pass
     raise TypeError(f"Unsupported backup value: {type(value).__name__}")
 
 
-def _object_hook(value: dict[str, Any]) -> Any:
-    if set(value) == {"$date"}:
-        try:
-            return datetime.fromisoformat(str(value["$date"]).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return value
-    if set(value) == {"$oid"}:
-        try:
-            from bson import ObjectId
-            return ObjectId(value["$oid"])
-        except Exception:
-            return value
-    return value
-
-
-def _canonical(value: Any) -> bytes:
-    return json.dumps(value, default=_json_default, ensure_ascii=False,
-                      sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def _transform(doc: dict[str, Any], source_scope: int, target_scope: int) -> dict[str, Any]:
-    out = dict(doc)
-    out.pop("_id", None)
-    if out.get("owner_id") == source_scope:
-        out["owner_id"] = target_scope
-    if out.get("data_owner_id") == source_scope:
-        out["data_owner_id"] = target_scope
-    # Clone-specific records occasionally retain a nested scope marker.
-    if out.get("data_scope_id") == source_scope:
-        out["data_scope_id"] = target_scope
-    return out
-
-
-def _identity_query(collection: str, doc: dict[str, Any]) -> dict[str, Any] | None:
-    fields = {
-        "seller_settings": ("owner_id",),
-        "seller_plans": ("owner_id", "plan_id"),
-        "seller_channels": ("owner_id", "chat_id"),
-        "seller_users": ("owner_id", "user_id"),
-        "seller_payments": ("owner_id", "payment_id"),
-        "seller_subscriptions": ("owner_id", "user_id"),
-        "seller_invoices": ("owner_id", "invoice_id"),
-        "seller_referrals": ("owner_id", "referred_user_id"),
-        "seller_business_accounts": ("owner_id", "account_user_id"),
-        "seller_business_contacts": ("owner_id", "account_user_id", "peer_user_id"),
-        "seller_staff": ("owner_id", "user_id"),
-        "seller_coupons": ("owner_id", "coupon_code"),
-        "seller_content_protection_settings": ("owner_id",),
-        "seller_deleting_message_settings": ("owner_id",),
-        "seller_forced_join_settings": ("owner_id",),
-    }
-    chosen = fields.get(collection)
-    if chosen and all(doc.get(k) is not None for k in chosen):
-        return {k: doc[k] for k in chosen}
-    if "owner_id" in doc:
-        # For auxiliary collections without a documented unique key, exact
-        # owner-scoped document matching is used by the merge path.
-        return {"owner_id": doc["owner_id"], **({"_backup_fingerprint": _fingerprint(doc)})}
-    return None
-
-
-def _fingerprint(doc: dict[str, Any]) -> str:
-    clean = {k: v for k, v in doc.items() if k not in {"_id", "created_at", "updated_at"}}
-    return hashlib.sha256(_canonical(clean)).hexdigest()
-
-
-async def create_clone_backup(*, owner_id: int, bot_id: int, bot_username: str = "", progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None) -> tuple[bytes, dict[str, Any]]:
+async def create_clone_backup(
+    owner_id: int,
+    bot_id: int,
+    bot_username: str = "",
+    progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None,
+):
     db = get_database()
     scope = int(owner_id)
     collections: dict[str, list[dict[str, Any]]] = {}
-    total = 0
-    names = sorted(n for n in await db.list_collection_names() if n not in EXCLUDED and not n.startswith("system."))
+    records = []
+    for name in CLONE_COLLECTIONS:
+        # All clone-owned collections in the current code use owner_id as the
+        # data scope. Do not copy another clone's documents.
+        docs = await db[name].find({"owner_id": scope}).to_list(length=None)
+        collections[name] = docs
+        records.extend((name, d) for d in docs)
 
-    # Count first so the UI can show an accurate processed/total meter.
-    counts: dict[str, int] = {}
-    expected_total = 0
-    for name in names:
-        count = await db[name].count_documents({"$or": [{"owner_id": scope}, {"data_owner_id": scope}]})
-        if count:
-            counts[name] = int(count)
-            expected_total += int(count)
-    if expected_total > MAX_RECORDS:
-        raise ValueError(f"Backup exceeds {MAX_RECORDS:,} records")
+    total = len(records) + 1
+    done = 0
     if progress_callback:
-        await progress_callback(0, expected_total, "Preparing backup…")
+        await progress_callback(done, total, "Preparing clone backup")
+    for name, _doc in records:
+        done += 1
+        if progress_callback:
+            await progress_callback(done, total, name)
 
-    for name in names:
-        if not counts.get(name):
-            continue
-        docs = []
-        cursor = db[name].find({"$or": [{"owner_id": scope}, {"data_owner_id": scope}]})
-        async for doc in cursor:
-            docs.append(doc)
-            total += 1
-            if progress_callback and (total == 1 or total % 5 == 0 or total == expected_total):
-                await progress_callback(total, expected_total, name)
-        if docs:
-            collections[name] = docs
+    bot_record = await db["seller_bots"].find_one({"bot_id": int(bot_id)}) or {}
     payload = {
-        "format": FORMAT,
-        "version": VERSION,
+        "format": CLONE_BACKUP_FORMAT,
+        "version": CLONE_BACKUP_VERSION,
         "created_at": datetime.now(timezone.utc),
-        "source": {"bot_id": int(bot_id), "bot_username": str(bot_username or ""), "scope_id": scope},
+        "clone": {
+            "bot_id": int(bot_id),
+            "bot_username": str(bot_username or ""),
+            "owner_id": scope,
+            "data_owner_id": scope,
+            "seller_account_id": int(bot_record.get("owner_id") or 0),
+        },
         "collections": collections,
     }
-    canonical = _canonical(payload)
-    manifest = {"format": FORMAT, "version": VERSION, "created_at": payload["created_at"],
-                "records": total, "sha256": hashlib.sha256(canonical).hexdigest()}
-    raw = _canonical({"manifest": manifest, "payload": payload})
-    compressed = gzip.compress(raw, compresslevel=9)
-    if len(compressed) > MAX_BYTES:
-        raise ValueError("Compressed backup is larger than the 20 MB safety limit")
-    return compressed, manifest
-
-
-def parse_clone_backup(raw: bytes) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
-    if len(raw) > MAX_BYTES:
-        raise ValueError("Backup file exceeds the 20 MB safety limit")
-    try:
-        decoded = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-    except (OSError, EOFError) as exc:
-        raise ValueError("Invalid backup file") from exc
-    if len(decoded) > MAX_DECOMPRESSED:
-        raise ValueError("Backup exceeds the decompressed safety limit")
-    try:
-        envelope = json.loads(decoded.decode("utf-8"), object_hook=_object_hook)
-    except Exception as exc:
-        raise ValueError("Invalid backup JSON") from exc
-    manifest = envelope.get("manifest") if isinstance(envelope, dict) else None
-    payload = envelope.get("payload") if isinstance(envelope, dict) else None
-    if not isinstance(manifest, dict) or not isinstance(payload, dict):
-        raise ValueError("Backup manifest or payload is missing")
-    if manifest.get("format") != FORMAT or payload.get("format") != FORMAT or manifest.get("version") != VERSION or payload.get("version") != VERSION:
-        raise ValueError("Unsupported backup format or version")
-    if hashlib.sha256(_canonical(payload)).hexdigest() != str(manifest.get("sha256", "")):
-        raise ValueError("Backup checksum verification failed")
-    collections = payload.get("collections")
-    if not isinstance(collections, dict):
-        raise ValueError("Backup collections are missing")
-    total = 0
-    clean: dict[str, list[dict[str, Any]]] = {}
-    for name, records in collections.items():
-        if not isinstance(name, str) or name.startswith("system.") or name in EXCLUDED:
-            raise ValueError(f"Invalid backup collection: {name}")
-        if not isinstance(records, list) or any(not isinstance(x, dict) for x in records):
-            raise ValueError(f"Invalid records in collection {name}")
-        total += len(records)
-        if total > MAX_RECORDS:
-            raise ValueError(f"Backup exceeds {MAX_RECORDS:,} records")
-        clean[name] = records
-    if int(manifest.get("records", -1)) != total:
-        raise ValueError("Backup record count does not match manifest")
-    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
-    if source.get("scope_id") is None:
-        raise ValueError("Backup source scope is missing")
-    return clean, manifest, source
-
-
-async def restore_clone_backup(raw: bytes, *, target_scope: int, mode: str, progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None) -> dict[str, int]:
-    collections, manifest, source = parse_clone_backup(raw)
-    source_scope = int(source["scope_id"])
-    target_scope = int(target_scope)
-    if mode not in {"merge", "replace"}:
-        raise ValueError("Invalid restore mode")
-
-    db = get_database()
-    result = {
-        "records": int(manifest["records"]),
-        "inserted": 0,
-        "existing": 0,
-        "replaced": 0,
-        "skipped": 0,
+    canonical = json.dumps(payload, default=_json_default, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    manifest = {
+        "format": CLONE_BACKUP_FORMAT,
+        "version": CLONE_BACKUP_VERSION,
+        "records": sum(len(v) for v in collections.values()),
+        "sha256": hashlib.sha256(canonical).hexdigest(),
     }
-    expected = int(manifest["records"])
-    processed = 0
+    envelope = {"manifest": manifest, "payload": payload}
+    raw = gzip.compress(json.dumps(envelope, default=_json_default, ensure_ascii=False).encode(), compresslevel=9)
     if progress_callback:
-        await progress_callback(0, expected, "Preparing restore…")
-
-    for name, records in collections.items():
-        transformed = [_transform(d, source_scope, target_scope) for d in records]
-
-        if mode == "replace":
-            deleted = await db[name].delete_many(
-                {"$or": [{"owner_id": target_scope}, {"data_owner_id": target_scope}]}
-            )
-            result["replaced"] += int(deleted.deleted_count or 0)
-
-            # Insert in small batches so the progress meter reflects real work
-            # instead of jumping directly from 0% to 100% for a large collection.
-            batch_size = 50
-            for start in range(0, len(transformed), batch_size):
-                batch = transformed[start:start + batch_size]
-                try:
-                    write = await db[name].insert_many(batch, ordered=False)
-                    result["inserted"] += len(write.inserted_ids)
-                except Exception:
-                    # Fall back to individual inserts so one legacy unique/index
-                    # conflict cannot stop the rest of the restore.
-                    for doc in batch:
-                        try:
-                            await db[name].insert_one(doc)
-                            result["inserted"] += 1
-                        except Exception:
-                            result["skipped"] += 1
-                processed += len(batch)
-                if progress_callback:
-                    await progress_callback(processed, expected, name)
-            continue
-
-        # Merge: keep every current target record and add only missing backup
-        # records. Progress counts every source record, including existing and
-        # skipped records, so the meter always reaches 100% accurately.
-        for doc in transformed:
-            query = _identity_query(name, doc)
-            if query and "_backup_fingerprint" in query:
-                fp = query.pop("_backup_fingerprint")
-                candidates = await db[name].find(
-                    {"owner_id": target_scope}
-                ).to_list(length=1000)
-                if any(_fingerprint(c) == fp for c in candidates):
-                    result["existing"] += 1
-                    processed += 1
-                    if progress_callback:
-                        await progress_callback(processed, expected, name)
-                    continue
-                query = None
-
-            if query:
-                existing = await db[name].find_one(query)
-                if existing:
-                    result["existing"] += 1
-                    processed += 1
-                    if progress_callback:
-                        await progress_callback(processed, expected, name)
-                    continue
-
-            try:
-                await db[name].insert_one(doc)
-                result["inserted"] += 1
-            except Exception:
-                result["existing"] += 1
-            processed += 1
-            if progress_callback:
-                await progress_callback(processed, expected, name)
-
-    return result
+        await progress_callback(total, total, "Backup complete")
+    return raw, manifest
