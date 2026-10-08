@@ -557,6 +557,8 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         )
 
     if selected_bot_id is not None and bots:
+        # Selected clone profile: Clone Bots is seller-wide, while every other
+        # usage/stat count below belongs only to this selected clone scope.
         selected_scope = int(bots[0].get("data_owner_id") or owner_id)
         selected_normal, selected_group = await asyncio.gather(
             db["seller_subscriptions"].distinct(
@@ -1132,6 +1134,8 @@ async def _owner_clone_backup_form(record):
     )
 
     if selected_bot_id is not None and bots:
+        # Selected clone profile: Clone Bots is seller-wide, while every other
+        # usage/stat count below belongs only to this selected clone scope.
         selected_scope = int(bots[0].get("data_owner_id") or owner_id)
         selected_normal, selected_group = await asyncio.gather(
             db["seller_subscriptions"].distinct(
