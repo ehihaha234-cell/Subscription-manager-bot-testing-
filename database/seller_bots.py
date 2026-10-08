@@ -29,6 +29,90 @@ def make_clone_data_scope_id(seller_id: int, bot_id: int) -> int:
     return int(hashlib.sha256(raw).hexdigest()[:15], 16)
 
 
+
+async def _copy_legacy_first_clone_data_scope(seller_id: int, bot_record: dict) -> None:
+    """Give the legacy first clone its own data scope without deleting seller data.
+
+    Older builds stored the first clone's operational data directly under the
+    seller ID. With multiple clones that makes the first clone look like it
+    owns every clone's legacy data. We copy that legacy data into the first
+    clone's stable scope so clone-specific dashboards can read only that bot.
+    The seller-scoped source is intentionally preserved for backward
+    compatibility; this routine is idempotent and never overwrites an already
+    populated clone scope.
+    """
+    seller_id = int(seller_id)
+    bot_id = int(bot_record.get("bot_id") or 0)
+    if not bot_id:
+        return
+    if int(bot_record.get("data_owner_id") or 0) != seller_id:
+        return
+
+    target_scope = make_clone_data_scope_id(seller_id, bot_id)
+    db = get_database()
+
+    # Collections whose records are clone-operational data and therefore need
+    # a private copy for the legacy first clone.
+    collections = (
+        "seller_settings",
+        "seller_plans",
+        "seller_plan_groups",
+        "seller_plan_group_subscriptions",
+        "seller_channels",
+        "seller_users",
+        "seller_payments",
+        "seller_subscriptions",
+        "seller_business_accounts",
+        "seller_business_contacts",
+        "seller_plan_group_counters",
+        "subscription_guard_chats",
+    )
+
+    for name in collections:
+        source = db[name]
+        target = db[name]
+        try:
+            existing = await target.count_documents({"owner_id": target_scope}, limit=1)
+        except TypeError:
+            existing = await target.count_documents({"owner_id": target_scope})
+        if existing:
+            continue
+
+        docs = await source.find({"owner_id": seller_id}).to_list(length=None)
+        if not docs:
+            continue
+
+        copied = []
+        for doc in docs:
+            clone_doc = dict(doc)
+            clone_doc.pop("_id", None)
+            clone_doc["owner_id"] = target_scope
+            copied.append(clone_doc)
+
+        if copied:
+            try:
+                await target.insert_many(copied, ordered=False)
+            except Exception:
+                # Duplicate/partial writes are safe on a retry; the next run
+                # will see the target scope and skip that collection.
+                logger.exception(
+                    "Legacy first-clone scope copy partially failed: seller=%s bot=%s collection=%s",
+                    seller_id, bot_id, name,
+                )
+
+    await seller_bots_collection().update_one(
+        {"bot_id": bot_id, "owner_id": seller_id},
+        {"$set": {
+            "data_owner_id": target_scope,
+            "data_scope_key": f"{seller_id}:{bot_id}",
+            "seller_account_id": seller_id,
+        }},
+    )
+    logger.info(
+        "Legacy first clone scope initialized: seller=%s bot=%s scope=%s",
+        seller_id, bot_id, target_scope,
+    )
+
 async def initialize_seller_bot_indexes():
     col = seller_bots_collection()
     # Old builds used a unique owner_id index, which blocked multiple clone bots.
@@ -60,6 +144,19 @@ async def initialize_seller_bot_indexes():
         )
 
 
+    # When multiple clone bots exist, isolate the legacy first bot's old
+    # seller-scoped data so its profile/stats are no longer cross-bot totals.
+    sellers_seen = set()
+    async for bot_record in seller_bots_collection().find(
+        {"active": True, "status": {"$ne": "removed"}},
+        sort=[("created_at", 1)],
+    ):
+        seller_id = int(bot_record.get("seller_account_id") or bot_record.get("owner_id") or 0)
+        if not seller_id or seller_id in sellers_seen:
+            continue
+        sellers_seen.add(seller_id)
+        await _copy_legacy_first_clone_data_scope(seller_id, bot_record)
+
 async def get_bot(owner_id: int):
     """Backward-compatible: return seller's first active clone bot.
 
@@ -79,58 +176,18 @@ async def get_bots(owner_id: int):
     ).sort("created_at", 1).to_list(length=None)
 
 
-async def get_management_bots(owner_id: int):
-    """Return all non-removed clone bots for owner-management screens.
-
-    Paused clones must remain visible so the owner can resume them. This is
-    intentionally separate from get_bots(), which continues to represent only
-    active/connected clones for quota and normal seller UI logic.
-    """
-    return await seller_bots_collection().find(
-        {"owner_id": int(owner_id), "status": {"$ne": "removed"}}
-    ).sort("created_at", 1).to_list(length=None)
-
-
-async def mark_bot_suspended(bot_id: int, was_active: bool):
-    """Pause a clone because its seller was suspended, remembering prior state."""
-    await seller_bots_collection().update_one(
-        {"bot_id": int(bot_id)},
-        {"$set": {
-            "active": False,
-            "status": "seller_suspended",
-            "runtime_status": "seller_suspended",
-            "pre_suspend_active": bool(was_active),
-            "updated_at": datetime.now(timezone.utc),
-        }}
-    )
-
-
-async def restore_bot_from_suspension(bot_id: int) -> bool:
-    """Restore only clones that were active before seller suspension."""
-    result = await seller_bots_collection().update_one(
-        {"bot_id": int(bot_id), "status": "seller_suspended", "pre_suspend_active": True},
-        {"$set": {
-            "active": True,
-            "status": "active",
-            "runtime_status": "stopped",
-            "updated_at": datetime.now(timezone.utc),
-        }, "$unset": {"pre_suspend_active": ""}}
-    )
-    return bool(result.modified_count)
-
-
-async def clear_bot_suspension_marker(bot_id: int):
-    """Clear suspension state for clones that were already paused."""
-    await seller_bots_collection().update_one(
-        {"bot_id": int(bot_id)},
-        {"$set": {"status": "paused", "runtime_status": "paused", "updated_at": datetime.now(timezone.utc)},
-         "$unset": {"pre_suspend_active": ""}}
-    )
-
-
 async def count_owner_bots(owner_id: int):
+    """Count all active clone bots belonging to one seller account."""
+    owner_id = int(owner_id)
     return await seller_bots_collection().count_documents(
-        {"owner_id": int(owner_id), "active": True, "status": {"$ne": "removed"}}
+        {
+            "$or": [
+                {"owner_id": owner_id},
+                {"seller_account_id": owner_id},
+            ],
+            "active": True,
+            "status": {"$ne": "removed"},
+        }
     )
 
 
@@ -414,44 +471,7 @@ async def bot_exists(owner_id: int):
 
 
 async def total_bots():
-    """Count currently configured clone bots, excluding preserved removed records."""
+    """Count currently connected clone bots, excluding preserved removed records."""
     return await seller_bots_collection().count_documents(
         {"active": True, "status": {"$ne": "removed"}}
     )
-
-
-async def clone_bot_runtime_counts():
-    """Return exact configured/running/offline-error clone bot counts.
-
-    A configured bot is an active, non-removed clone record. A configured bot
-    is considered running only when its persisted runtime_status is ``running``;
-    every other configured state is grouped into Offline/Error.
-    """
-    collection = seller_bots_collection()
-    match = {"active": True, "status": {"$ne": "removed"}}
-    rows = await collection.aggregate([
-        {"$match": match},
-        {
-            "$group": {
-                "_id": None,
-                "configured": {"$sum": 1},
-                "running": {
-                    "$sum": {
-                        "$cond": [
-                            {"$eq": [{"$toLower": {"$ifNull": ["$runtime_status", ""]}}, "running"]},
-                            1,
-                            0,
-                        ]
-                    }
-                },
-            }
-        },
-    ]).to_list(length=1)
-    row = rows[0] if rows else {}
-    configured = int(row.get("configured", 0) or 0)
-    running = int(row.get("running", 0) or 0)
-    return {
-        "configured": configured,
-        "running": running,
-        "offline_error": max(0, configured - running),
-    }
