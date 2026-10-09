@@ -1602,32 +1602,47 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await seller_owner_view(query, int(action.replace("main_seller_view_", "")))
         return
 
+    # Handle the longer confirm callback BEFORE the general remove prefix.
+    # Otherwise the general prefix captures the confirmation button as well.
+    if action.startswith("main_seller_remove_subscription_confirm_"):
+        if not await is_admin(user_id):
+            await query.answer("Owner access only.", show_alert=True)
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
+        result = await get_database()["seller_plan_assignments"].delete_one({"owner_id": seller_id})
+        await query.answer("Seller subscription removed.", show_alert=True)
+
+        # Notify the seller from the main bot after the subscription is removed.
+        try:
+            await context.bot.send_message(
+                chat_id=seller_id,
+                text=(
+                    "⚠️ Seller Subscription Removed by Owner\\n\\n"
+                    "Your seller subscription has been removed by the owner.\\n"
+                    "Your current seller plan is no longer active.\\n\\n"
+                    "Please contact support or the owner if you need assistance."
+                ),
+            )
+        except TelegramError:
+            logger.warning("Could not notify seller %s about subscription removal", seller_id, exc_info=True)
+
+        await seller_owner_view(query, seller_id)
+        return
+
     if action.startswith("main_seller_remove_subscription_"):
         if not await is_admin(user_id):
-            await query.edit_message_text("❌ Owner access only.")
+            await query.answer("Owner access only.", show_alert=True)
             return
         seller_id = int(action.replace("main_seller_remove_subscription_", "", 1))
         await query.edit_message_text(
-            "⚠️ Remove Seller Subscription\n\n"
-            f"Seller ID: {seller_id}\n\n"
+            "⚠️ Remove Seller Subscription\\n\\n"
+            f"Seller ID: {seller_id}\\n\\n"
             "This will remove the seller's current plan assignment. Continue?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Confirm Remove", callback_data=f"main_seller_remove_subscription_confirm_{seller_id}")],
                 [InlineKeyboardButton("↩ Cancel", callback_data=f"main_seller_view_{seller_id}")],
             ]),
         )
-        return
-
-    if action.startswith("main_seller_remove_subscription_confirm_"):
-        if not await is_admin(user_id):
-            await query.edit_message_text("❌ Owner access only.")
-            return
-        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
-        # Remove the authoritative assignment record, then render Seller Details
-        # again so the plan/status/expiry fields reflect the latest database state.
-        await get_database()["seller_plan_assignments"].delete_one({"owner_id": seller_id})
-        await query.answer("Seller subscription removed.", show_alert=True)
-        await seller_owner_view(query, seller_id)
         return
 
     if action.startswith("main_seller_suspend_"):
