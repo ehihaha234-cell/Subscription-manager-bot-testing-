@@ -3,6 +3,7 @@
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
 from database.seller_subscriptions import save_pending_limit_selection
+from database.seller_data import get_plan_group
 
 
 class ClonePaymentDeliveryMixin:
@@ -33,8 +34,29 @@ class ClonePaymentDeliveryMixin:
             username = str(user_id)
         safe_user = html.escape(str(username))
         safe_plan = html.escape(str(plan_name or "Plan"))
-        group_name = str((plan or {}).get("group_name") or (plan or {}).get("group_id") or "")
-        group_label = f" ({html.escape(group_name)})" if group_name and group_name != safe_plan else ""
+
+        # Show the actual channel/group titles inside the selected Plan Group,
+        # rather than exposing its internal database group_id.
+        group_titles = []
+        target_ids = (plan or {}).get("target_chat_ids") or []
+        if not target_ids and (plan or {}).get("group_id"):
+            try:
+                plan_group = await get_plan_group(owner_id, str(plan.get("group_id")))
+                target_ids = (plan_group or {}).get("chat_ids") or (plan_group or {}).get("target_chat_ids") or []
+            except Exception:
+                logger.debug("Could not resolve plan group title owner=%s", owner_id, exc_info=True)
+        for target_id in target_ids:
+            try:
+                target_chat = await running.application.bot.get_chat(int(target_id))
+                title = str(getattr(target_chat, "title", "") or "").strip()
+                if title and title not in group_titles:
+                    group_titles.append(title)
+            except Exception:
+                logger.debug("Could not resolve plan target title owner=%s chat=%s", owner_id, target_id, exc_info=True)
+        group_label = (
+            f"{html.escape(', '.join(group_titles))} ({safe_plan})"
+            if group_titles else safe_plan
+        )
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
@@ -44,7 +66,7 @@ class ClonePaymentDeliveryMixin:
             "⚠️ Active Subscriber Limit Warning\n\n"
             f"👤 User: {safe_user}\n"
             "👈 This user is trying to purchase your plan.\n\n"
-            f"📦 Plan Group: {safe_plan}{group_label}\n\n"
+            f"📦 Plan Group: {group_label}\n\n"
             f"👥 Active Subscribers: {count} / {limit}\n"
             f"📊 Usage: {pct}%\n\n"
             "Your active subscriber limit has been reached.\n"
