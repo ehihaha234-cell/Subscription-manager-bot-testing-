@@ -278,13 +278,12 @@ async def plan_limit_warning(owner_id: int):
 
 
 async def seller_active_subscriber_ids(owner_id: int):
-    """Return unique active user IDs for seller-level eligibility checks.
+    """Return unique active subscriber IDs across every clone-data scope.
 
-    Normal subscriptions are de-duplicated by user. Plan Group subscriptions
-    are intentionally not expanded here because this function is used for
-    checking whether a user is already active anywhere under the seller.
-    Use ``seller_active_subscriber_count`` for the billable/limit count, where
-    each active Plan Group subscription consumes one subscriber slot.
+    Seller limits are seller-account scoped, while subscriber documents are
+    stored under each clone bot's ``data_owner_id``.  Plan Group subscriptions
+    are stored separately from normal subscriptions, so both collections must
+    be included.  A user subscribed to multiple groups/bots is counted once.
     """
     owner_id = int(owner_id)
     now = datetime.now(timezone.utc)
@@ -337,59 +336,13 @@ async def seller_active_subscriber_ids(owner_id: int):
     return user_ids
 
 
-async def _active_subscriber_count_for_scopes(scope_ids) -> int:
-    """Count active subscribers using the final counting rules.
-
-    * Normal subscription plans: one slot per unique user, even if that user
-      has multiple normal plans.
-    * Plan Groups: one slot per active user+group pair. The same user in five
-      active Plan Groups therefore consumes five subscriber slots.
-    """
-    scopes = sorted({int(value) for value in (scope_ids or []) if value is not None})
-    if not scopes:
-        return 0
-
-    now = datetime.now(timezone.utc)
-    db = get_database()
-
-    normal_ids = await db["seller_subscriptions"].distinct(
-        "user_id",
-        {
-            "owner_id": {"$in": scopes},
-            "active": True,
-            "expiry_date": {"$gt": now},
-        },
-    )
-    normal_count = 0
-    normal_users = set()
-    for value in normal_ids or []:
-        try:
-            uid = int(value)
-        except (TypeError, ValueError):
-            continue
-        if uid:
-            normal_users.add(uid)
-    normal_count = len(normal_users)
-
-    # One count for every active Plan Group subscription (user + group).
-    # Grouping also protects against accidental duplicate documents.
-    group_rows = await db["seller_plan_group_subscriptions"].aggregate([
-        {"$match": {
-            "owner_id": {"$in": scopes},
-            "active": True,
-            "expiry_date": {"$gt": now},
-        }},
-        {"$group": {
-            "_id": {"user_id": "$user_id", "group_id": "$group_id"}
-        }},
-        {"$count": "count"},
-    ]).to_list(length=1)
-    group_count = int(group_rows[0]["count"]) if group_rows else 0
-    return normal_count + group_count
-
-
 async def clone_active_subscriber_ids(owner_id: int):
-    """Return unique active user IDs for exactly one clone data scope."""
+    """Return active subscriber IDs for exactly one clone data scope.
+
+    Unlike seller_active_subscriber_ids(), this function never expands the
+    scope to the seller's other clone bots. It is intended for clone-specific
+    profile/usage displays and future per-clone limit checks.
+    """
     owner_id = int(owner_id)
     now = datetime.now(timezone.utc)
     db = get_database()
@@ -397,75 +350,64 @@ async def clone_active_subscriber_ids(owner_id: int):
     normal_ids, group_ids = await asyncio.gather(
         db["seller_subscriptions"].distinct(
             "user_id",
-            {"owner_id": owner_id, "active": True, "expiry_date": {"$gt": now}},
+            {
+                "owner_id": owner_id,
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
         ),
         db["seller_plan_group_subscriptions"].distinct(
             "user_id",
-            {"owner_id": owner_id, "active": True, "expiry_date": {"$gt": now}},
+            {
+                "owner_id": owner_id,
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
         ),
     )
+
     user_ids = set()
     for value in [*(normal_ids or []), *(group_ids or [])]:
         try:
-            uid = int(value)
+            user_id = int(value)
         except (TypeError, ValueError):
             continue
-        if uid:
-            user_ids.add(uid)
+        if user_id:
+            user_ids.add(user_id)
     return user_ids
 
 
 async def clone_active_subscriber_count(owner_id: int) -> int:
-    """Return active subscriber count for one clone using final counting rules."""
-    return await _active_subscriber_count_for_scopes([int(owner_id)])
+    """Return active subscribers belonging only to one clone data scope."""
+    return len(await clone_active_subscriber_ids(owner_id))
 
 
-async def seller_subscriber_limit_status(owner_id: int, user_id: int) -> dict:
-    """Return seller-wide active usage for a prospective user.
+async def seller_subscriber_limit_status(owner_id: int, user_id: int, scope_owner_id: int | None = None) -> dict:
+    """Return subscriber-limit status, scoped to one clone when requested.
 
-    Normal plans count unique users. Each active Plan Group (user + group)
-    consumes one subscriber slot. ``already_active`` remains user-based so an
-    existing subscriber can renew/extend without consuming another slot.
+    ``owner_id`` is the seller account used to resolve the plan. ``scope_owner_id``
+    is the current clone's data owner. Omitting it preserves legacy seller-wide
+    behavior for callers that explicitly need an account-wide count.
     """
     owner_id = int(owner_id)
     user_id = int(user_id)
     plan, _ = await effective_plan(owner_id)
-    active_ids = await seller_active_subscriber_ids(owner_id)
-
-    from database.mongo import get_database
-    from database.seller_bots import get_bots
-    bot_records = await get_bots(owner_id)
-    scopes = {owner_id}
-    for record in bot_records or []:
-        try:
-            scope = record.get("data_owner_id") or record.get("owner_id")
-            if scope is not None:
-                scopes.add(int(scope))
-        except (TypeError, ValueError):
-            continue
-    active_count = await _active_subscriber_count_for_scopes(scopes)
+    if scope_owner_id is not None:
+        active_ids = await clone_active_subscriber_ids(int(scope_owner_id))
+    else:
+        active_ids = await seller_active_subscriber_ids(owner_id)
     limit = int(plan.get("active_subscriber_limit", 25))
     return {
-        "count": active_count,
+        "count": len(active_ids),
         "limit": limit,
         "already_active": user_id in active_ids,
-        "at_limit": limit >= 0 and active_count >= limit,
+        "at_limit": limit >= 0 and len(active_ids) >= limit,
         "plan_name": str(plan.get("name") or "Free").strip(),
     }
 
 
 async def seller_active_subscriber_count(owner_id: int) -> int:
-    from database.seller_bots import get_bots
-    bot_records = await get_bots(int(owner_id))
-    scopes = {int(owner_id)}
-    for record in bot_records or []:
-        try:
-            scope = record.get("data_owner_id") or record.get("owner_id")
-            if scope is not None:
-                scopes.add(int(scope))
-        except (TypeError, ValueError):
-            continue
-    return await _active_subscriber_count_for_scopes(scopes)
+    return len(await seller_active_subscriber_ids(owner_id))
 
 
 async def seller_usage(owner_id: int):
