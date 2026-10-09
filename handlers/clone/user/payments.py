@@ -215,8 +215,9 @@ async def handle(self, update, context, q, owner, action):
                 f"💳 Payment\n\nPlan: {plan['name']}\n{stars_line}"
             )
         if manual_enabled:
-            manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay the amount, then tap Upload Payment Screenshot."
-            rows.append([InlineKeyboardButton('📤 Upload Payment Screenshot', callback_data=f"c_manual_{plan['plan_id']}")])
+            manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay the amount and send your payment screenshot here."
+            # The user can send the screenshot directly in this chat; no upload button is needed.
+            context.user_data['waiting_child_screenshot'] = True
             text = f'{text}\n\n{manual_text}' if text else f'💳 Payment\n\n{manual_text}'
         if not enabled and currency != 'INR':
             notice = f'⚠️ Automatic checkout is currently unavailable for {currency} in this bot. Use Manual Payment or Telegram Stars.'
@@ -240,6 +241,7 @@ async def handle(self, update, context, q, owner, action):
             await self.safe_query_message(q, text, kb)
         return True
     if action.startswith('c_star_'):
+        context.user_data.pop('waiting_child_screenshot', None)
         plan_id = action.replace('c_star_', '')
         plan = await get_plan(owner, plan_id)
         cfg = await get_gateway_config('seller', owner, decrypt=True)
@@ -258,6 +260,7 @@ async def handle(self, update, context, q, owner, action):
         )
         return True
     if action.startswith('c_pg_'):
+        context.user_data.pop('waiting_child_screenshot', None)
         try:
             _, _, gateway, plan_id = action.split('_', 3)
         except ValueError:

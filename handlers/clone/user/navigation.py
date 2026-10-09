@@ -216,6 +216,7 @@ async def handle(self, update, context, q, owner, action):
         await self.show_plans(q, owner, True, context, target_chat_ids=group.get('chat_ids') or [])
         return True
     if action == 'c_payment_back':
+        context.user_data.pop('waiting_child_screenshot', None)
         saved_text = context.user_data.get('selected_child_plans_back_text')
         saved_markup = context.user_data.get('selected_child_plans_back_markup')
         if saved_text:
