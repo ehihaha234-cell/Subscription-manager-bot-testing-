@@ -3,7 +3,6 @@
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
 from database.seller_subscriptions import save_pending_limit_selection
-from database.seller_data import get_plan_group
 
 
 class ClonePaymentDeliveryMixin:
@@ -35,28 +34,47 @@ class ClonePaymentDeliveryMixin:
         safe_user = html.escape(str(username))
         safe_plan = html.escape(str(plan_name or "Plan"))
 
-        # Show the actual channel/group titles inside the selected Plan Group,
-        # rather than exposing its internal database group_id.
-        group_titles = []
-        target_ids = (plan or {}).get("target_chat_ids") or []
-        if not target_ids and (plan or {}).get("group_id"):
+        # Show the actual connected channel/group titles in the warning.
+        # The plan's group_id is an internal database ID, not a display name.
+        target_ids = []
+        for raw_id in ((plan or {}).get("target_chat_ids") or []):
             try:
-                plan_group = await get_plan_group(owner_id, str(plan.get("group_id")))
-                target_ids = (plan_group or {}).get("chat_ids") or (plan_group or {}).get("target_chat_ids") or []
-            except Exception:
-                logger.debug("Could not resolve plan group title owner=%s", owner_id, exc_info=True)
-        for target_id in target_ids:
+                target_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if target_id not in target_ids:
+                target_ids.append(target_id)
+
+        target_names = []
+        if target_ids:
             try:
-                target_chat = await running.application.bot.get_chat(int(target_id))
-                title = str(getattr(target_chat, "title", "") or "").strip()
-                if title and title not in group_titles:
-                    group_titles.append(title)
+                connected_chats = await get_channels(owner_id)
+                title_by_id = {
+                    int(item.get("chat_id")): str(item.get("title") or "").strip()
+                    for item in connected_chats
+                    if item.get("chat_id") is not None
+                }
             except Exception:
-                logger.debug("Could not resolve plan target title owner=%s chat=%s", owner_id, target_id, exc_info=True)
-        group_label = (
-            f"{html.escape(', '.join(group_titles))} ({safe_plan})"
-            if group_titles else safe_plan
-        )
+                title_by_id = {}
+
+            for target_id in target_ids:
+                title = title_by_id.get(target_id, "")
+                if not title:
+                    try:
+                        chat_info = await running.application.bot.get_chat(target_id)
+                        title = str(getattr(chat_info, "title", "") or "").strip()
+                    except Exception:
+                        title = ""
+                if title and title not in target_names:
+                    target_names.append(title)
+
+        group_names_text = ", ".join(target_names)
+        if not group_names_text:
+            # Best-effort fallback to a stored group title, never expose its ID.
+            group_name = str((plan or {}).get("group_name") or "").strip()
+            if group_name and not group_name.isdigit():
+                group_names_text = group_name
+        group_label = f"{html.escape(group_names_text)} ({safe_plan})" if group_names_text else safe_plan
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
