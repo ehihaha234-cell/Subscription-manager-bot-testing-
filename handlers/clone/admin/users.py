@@ -341,7 +341,22 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a.startswith('a_user_remove_'):
         user_id = int(a.replace('a_user_remove_', ''))
         rows = await get_user_plan_group_subscriptions(owner, user_id)
-        active_rows = [x for x in rows if x.get('active') and (not x.get('expiry_date') or x.get('expiry_date') > datetime.now(timezone.utc))]
+        now_utc = datetime.now(timezone.utc)
+        active_rows = []
+        for sub in rows:
+            if not sub.get('active'):
+                continue
+            expiry = sub.get('expiry_date')
+            if expiry:
+                # MongoDB may return a naive datetime while `now_utc` is aware.
+                # Treat naive stored datetimes as UTC before comparing.
+                if isinstance(expiry, datetime) and expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                elif isinstance(expiry, datetime):
+                    expiry = expiry.astimezone(timezone.utc)
+                if expiry <= now_utc:
+                    continue
+            active_rows.append(sub)
         if not active_rows:
             await q.edit_message_text('❌ No active Plan Group subscription found.', reply_markup=self.back(f'a_user_view_{user_id}'))
             return True
