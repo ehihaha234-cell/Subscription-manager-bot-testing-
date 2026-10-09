@@ -33,8 +33,30 @@ class ClonePaymentDeliveryMixin:
             username = str(user_id)
         safe_user = html.escape(str(username))
         safe_plan = html.escape(str(plan_name or "Plan"))
-        group_name = str((plan or {}).get("group_name") or (plan or {}).get("group_id") or "")
-        group_label = f" ({html.escape(group_name)})" if group_name and group_name != safe_plan else ""
+        # Display the actual connected channel/group titles for this plan.
+        # Never expose the internal plan-group database ID in seller warnings.
+        group_names = []
+        try:
+            target_ids = {
+                int(value) for value in ((plan or {}).get("target_chat_ids") or [])
+                if str(value).strip()
+            }
+            if target_ids:
+                connected_chats = await get_channels(owner_id)
+                for chat in connected_chats or []:
+                    try:
+                        chat_id = int(chat.get("chat_id") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    title = str(chat.get("title") or "").strip()
+                    if chat_id in target_ids and title and title not in group_names:
+                        group_names.append(title)
+        except Exception:
+            logger.exception(
+                "Could not resolve plan access chat names owner=%s plan=%s",
+                owner_id, plan_name,
+            )
+        group_label = f" ({html.escape(', '.join(group_names))})" if group_names else ""
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
