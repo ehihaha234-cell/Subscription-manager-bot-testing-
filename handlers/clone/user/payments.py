@@ -8,6 +8,7 @@ from database.payment_gateways import (
 )
 from services.payment_gateways import cancel_previous_razorpay_qr_for_same_plan
 from handlers.common.feature_navigation import feature_back_callback
+from database.seller_subscriptions import save_pending_limit_selection
 import io
 import time
 import qrcode
@@ -116,12 +117,9 @@ async def handle(self, update, context, q, owner, action):
         seller_account_id = self.seller_account(context)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or action.replace('c_select_', '')), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
-            await self.safe_query_message(
-                q,
-                '⚠️ Subscriber is limited\\n\\nThis seller has reached the maximum active subscriber limit. Please try again later.',
-                back_keyboard,
-            )
+            await self.safe_query_message(q, '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.', back_keyboard)
             return True
         if enabled:
             gateway = enabled[0]
@@ -213,8 +211,8 @@ async def handle(self, update, context, q, owner, action):
                 f"💳 Payment\n\nPlan: {plan['name']}\n{stars_line}"
             )
         if manual_enabled:
-            context.user_data['waiting_child_screenshot'] = True
-            manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay the amount and send your payment screenshot here."
+            manual_text = f"Plan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nDuration: {plan['duration_text']}\n\nUPI Name: {s.get('upi_name') or 'Not Set'}\nUPI ID: {s.get('upi_id') or 'Not Set'}\n\nPay the amount, then tap Upload Payment Screenshot."
+            rows.append([InlineKeyboardButton('📤 Upload Payment Screenshot', callback_data=f"c_manual_{plan['plan_id']}")])
             text = f'{text}\n\n{manual_text}' if text else f'💳 Payment\n\n{manual_text}'
         if not enabled and currency != 'INR':
             notice = f'⚠️ Automatic checkout is currently unavailable for {currency} in this bot. Use Manual Payment or Telegram Stars.'
@@ -268,12 +266,9 @@ async def handle(self, update, context, q, owner, action):
         seller_account_id = self.seller_account(context)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or plan_id), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
-            await self.safe_query_message(
-                q,
-                '⚠️ Subscriber is limited\\n\\nThis seller has reached the maximum active subscriber limit. Please try again later.',
-                back_keyboard,
-            )
+            await self.safe_query_message(q, '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.', back_keyboard)
             return True
         s = await get_seller_settings(owner)
         currency = normalize_currency(s.get('currency')) or 'INR'
@@ -358,6 +353,23 @@ async def handle(self, update, context, q, owner, action):
             await self.safe_query_message(q, f'❌ Gateway error: {exc}', back_keyboard)
         return True
         await self.safe_query_message(q, f"💳 {gateway.title()} Secure Payment\n\nPlan: {plan['name']}\nAmount: {format_currency(currency, plan['price'])}\nTransaction: {tx['transaction_id']}\n\nPayment verify hote hi subscription automatically activate hogi.", InlineKeyboardMarkup([[InlineKeyboardButton('💳 Pay Now', url=checkout.get('checkout_url'))], [InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]))
+        return True
+    if action.startswith('c_manual_'):
+        plan_id = action.replace('c_manual_', '', 1)
+        plan = await get_plan(owner, plan_id)
+        if not plan:
+            await q.answer('Plan not found', show_alert=True)
+            return True
+        seller_account_id = self.seller_account(context)
+        status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
+        if status.get('at_limit') and not status.get('already_active'):
+            await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan_id), str(plan.get('name') or 'Plan'))
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
+            await self.safe_query_message(q, '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.', back_keyboard)
+            return True
+        context.user_data['selected_child_plan'] = plan
+        context.user_data['waiting_child_screenshot'] = True
+        await q.message.reply_text('📷 Upload your payment screenshot.', reply_markup=back_keyboard)
         return True
     if action == 'c_upload':
         context.user_data['waiting_child_screenshot'] = True
