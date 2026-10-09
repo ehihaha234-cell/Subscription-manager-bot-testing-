@@ -33,60 +33,8 @@ class ClonePaymentDeliveryMixin:
             username = str(user_id)
         safe_user = html.escape(str(username))
         safe_plan = html.escape(str(plan_name or "Plan"))
-
-        # Show the connected channel/group titles, never the internal plan-group ID.
-        # The plan stores group_id + target_chat_ids; resolve the saved group metadata
-        # first, then fall back to this seller's connected-channel records.
-        access_names = []
-        plan_data = plan or {}
-        group_id = str(plan_data.get("group_id") or "").strip()
-        target_ids = []
-        for value in (plan_data.get("target_chat_ids") or []):
-            try:
-                chat_id = int(value)
-            except (TypeError, ValueError):
-                continue
-            if chat_id not in target_ids:
-                target_ids.append(chat_id)
-
-        if group_id:
-            try:
-                plan_group = await get_plan_group(owner_id, group_id)
-                if plan_group:
-                    targets = plan_group.get("targets") or []
-                    for target in targets:
-                        title = str(target.get("title") or "").strip()
-                        if title and title not in access_names:
-                            access_names.append(title)
-                    if not target_ids:
-                        for value in (plan_group.get("chat_ids") or []):
-                            try:
-                                chat_id = int(value)
-                            except (TypeError, ValueError):
-                                continue
-                            if chat_id not in target_ids:
-                                target_ids.append(chat_id)
-            except Exception:
-                logger.exception("Could not resolve plan group titles owner=%s group_id=%s", owner_id, group_id)
-
-        if target_ids and len(access_names) < len(target_ids):
-            try:
-                channels = await get_channels(owner_id)
-                channel_titles = {}
-                for channel in (channels or []):
-                    try:
-                        channel_titles[int(channel.get("chat_id"))] = str(channel.get("title") or "").strip()
-                    except (TypeError, ValueError):
-                        continue
-                for chat_id in target_ids:
-                    title = channel_titles.get(chat_id, "")
-                    if title and title not in access_names:
-                        access_names.append(title)
-            except Exception:
-                logger.exception("Could not resolve connected channel titles owner=%s", owner_id)
-
-        access_label = ", ".join(access_names)
-        group_label = f"{html.escape(access_label)} ({safe_plan})" if access_label else safe_plan
+        group_name = str((plan or {}).get("group_name") or (plan or {}).get("group_id") or "")
+        group_label = f" ({html.escape(group_name)})" if group_name and group_name != safe_plan else ""
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
@@ -96,7 +44,7 @@ class ClonePaymentDeliveryMixin:
             "⚠️ Active Subscriber Limit Warning\n\n"
             f"👤 User: {safe_user}\n"
             "👈 This user is trying to purchase your plan.\n\n"
-            f"📦 Plan Group: {group_label}\n\n"
+            f"📦 Plan Group: {safe_plan}{group_label}\n\n"
             f"👥 Active Subscribers: {count} / {limit}\n"
             f"📊 Usage: {pct}%\n\n"
             "Your active subscriber limit has been reached.\n"
@@ -115,15 +63,21 @@ class ClonePaymentDeliveryMixin:
         return {"sent": sent, "count": count, "limit": limit, "usage_percent": pct}
 
     async def resume_pending_limited_purchases(self, seller_id: int) -> dict:
-        """Resume blocked plan selections once the upgraded plan provides capacity."""
+        """Resume blocked plan selections with the same payment page as a fresh selection."""
         from database.seller_subscriptions import pending_limit_selections, clear_pending_limit_selection
         from database.seller_bots import get_bot_by_data_owner_id
+        from types import SimpleNamespace
+        from handlers.clone.user.payments import handle as handle_clone_user_payment
+
         pending = await pending_limit_selections(int(seller_id))
         resumed = 0
         for item in pending:
-            scope, user_id, plan_id = int(item.get("scope_owner_id") or 0), int(item.get("user_id") or 0), str(item.get("plan_id") or "")
+            scope = int(item.get("scope_owner_id") or 0)
+            user_id = int(item.get("user_id") or 0)
+            plan_id = str(item.get("plan_id") or "")
             if not scope or not user_id or not plan_id:
                 continue
+
             record = await get_bot_by_data_owner_id(scope)
             if not record:
                 continue
@@ -134,36 +88,84 @@ class ClonePaymentDeliveryMixin:
                 running = self.get_running(bot_id) if started else None
             if not running:
                 continue
+
             plan = await get_plan(scope, plan_id)
             if not plan:
                 await clear_pending_limit_selection(seller_id, scope, user_id)
                 continue
-            status = await seller_subscriber_limit_status(int(seller_id), user_id, scope_owner_id=scope)
+
+            status = await seller_subscriber_limit_status(
+                int(seller_id), user_id, scope_owner_id=scope
+            )
             if status.get("at_limit") and not status.get("already_active"):
                 continue
-            cfg = await get_gateway_config("seller", scope, decrypt=True)
-            settings = await get_seller_settings(scope)
-            gateways = cfg.get("gateways") or {}
-            currency = normalize_currency(settings.get("currency")) or "INR"
-            enabled = [g for g in SUPPORTED_GATEWAYS if (gateways.get(g) or {}).get("enabled")] if currency == "INR" else []
-            default_gateway = str(cfg.get("default_gateway") or "")
-            if default_gateway in enabled:
-                enabled.remove(default_gateway); enabled.insert(0, default_gateway)
-            rows = []
-            if enabled:
-                rows.append([InlineKeyboardButton(f"💳 {enabled[0].title()} Payment", callback_data=f"c_pg_{enabled[0]}_{plan_id}")])
-            stars = int(plan.get("stars_price", 0) or 0)
-            if cfg.get("stars_enabled") and stars > 0:
-                rows.append([InlineKeyboardButton(f"⭐ Pay {stars} Stars", callback_data=f"c_star_{plan_id}")])
-            if cfg.get("manual_enabled", True):
-                rows.append([InlineKeyboardButton("📤 Manual Payment / Upload Screenshot", callback_data=f"c_manual_{plan_id}")])
-            rows.append([InlineKeyboardButton("⬅ Back", callback_data="c_payment_back")])
+
+            bot = running.application.bot
             try:
-                await running.application.bot.send_message(chat_id=user_id, text=f"✅ Your selected plan is available again.\n\n📦 Plan: {plan.get('name', 'Plan')}\nChoose a payment method to continue.", reply_markup=InlineKeyboardMarkup(rows))
-                await clear_pending_limit_selection(seller_id, scope, user_id)
-                resumed += 1
+                # Notice only: no buttons on this message. The original payment
+                # screen is then recreated below using the normal plan-selection flow.
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "✅ Your selected plan is available again."
+                    ),
+                )
+
+                class _ResumeMessage:
+                    def __init__(self, chat_id):
+                        self.chat_id = int(chat_id)
+                        self.chat = SimpleNamespace(id=int(chat_id))
+                        self.reply_markup = None
+                        self.photo = self.video = self.animation = None
+                        self.document = self.audio = None
+
+                    async def delete(self):
+                        return None
+
+                    async def reply_text(inner_self, text, reply_markup=None, **kwargs):
+                        return await bot.send_message(
+                            chat_id=inner_self.chat_id, text=text,
+                            reply_markup=reply_markup, **kwargs
+                        )
+
+                class _ResumeQuery:
+                    def __init__(self):
+                        self.from_user = SimpleNamespace(id=user_id)
+                        self.message = _ResumeMessage(user_id)
+
+                    async def answer(self, *args, **kwargs):
+                        return None
+
+                    async def edit_message_text(self, text, reply_markup=None, **kwargs):
+                        return await bot.send_message(
+                            chat_id=user_id, text=text,
+                            reply_markup=reply_markup, **kwargs
+                        )
+
+                    async def edit_message_caption(self, caption, reply_markup=None, **kwargs):
+                        return await bot.send_message(
+                            chat_id=user_id, text=caption,
+                            reply_markup=reply_markup, **kwargs
+                        )
+
+                fake_context = SimpleNamespace(
+                    application=running.application,
+                    bot=bot,
+                    user_data={"selected_child_plan": plan},
+                )
+                fake_query = _ResumeQuery()
+                handled = await handle_clone_user_payment(
+                    self, None, fake_context, fake_query, scope,
+                    f"c_select_{plan_id}",
+                )
+                if handled:
+                    await clear_pending_limit_selection(seller_id, scope, user_id)
+                    resumed += 1
             except Exception:
-                logger.exception("Could not resume pending purchase seller=%s user=%s scope=%s", seller_id, user_id, scope)
+                logger.exception(
+                    "Could not resume pending limited purchase seller=%s user=%s scope=%s",
+                    seller_id, user_id, scope,
+                )
         return {"resumed": resumed, "pending": len(pending)}
 
     async def stars_precheckout(self, update, context):
