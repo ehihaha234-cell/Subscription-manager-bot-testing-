@@ -33,48 +33,8 @@ class ClonePaymentDeliveryMixin:
             username = str(user_id)
         safe_user = html.escape(str(username))
         safe_plan = html.escape(str(plan_name or "Plan"))
-
-        # Show the actual connected channel/group titles in the warning.
-        # The plan's group_id is an internal database ID, not a display name.
-        target_ids = []
-        for raw_id in ((plan or {}).get("target_chat_ids") or []):
-            try:
-                target_id = int(raw_id)
-            except (TypeError, ValueError):
-                continue
-            if target_id not in target_ids:
-                target_ids.append(target_id)
-
-        target_names = []
-        if target_ids:
-            try:
-                connected_chats = await get_channels(owner_id)
-                title_by_id = {
-                    int(item.get("chat_id")): str(item.get("title") or "").strip()
-                    for item in connected_chats
-                    if item.get("chat_id") is not None
-                }
-            except Exception:
-                title_by_id = {}
-
-            for target_id in target_ids:
-                title = title_by_id.get(target_id, "")
-                if not title:
-                    try:
-                        chat_info = await running.application.bot.get_chat(target_id)
-                        title = str(getattr(chat_info, "title", "") or "").strip()
-                    except Exception:
-                        title = ""
-                if title and title not in target_names:
-                    target_names.append(title)
-
-        group_names_text = ", ".join(target_names)
-        if not group_names_text:
-            # Best-effort fallback to a stored group title, never expose its ID.
-            group_name = str((plan or {}).get("group_name") or "").strip()
-            if group_name and not group_name.isdigit():
-                group_names_text = group_name
-        group_label = f"{html.escape(group_names_text)} ({safe_plan})" if group_names_text else safe_plan
+        group_name = str((plan or {}).get("group_name") or (plan or {}).get("group_id") or "")
+        group_label = f" ({html.escape(group_name)})" if group_name and group_name != safe_plan else ""
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
@@ -84,27 +44,20 @@ class ClonePaymentDeliveryMixin:
             "⚠️ Active Subscriber Limit Warning\n\n"
             f"👤 User: {safe_user}\n"
             "👈 This user is trying to purchase your plan.\n\n"
-            f"📦 Plan Group: {group_label}\n\n"
+            f"📦 Plan Group: {safe_plan}{group_label}\n\n"
             f"👥 Active Subscribers: {count} / {limit}\n"
             f"📊 Usage: {pct}%\n\n"
             "Your active subscriber limit has been reached.\n"
             "Please upgrade your plan."
         )
-        buyer_text = (
-            "⚠️ Subscriber Limit Reached\n\n"
-            "The active subscriber limit has been reached.\n"
-            "Please wait for the admin approval."
-        )
+        # Buyer-facing warning is sent by the calling flow. Sending it here as
+        # well duplicates the warning when a plan-selection callback also replies.
+        # This helper is responsible only for notifying the seller.
         bot = running.application.bot
         sent = 0
         try:
-            await bot.send_message(chat_id=user_id, text=buyer_text)
-            sent += 1
-        except Exception:
-            logger.debug("Could not notify limited subscriber user=%s", user_id, exc_info=True)
-        try:
             await bot.send_message(chat_id=seller_account_id, text=seller_text, reply_markup=keyboard)
-            sent += 1
+            sent = 1
         except Exception:
             logger.exception("Could not notify seller subscriber limit owner=%s", seller_account_id)
         return {"sent": sent, "count": count, "limit": limit, "usage_percent": pct}
