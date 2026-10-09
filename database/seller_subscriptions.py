@@ -635,6 +635,19 @@ async def extend_plan_with_history(owner_id: int, plan_id: str, days: int, sourc
         new_plan=plan_id, days=days, source=source,
         approved_by=approved_by, expiry_date=new_expiry,
     )
+    # Re-check and resume users whose selected clone plan was blocked by the
+    # active-subscriber limit. This is intentionally best-effort so an already
+    # successful owner extension is never rolled back by a delivery failure.
+    try:
+        from services.bot_manager import bot_manager
+        resume = getattr(bot_manager, "resume_pending_limited_purchases", None)
+        if resume:
+            await resume(int(owner_id))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "Could not resume pending limited purchases after extension seller_id=%s", owner_id
+        )
     return await get_assignment(owner_id)
 
 
