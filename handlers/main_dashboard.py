@@ -1613,22 +1613,6 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await seller_owner_view(query, int(action.replace("main_seller_view_", "")))
         return
 
-    if action.startswith("main_seller_remove_subscription_"):
-        if not await is_admin(user_id):
-            await query.edit_message_text("❌ Owner access only.")
-            return
-        seller_id = int(action.replace("main_seller_remove_subscription_", "", 1))
-        await query.edit_message_text(
-            "⚠️ Remove Seller Subscription\n\n"
-            f"Seller ID: {seller_id}\n\n"
-            "This will remove the seller's current plan assignment. Continue?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Confirm Remove", callback_data=f"main_seller_remove_subscription_confirm_{seller_id}")],
-                [InlineKeyboardButton("↩ Cancel", callback_data=f"main_seller_view_{seller_id}")],
-            ]),
-        )
-        return
-
     if action.startswith("main_seller_remove_subscription_confirm_"):
         if not await is_admin(user_id):
             await query.edit_message_text("❌ Owner access only.")
@@ -1663,6 +1647,22 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             logger.warning("Could not notify seller %s about subscription removal", seller_id, exc_info=True)
         await seller_owner_view(query, seller_id)
+        return
+
+    if action.startswith("main_seller_remove_subscription_") and not action.startswith("main_seller_remove_subscription_confirm_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_", "", 1))
+        await query.edit_message_text(
+            "⚠️ Remove Seller Subscription\n\n"
+            f"Seller ID: {seller_id}\n\n"
+            "This will remove the seller's current plan assignment. Continue?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Confirm Remove", callback_data=f"main_seller_remove_subscription_confirm_{seller_id}")],
+                [InlineKeyboardButton("↩ Cancel", callback_data=f"main_seller_view_{seller_id}")],
+            ]),
+        )
         return
 
     if action.startswith("main_seller_suspend_"):
