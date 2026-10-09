@@ -33,29 +33,30 @@ class ClonePaymentDeliveryMixin:
             username = str(user_id)
         safe_user = html.escape(str(username))
         safe_plan = html.escape(str(plan_name or "Plan"))
-        # Display the actual connected channel/group titles for this plan.
-        # Never expose the internal plan-group database ID in seller warnings.
+        # Resolve the selected plan's target bundle to its actual connected chat
+        # titles. Never display the internal group_id as a user-facing name.
         group_names = []
-        try:
-            target_ids = {
-                int(value) for value in ((plan or {}).get("target_chat_ids") or [])
-                if str(value).strip()
-            }
-            if target_ids:
-                connected_chats = await get_channels(owner_id)
-                for chat in connected_chats or []:
-                    try:
-                        chat_id = int(chat.get("chat_id") or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    title = str(chat.get("title") or "").strip()
-                    if chat_id in target_ids and title and title not in group_names:
-                        group_names.append(title)
-        except Exception:
-            logger.exception(
-                "Could not resolve plan access chat names owner=%s plan=%s",
-                owner_id, plan_name,
-            )
+        selected_group_id = str((plan or {}).get("group_id") or "").strip()
+        if selected_group_id:
+            try:
+                target_group = await get_plan_group(owner_id, selected_group_id)
+            except Exception:
+                target_group = None
+            if target_group:
+                targets = target_group.get("targets") or []
+                group_names = [
+                    str(target.get("title") or "").strip()
+                    for target in targets
+                    if isinstance(target, dict) and str(target.get("title") or "").strip()
+                ]
+                # Keep a predictable display order (e.g. Testing 1, Testing 2).
+                group_names = sorted(dict.fromkeys(group_names), key=str.casefold)
+        # Legacy fallback only: don't leak an ID-like value when the bundle
+        # could not be resolved from the database.
+        if not group_names:
+            legacy_name = str((plan or {}).get("group_name") or "").strip()
+            if legacy_name and legacy_name != selected_group_id:
+                group_names = [legacy_name]
         group_label = f" ({html.escape(', '.join(group_names))})" if group_names else ""
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
