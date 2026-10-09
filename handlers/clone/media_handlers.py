@@ -1,6 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
+from database.seller_subscriptions import save_pending_limit_selection
 
 
 class CloneMediaHandlersMixin:
@@ -115,6 +116,14 @@ class CloneMediaHandlersMixin:
             plan=context.user_data.get("selected_child_plan")
             if not plan: await update.effective_message.reply_text("Select a plan first"); return
             photo=update.effective_message.photo[-1]
+            seller_account_id = self.seller_account(context)
+            limit_status = await seller_subscriber_limit_status(seller_account_id, int(update.effective_user.id), scope_owner_id=owner)
+            if limit_status.get("at_limit") and not limit_status.get("already_active"):
+                await save_pending_limit_selection(seller_account_id, owner, int(update.effective_user.id), str(plan.get("plan_id") or ""), str(plan.get("name") or "Plan"))
+                await self.notify_subscriber_limit(owner, int(update.effective_user.id), plan.get("name"), plan.get("price"), plan=plan)
+                await update.effective_message.reply_text("⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.")
+                context.user_data.pop("waiting_child_screenshot", None)
+                return
             unique=getattr(photo,"file_unique_id","")
             if not await reserve_payment_fingerprint("child",owner,unique,update.effective_user.id):
                 context.user_data.clear(); await update.effective_message.reply_text("⚠️ This payment screenshot was already submitted. Send a new genuine payment proof."); return
