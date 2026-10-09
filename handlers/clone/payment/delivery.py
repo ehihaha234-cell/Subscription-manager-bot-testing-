@@ -33,8 +33,60 @@ class ClonePaymentDeliveryMixin:
             username = str(user_id)
         safe_user = html.escape(str(username))
         safe_plan = html.escape(str(plan_name or "Plan"))
-        group_name = str((plan or {}).get("group_name") or (plan or {}).get("group_id") or "")
-        group_label = f" ({html.escape(group_name)})" if group_name and group_name != safe_plan else ""
+
+        # Show the connected channel/group titles, never the internal plan-group ID.
+        # The plan stores group_id + target_chat_ids; resolve the saved group metadata
+        # first, then fall back to this seller's connected-channel records.
+        access_names = []
+        plan_data = plan or {}
+        group_id = str(plan_data.get("group_id") or "").strip()
+        target_ids = []
+        for value in (plan_data.get("target_chat_ids") or []):
+            try:
+                chat_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if chat_id not in target_ids:
+                target_ids.append(chat_id)
+
+        if group_id:
+            try:
+                plan_group = await get_plan_group(owner_id, group_id)
+                if plan_group:
+                    targets = plan_group.get("targets") or []
+                    for target in targets:
+                        title = str(target.get("title") or "").strip()
+                        if title and title not in access_names:
+                            access_names.append(title)
+                    if not target_ids:
+                        for value in (plan_group.get("chat_ids") or []):
+                            try:
+                                chat_id = int(value)
+                            except (TypeError, ValueError):
+                                continue
+                            if chat_id not in target_ids:
+                                target_ids.append(chat_id)
+            except Exception:
+                logger.exception("Could not resolve plan group titles owner=%s group_id=%s", owner_id, group_id)
+
+        if target_ids and len(access_names) < len(target_ids):
+            try:
+                channels = await get_channels(owner_id)
+                channel_titles = {}
+                for channel in (channels or []):
+                    try:
+                        channel_titles[int(channel.get("chat_id"))] = str(channel.get("title") or "").strip()
+                    except (TypeError, ValueError):
+                        continue
+                for chat_id in target_ids:
+                    title = channel_titles.get(chat_id, "")
+                    if title and title not in access_names:
+                        access_names.append(title)
+            except Exception:
+                logger.exception("Could not resolve connected channel titles owner=%s", owner_id)
+
+        access_label = ", ".join(access_names)
+        group_label = f"{html.escape(access_label)} ({safe_plan})" if access_label else safe_plan
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
@@ -44,7 +96,7 @@ class ClonePaymentDeliveryMixin:
             "⚠️ Active Subscriber Limit Warning\n\n"
             f"👤 User: {safe_user}\n"
             "👈 This user is trying to purchase your plan.\n\n"
-            f"📦 Plan Group: {safe_plan}{group_label}\n\n"
+            f"📦 Plan Group: {group_label}\n\n"
             f"👥 Active Subscribers: {count} / {limit}\n"
             f"📊 Usage: {pct}%\n\n"
             "Your active subscriber limit has been reached.\n"
