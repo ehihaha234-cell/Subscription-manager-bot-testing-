@@ -64,8 +64,12 @@ class CloneAdminCallbacksMixin:
                     except Exception:
                         pass
             return
-        await q.answer()
-        await q.answer()
+        # Answer the callback once; answering twice raises BadRequest and
+        # prevents all feature handlers (including Remove Subscription) from running.
+        try:
+            await q.answer()
+        except Exception:
+            pass
         if role == "moderator":
             allowed_prefixes = (
                 "a_home",
