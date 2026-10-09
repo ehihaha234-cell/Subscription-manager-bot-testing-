@@ -556,10 +556,19 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     if expiry and expiry.tzinfo is None: expiry = expiry.replace(tzinfo=timezone.utc)
     activated = (assignment or {}).get("created_at")
     if activated and activated.tzinfo is None: activated = activated.replace(tzinfo=timezone.utc)
-    subscription_removed = bool(seller.get("subscription_removed_by_owner")) and assignment is None
+    # A removed owner subscription must not fall back to the default Free plan.
+    # Keep the removal state on the seller record after deleting its assignment.
+    removal_record = await db["sellers"].find_one(
+        {"owner_id": int(owner_id)},
+        {"subscription_removed_by_owner": 1},
+    )
+    subscription_removed = bool(
+        (removal_record or seller).get("subscription_removed_by_owner")
+        and assignment is None
+    )
     remaining = "N/A" if subscription_removed else "Unlimited"
     plan_status = "❌ Removed by Owner" if subscription_removed else "✅ Active"
-    if expiry:
+    if expiry and not subscription_removed:
         seconds = int((expiry - now).total_seconds())
         if seconds <= 0:
             remaining, plan_status = "Expired", "❌ Expired"
@@ -609,9 +618,10 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         f"✅ Approved: {'Yes' if seller.get('approved') else 'No'}\n"
         f"🚫 Suspended: {'Yes' if suspended else 'No'}\n\n"
         "💎 Plan Details\n"
-        f"📦 Plan: {escape('Removed by Owner' if subscription_removed else str(plan.get('name','Free')))}\\n📌 Status: {plan_status}\\n"
-        f"📅 Activated: {activated.astimezone(ist).strftime('%d-%m-%Y') if activated else '-'}\n"
-        f"⏳ Expiry: {expiry.astimezone(ist).strftime('%d-%m-%Y %I:%M %p') if expiry else ('Removed' if subscription_removed else 'No expiry')}\\n"
+        f"📦 Plan: {escape('Removed by Owner' if subscription_removed else str(plan.get('name', 'Free')))}\n"
+        f"📌 Status: {plan_status}\n"
+        f"📅 Activated: {activated.astimezone(ist).strftime('%d-%m-%Y') if activated and not subscription_removed else ('Removed' if subscription_removed else '-')}\n"
+        f"⏳ Expiry: {expiry.astimezone(ist).strftime('%d-%m-%Y %I:%M %p') if expiry and not subscription_removed else ('Removed' if subscription_removed else 'No expiry')}\n"
         f"⌛ Remaining: {remaining}\n"
         f"💳 Last Payment Method: {escape(payment_method)}\n"
         f"🧾 Last Transaction ID: <code>{escape(transaction_id)}</code>\n\n"
@@ -1624,18 +1634,18 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Owner access only.")
             return
         seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
-        # Remove the authoritative assignment and persist the removal state so
-        # Seller Details does not incorrectly fall back to "Free / Unlimited".
+        # Delete the current assignment and persist an explicit removal marker.
+        # Without the marker, effective_plan() falls back to Free / Active / Unlimited.
         db = get_database()
         await db["seller_plan_assignments"].delete_one({"owner_id": seller_id})
-        now_removed = datetime.now(timezone.utc)
+        removed_at = datetime.now(timezone.utc)
         await db["sellers"].update_one(
             {"owner_id": int(seller_id)},
             {"$set": {
                 "subscription_removed_by_owner": True,
-                "subscription_removed_at": now_removed,
+                "subscription_removed_at": removed_at,
                 "subscription_removed_by": int(user_id),
-                "updated_at": now_removed,
+                "updated_at": removed_at,
             }},
             upsert=False,
         )
@@ -1644,9 +1654,9 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.get_bot().send_message(
                 chat_id=int(seller_id),
                 text=(
-                    "⚠️ Seller Subscription Removed by Owner\\n\\n"
-                    "Your seller subscription has been removed by the owner.\\n\\n"
-                    "Your current seller plan is no longer active.\\n\\n"
+                    "⚠️ Seller Subscription Removed by Owner\n\n"
+                    "Your seller subscription has been removed by the owner.\n\n"
+                    "Your current seller plan is no longer active.\n\n"
                     "Please contact support or the owner if you need assistance."
                 ),
             )
