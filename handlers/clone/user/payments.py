@@ -116,7 +116,7 @@ async def handle(self, update, context, q, owner, action):
         seller_account_id = self.seller_account(context)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
-            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'))
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
             await self.safe_query_message(
                 q,
                 '⚠️ Subscriber is limited\\n\\nThis seller has reached the maximum active subscriber limit. Please try again later.',
@@ -268,7 +268,7 @@ async def handle(self, update, context, q, owner, action):
         seller_account_id = self.seller_account(context)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
-            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'))
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
             await self.safe_query_message(
                 q,
                 '⚠️ Subscriber is limited\\n\\nThis seller has reached the maximum active subscriber limit. Please try again later.',
