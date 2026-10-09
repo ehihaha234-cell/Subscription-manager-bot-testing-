@@ -556,8 +556,9 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     if expiry and expiry.tzinfo is None: expiry = expiry.replace(tzinfo=timezone.utc)
     activated = (assignment or {}).get("created_at")
     if activated and activated.tzinfo is None: activated = activated.replace(tzinfo=timezone.utc)
-    remaining = "Unlimited"
-    plan_status = "✅ Active"
+    subscription_removed = bool(seller.get("subscription_removed_by_owner")) and assignment is None
+    remaining = "N/A" if subscription_removed else "Unlimited"
+    plan_status = "❌ Removed by Owner" if subscription_removed else "✅ Active"
     if expiry:
         seconds = int((expiry - now).total_seconds())
         if seconds <= 0:
@@ -608,9 +609,9 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         f"✅ Approved: {'Yes' if seller.get('approved') else 'No'}\n"
         f"🚫 Suspended: {'Yes' if suspended else 'No'}\n\n"
         "💎 Plan Details\n"
-        f"📦 Plan: {escape(str(plan.get('name','Free')))}\n📌 Status: {plan_status}\n"
+        f"📦 Plan: {escape('Removed by Owner' if subscription_removed else str(plan.get('name','Free')))}\\n📌 Status: {plan_status}\\n"
         f"📅 Activated: {activated.astimezone(ist).strftime('%d-%m-%Y') if activated else '-'}\n"
-        f"⏳ Expiry: {expiry.astimezone(ist).strftime('%d-%m-%Y %I:%M %p') if expiry else 'No expiry'}\n"
+        f"⏳ Expiry: {expiry.astimezone(ist).strftime('%d-%m-%Y %I:%M %p') if expiry else ('Removed' if subscription_removed else 'No expiry')}\\n"
         f"⌛ Remaining: {remaining}\n"
         f"💳 Last Payment Method: {escape(payment_method)}\n"
         f"🧾 Last Transaction ID: <code>{escape(transaction_id)}</code>\n\n"
@@ -1602,47 +1603,56 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await seller_owner_view(query, int(action.replace("main_seller_view_", "")))
         return
 
-    # Handle the longer confirm callback BEFORE the general remove prefix.
-    # Otherwise the general prefix captures the confirmation button as well.
-    if action.startswith("main_seller_remove_subscription_confirm_"):
-        if not await is_admin(user_id):
-            await query.answer("Owner access only.", show_alert=True)
-            return
-        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
-        result = await get_database()["seller_plan_assignments"].delete_one({"owner_id": seller_id})
-        await query.answer("Seller subscription removed.", show_alert=True)
-
-        # Notify the seller from the main bot after the subscription is removed.
-        try:
-            await context.bot.send_message(
-                chat_id=seller_id,
-                text=(
-                    "⚠️ Seller Subscription Removed by Owner\\n\\n"
-                    "Your seller subscription has been removed by the owner.\\n"
-                    "Your current seller plan is no longer active.\\n\\n"
-                    "Please contact support or the owner if you need assistance."
-                ),
-            )
-        except TelegramError:
-            logger.warning("Could not notify seller %s about subscription removal", seller_id, exc_info=True)
-
-        await seller_owner_view(query, seller_id)
-        return
-
     if action.startswith("main_seller_remove_subscription_"):
         if not await is_admin(user_id):
-            await query.answer("Owner access only.", show_alert=True)
+            await query.edit_message_text("❌ Owner access only.")
             return
         seller_id = int(action.replace("main_seller_remove_subscription_", "", 1))
         await query.edit_message_text(
-            "⚠️ Remove Seller Subscription\\n\\n"
-            f"Seller ID: {seller_id}\\n\\n"
+            "⚠️ Remove Seller Subscription\n\n"
+            f"Seller ID: {seller_id}\n\n"
             "This will remove the seller's current plan assignment. Continue?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Confirm Remove", callback_data=f"main_seller_remove_subscription_confirm_{seller_id}")],
                 [InlineKeyboardButton("↩ Cancel", callback_data=f"main_seller_view_{seller_id}")],
             ]),
         )
+        return
+
+    if action.startswith("main_seller_remove_subscription_confirm_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
+        # Remove the authoritative assignment and persist the removal state so
+        # Seller Details does not incorrectly fall back to "Free / Unlimited".
+        db = get_database()
+        await db["seller_plan_assignments"].delete_one({"owner_id": seller_id})
+        now_removed = datetime.now(timezone.utc)
+        await db["sellers"].update_one(
+            {"owner_id": int(seller_id)},
+            {"$set": {
+                "subscription_removed_by_owner": True,
+                "subscription_removed_at": now_removed,
+                "subscription_removed_by": int(user_id),
+                "updated_at": now_removed,
+            }},
+            upsert=False,
+        )
+        await query.answer("Seller subscription removed.", show_alert=True)
+        try:
+            await query.get_bot().send_message(
+                chat_id=int(seller_id),
+                text=(
+                    "⚠️ Seller Subscription Removed by Owner\\n\\n"
+                    "Your seller subscription has been removed by the owner.\\n\\n"
+                    "Your current seller plan is no longer active.\\n\\n"
+                    "Please contact support or the owner if you need assistance."
+                ),
+            )
+        except TelegramError:
+            logger.warning("Could not notify seller %s about subscription removal", seller_id, exc_info=True)
+        await seller_owner_view(query, seller_id)
         return
 
     if action.startswith("main_seller_suspend_"):
