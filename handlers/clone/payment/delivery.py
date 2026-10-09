@@ -2,6 +2,7 @@
 
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
+from database.seller_subscriptions import save_pending_limit_selection
 
 
 class ClonePaymentDeliveryMixin:
@@ -68,6 +69,58 @@ class ClonePaymentDeliveryMixin:
             logger.exception("Could not notify seller subscriber limit owner=%s", seller_account_id)
         return {"sent": sent, "count": count, "limit": limit, "usage_percent": pct}
 
+    async def resume_pending_limited_purchases(self, seller_id: int) -> dict:
+        """Resume blocked plan selections once the upgraded plan provides capacity."""
+        from database.seller_subscriptions import pending_limit_selections, clear_pending_limit_selection
+        from database.seller_bots import get_bot_by_data_owner_id
+        pending = await pending_limit_selections(int(seller_id))
+        resumed = 0
+        for item in pending:
+            scope, user_id, plan_id = int(item.get("scope_owner_id") or 0), int(item.get("user_id") or 0), str(item.get("plan_id") or "")
+            if not scope or not user_id or not plan_id:
+                continue
+            record = await get_bot_by_data_owner_id(scope)
+            if not record:
+                continue
+            bot_id = int(record.get("bot_id") or 0)
+            running = self.get_running(bot_id) or self.get_running(scope)
+            if not running and bot_id:
+                started = await self.start_bot(bot_id)
+                running = self.get_running(bot_id) if started else None
+            if not running:
+                continue
+            plan = await get_plan(scope, plan_id)
+            if not plan:
+                await clear_pending_limit_selection(seller_id, scope, user_id)
+                continue
+            status = await seller_subscriber_limit_status(int(seller_id), user_id, scope_owner_id=scope)
+            if status.get("at_limit") and not status.get("already_active"):
+                continue
+            cfg = await get_gateway_config("seller", scope, decrypt=True)
+            settings = await get_seller_settings(scope)
+            gateways = cfg.get("gateways") or {}
+            currency = normalize_currency(settings.get("currency")) or "INR"
+            enabled = [g for g in SUPPORTED_GATEWAYS if (gateways.get(g) or {}).get("enabled")] if currency == "INR" else []
+            default_gateway = str(cfg.get("default_gateway") or "")
+            if default_gateway in enabled:
+                enabled.remove(default_gateway); enabled.insert(0, default_gateway)
+            rows = []
+            if enabled:
+                rows.append([InlineKeyboardButton(f"💳 {enabled[0].title()} Payment", callback_data=f"c_pg_{enabled[0]}_{plan_id}")])
+            stars = int(plan.get("stars_price", 0) or 0)
+            if cfg.get("stars_enabled") and stars > 0:
+                rows.append([InlineKeyboardButton(f"⭐ Pay {stars} Stars", callback_data=f"c_star_{plan_id}")])
+            if cfg.get("manual_enabled", True):
+                rows.append([InlineKeyboardButton("📤 Manual Payment / Upload Screenshot", callback_data=f"c_manual_{plan_id}")])
+            rows.append([InlineKeyboardButton("⬅ Back", callback_data="c_payment_back")])
+            try:
+                await running.application.bot.send_message(chat_id=user_id, text=f"✅ Your selected plan is available again.\n\n📦 Plan: {plan.get('name', 'Plan')}\nChoose a payment method to continue.", reply_markup=InlineKeyboardMarkup(rows))
+                await clear_pending_limit_selection(seller_id, scope, user_id)
+                resumed += 1
+            except Exception:
+                logger.exception("Could not resume pending purchase seller=%s user=%s scope=%s", seller_id, user_id, scope)
+        return {"resumed": resumed, "pending": len(pending)}
+
     async def stars_precheckout(self, update, context):
         query = update.pre_checkout_query
         try:
@@ -84,8 +137,9 @@ class ClonePaymentDeliveryMixin:
             seller_account_id = int(context.application.bot_data.get("seller_account_id") or owner)
             limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
             if limit_status.get('at_limit') and not limit_status.get('already_active'):
+                await save_pending_limit_selection(seller_account_id, owner, user_id, str(plan_id), str(plan.get('name') or 'Plan'))
                 await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected, plan=plan)
-                await query.answer(ok=False, error_message='Subscriber is limited. Please try again later.')
+                await query.answer(ok=False, error_message='Subscriber limit reached. Please wait for the admin approval.')
                 return
             await query.answer(ok=True)
         except Exception:
