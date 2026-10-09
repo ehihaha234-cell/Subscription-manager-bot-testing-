@@ -392,14 +392,16 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        await q.edit_message_text(
-            "✅ Subscription Extended Successfully\n\n"
-            f"Seller: {seller.get('first_name') or pending['seller_id']}\n"
-            f"Plan: {plan.get('name',pending['plan_id'])}\n"
-            f"Added: {pending['days']} Days\n"
-            f"New Expiry: {expiry.strftime('%d %b %Y, %I:%M %p UTC') if expiry else '-'}",
-            reply_markup=back(f"main_seller_view_{pending['seller_id']}"),
-        ); return
+        # Refresh the actual Seller Details page immediately after updating the
+        # assignment, so Plan / Status / Expiry / Remaining are read from MongoDB
+        # again instead of leaving the owner on a stale confirmation screen.
+        try:
+            await q.answer("Subscription extended successfully.", show_alert=False)
+        except Exception:
+            pass
+        from handlers.main_dashboard import seller_owner_view
+        await seller_owner_view(q, int(pending["seller_id"]))
+        return
     if a.startswith("sub_mgmt_extend_cancel"):
         pending=context.user_data.get("pending_extension") or {}
         seller_id=pending.get("seller_id")

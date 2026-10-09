@@ -1602,21 +1602,9 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await seller_owner_view(query, int(action.replace("main_seller_view_", "")))
         return
 
-    # Handle confirmation before the broader prefix; otherwise "confirm_<id>"
-    # is parsed as an integer seller ID and the callback fails.
-    if action.startswith("main_seller_remove_subscription_confirm_"):
-        if not await is_admin(user_id):
-            await query.answer("❌ Owner access only.", show_alert=True)
-            return
-        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
-        await get_database()["seller_plan_assignments"].delete_one({"owner_id": seller_id})
-        await query.answer("Seller subscription removed.", show_alert=True)
-        await seller_owner_view(query, seller_id)
-        return
-
     if action.startswith("main_seller_remove_subscription_"):
         if not await is_admin(user_id):
-            await query.answer("❌ Owner access only.", show_alert=True)
+            await query.edit_message_text("❌ Owner access only.")
             return
         seller_id = int(action.replace("main_seller_remove_subscription_", "", 1))
         await query.edit_message_text(
@@ -1628,6 +1616,18 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("↩ Cancel", callback_data=f"main_seller_view_{seller_id}")],
             ]),
         )
+        return
+
+    if action.startswith("main_seller_remove_subscription_confirm_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
+        # Remove the authoritative assignment record, then render Seller Details
+        # again so the plan/status/expiry fields reflect the latest database state.
+        await get_database()["seller_plan_assignments"].delete_one({"owner_id": seller_id})
+        await query.answer("Seller subscription removed.", show_alert=True)
+        await seller_owner_view(query, seller_id)
         return
 
     if action.startswith("main_seller_suspend_"):
