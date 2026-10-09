@@ -277,6 +277,30 @@ async def plan_limit_warning(owner_id: int):
     )
 
 
+
+
+PENDING_LIMIT_SELECTIONS = "seller_pending_limit_selections"
+
+def _pending_limit_selections():
+    return get_database()[PENDING_LIMIT_SELECTIONS]
+
+async def save_pending_limit_selection(seller_id: int, scope_owner_id: int, user_id: int, plan_id: str, plan_name: str = ""):
+    """Persist a user's chosen clone plan while that clone's subscriber limit is full."""
+    now = datetime.now(timezone.utc)
+    key = {"seller_id": int(seller_id), "scope_owner_id": int(scope_owner_id), "user_id": int(user_id)}
+    await _pending_limit_selections().update_one(
+        key, {"$set": {**key, "plan_id": str(plan_id), "plan_name": str(plan_name or "Plan"),
+                       "created_at": now, "updated_at": now, "status": "waiting_limit"}}, upsert=True
+    )
+    return True
+
+async def pending_limit_selections(seller_id: int):
+    return await _pending_limit_selections().find({"seller_id": int(seller_id), "status": "waiting_limit"}).to_list(length=500)
+
+async def clear_pending_limit_selection(seller_id: int, scope_owner_id: int, user_id: int):
+    await _pending_limit_selections().delete_one({"seller_id": int(seller_id), "scope_owner_id": int(scope_owner_id), "user_id": int(user_id)})
+
+
 async def seller_active_subscriber_ids(owner_id: int):
     """Return unique active subscriber IDs across every clone-data scope.
 
@@ -564,6 +588,17 @@ async def assign_plan_with_history(owner_id: int, plan_id: str, days: int | None
         amount=float(amount or 0), approved_by=approved_by,
         expiry_date=assignment.get("expiry_date"),
     )
+    # A plan upgrade may free a previously blocked purchase. Resume only when
+    # the pending user's selected clone now has capacity; failures must not
+    # affect the already-completed plan activation.
+    try:
+        from services.bot_manager import bot_manager
+        resume = getattr(bot_manager, "resume_pending_limited_purchases", None)
+        if resume:
+            await resume(int(owner_id))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Could not resume pending limited purchases seller_id=%s", owner_id)
     return assignment
 
 
