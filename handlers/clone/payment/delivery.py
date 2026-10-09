@@ -57,7 +57,10 @@ class ClonePaymentDeliveryMixin:
             legacy_name = str((plan or {}).get("group_name") or "").strip()
             if legacy_name and legacy_name != selected_group_id:
                 group_names = [legacy_name]
-        group_label = f" ({html.escape(', '.join(group_names))})" if group_names else ""
+        group_display = (
+            f"{html.escape(', '.join(group_names))} ({safe_plan})"
+            if group_names else safe_plan
+        )
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
@@ -67,7 +70,7 @@ class ClonePaymentDeliveryMixin:
             "⚠️ Active Subscriber Limit Warning\n\n"
             f"👤 User: {safe_user}\n"
             "👈 This user is trying to purchase your plan.\n\n"
-            f"📦 Plan Group: {safe_plan}{group_label}\n\n"
+            f"📦 Plan Group: {group_display}\n\n"
             f"👥 Active Subscribers: {count} / {limit}\n"
             f"📊 Usage: {pct}%\n\n"
             "Your active subscriber limit has been reached.\n"
