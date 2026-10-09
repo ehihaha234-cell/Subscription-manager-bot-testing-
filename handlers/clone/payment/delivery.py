@@ -5,8 +5,8 @@ from database.business_delivery import list_business_contact_routes, log_busines
 
 
 class ClonePaymentDeliveryMixin:
-    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount) -> dict:
-        """Tell the buyer and seller that the seller's subscriber limit is full."""
+    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount=None, plan: dict | None = None) -> dict:
+        """Notify the buyer and seller from the clone bot when its limit is full."""
         owner_id = int(owner_id)
         user_id = int(user_id)
         running = self.get_running(owner_id)
@@ -18,44 +18,55 @@ class ClonePaymentDeliveryMixin:
             return {"sent": 0, "error": "Clone bot is not running"}
 
         seller_account_id = int(running.application.bot_data.get("seller_account_id", owner_id))
-        status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner_id)
+        status = await seller_subscriber_limit_status(
+            seller_account_id, user_id, scope_owner_id=owner_id
+        )
         count = int(status.get("count", 0))
         limit = int(status.get("limit", 0))
-        pct = 100 if limit == 0 else int((count / limit) * 100) if limit > 0 else 0
-        pct = min(100, max(0, pct))
-        plan_name = html.escape(str(plan_name or "Subscription"))
-        amount_text = str(amount if amount is not None else "-")
+        pct = int((count / limit) * 100) if limit > 0 else 0
+        pct = max(0, pct)
+        try:
+            user = await running.application.bot.get_chat(user_id)
+            username = f"@{user.username}" if getattr(user, "username", None) else (getattr(user, "full_name", None) or str(user_id))
+        except Exception:
+            username = str(user_id)
+        safe_user = html.escape(str(username))
+        safe_plan = html.escape(str(plan_name or "Plan"))
+        group_name = str((plan or {}).get("group_name") or (plan or {}).get("group_id") or "")
+        group_label = f" ({html.escape(group_name)})" if group_name and group_name != safe_plan else ""
         main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
         buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Buy / Change Plan", url=buy_url),
-             InlineKeyboardButton("👤 Profile", callback_data="a_seller_profile")]
+            [InlineKeyboardButton("💎 Renew / Upgrade Plan", url=buy_url)],
         ])
         seller_text = (
-            f"🚨 New user is trying to purchase your plan\n\n"
-            f"📦 Plan: {plan_name}\n"
-            f"💰 Price: {amount_text}\n\n"
-            f"⚠️ Warning: Your subscribers are at {count} / {limit} ({pct}%)\n"
-            f"Please renew your seller plan."
+            "⚠️ Active Subscriber Limit Warning\n\n"
+            f"👤 User: {safe_user}\n"
+            "👈 This user is trying to purchase your plan.\n\n"
+            f"📦 Plan Group: {safe_plan}{group_label}\n\n"
+            f"👥 Active Subscribers: {count} / {limit}\n"
+            f"📊 Usage: {pct}%\n\n"
+            "Your active subscriber limit has been reached.\n"
+            "Please upgrade your plan."
         )
         buyer_text = (
-            "⚠️ Subscriber is limited\n\n"
-            "This seller has reached the maximum active subscriber limit. "
-            "Please try again later."
+            "⚠️ Subscriber Limit Reached\n\n"
+            "The active subscriber limit has been reached.\n"
+            "Please wait for the admin approval."
         )
         bot = running.application.bot
         sent = 0
         try:
-            await bot.send_message(user_id, buyer_text)
+            await bot.send_message(chat_id=user_id, text=buyer_text)
             sent += 1
         except Exception:
             logger.debug("Could not notify limited subscriber user=%s", user_id, exc_info=True)
         try:
-            await bot.send_message(seller_account_id, seller_text, reply_markup=keyboard)
+            await bot.send_message(chat_id=seller_account_id, text=seller_text, reply_markup=keyboard)
             sent += 1
         except Exception:
             logger.exception("Could not notify seller subscriber limit owner=%s", seller_account_id)
-        return {"sent": sent, "count": count, "limit": limit}
+        return {"sent": sent, "count": count, "limit": limit, "usage_percent": pct}
 
     async def stars_precheckout(self, update, context):
         query = update.pre_checkout_query
@@ -73,7 +84,7 @@ class ClonePaymentDeliveryMixin:
             seller_account_id = int(context.application.bot_data.get("seller_account_id") or owner)
             limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
             if limit_status.get('at_limit') and not limit_status.get('already_active'):
-                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected)
+                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected, plan=plan)
                 await query.answer(ok=False, error_message='Subscriber is limited. Please try again later.')
                 return
             await query.answer(ok=True)
@@ -113,7 +124,7 @@ class ClonePaymentDeliveryMixin:
             seller_account_id = self.seller_account(context)
             limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
             if limit_status.get('at_limit') and not limit_status.get('already_active'):
-                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected)
+                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected, plan=plan)
                 await update.effective_message.reply_text('⚠️ Subscriber limit reached. Payment was received but this subscription could not be activated. Please contact the seller.')
                 return
             await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference, stars_amount=payment.total_amount)
