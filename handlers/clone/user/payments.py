@@ -119,7 +119,11 @@ async def handle(self, update, context, q, owner, action):
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
             await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or action.replace('c_select_', '')), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
-            await self.safe_query_message(q, '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.', back_keyboard)
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
             return True
         if enabled:
             gateway = enabled[0]
@@ -268,7 +272,11 @@ async def handle(self, update, context, q, owner, action):
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
             await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or plan_id), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
-            await self.safe_query_message(q, '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.', back_keyboard)
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
             return True
         s = await get_seller_settings(owner)
         currency = normalize_currency(s.get('currency')) or 'INR'
@@ -365,7 +373,11 @@ async def handle(self, update, context, q, owner, action):
         if status.get('at_limit') and not status.get('already_active'):
             await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan_id), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
-            await self.safe_query_message(q, '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.', back_keyboard)
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
             return True
         context.user_data['selected_child_plan'] = plan
         context.user_data['waiting_child_screenshot'] = True
