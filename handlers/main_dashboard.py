@@ -515,6 +515,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         else: paused_count += 1
         token = await get_decrypted_bot_token(int(bot["bot_id"])) or ""
         if token:
+            # Preserve the existing Seller Details display: show the complete stored API token.
             token_display = token
             token_status = "Valid / Stored"
         else:
@@ -537,7 +538,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             f"   Bot ID: <code>{int(bot.get('bot_id') or 0)}</code>\n"
             f"   API Token: <code>{escape(token_display)}</code>\n"
             f"   Token Status: {escape(token_status)}\n"
-            f"   👥 Users: {users} | 💎 Active: {active} | 💰 Revenue: ₹{revenue:g}\n"
+            f"   👥 Users: {users} | 💎 Active: {active} / {int(plan.get('active_subscriber_limit', 25) or 0)} | 💰 Revenue: ₹{revenue:g}\n"
             f"   📢 Connected Channels/Groups:\n"
             + ("\n".join(channel_lines) if channel_lines else "   None")
         )
@@ -613,12 +614,12 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
         f"⌛ Remaining: {remaining}\n"
         f"💳 Last Payment Method: {escape(payment_method)}\n"
         f"🧾 Last Transaction ID: <code>{escape(transaction_id)}</code>\n\n"
-        "📊 Usage & Limitations — All Clone Bots\n"
+        "📊 Seller Limitations\n"
         f"🤖 Clone Bots: {len(all_management_bots)} / {limit_value('bot_limit',1)}\n"
-        f"👥 Active Subscribers: {active_count} / {limit_value('active_subscriber_limit',25)}\n"
-        f"📢 Channels / Groups: {channel_count} / {limit_value('channel_limit',1)}\n"
-        f"📦 Subscription Plans: {plan_count} / {limit_value('plan_limit',2)}\n"
-        f"👮 Admins / Staff: {staff_count} / {limit_value('admin_limit',1)}\n\n"
+        f"👥 Active Subscribers: {limit_value('active_subscriber_limit',25)}\n"
+        f"📢 Channels / Groups: {limit_value('channel_limit',1)}\n"
+        f"📦 Subscription Plans: {limit_value('plan_limit',2)}\n"
+        f"👮 Admins / Staff: {limit_value('admin_limit',1)}\n\n"
         "📈 Seller Statistics — Combined\n"
         f"🤖 Running Bots: {running_count} | Stopped: {paused_count}\n"
         f"👥 Total Users: {total_users_count}\n💳 Pending Payments: {pending_count}\n"
@@ -628,13 +629,12 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
     )
 
     keyboard = [
-        [InlineKeyboardButton("⏳ Extend Subscription", callback_data=f"sub_mgmt_extend_{owner_id}")],
+        [InlineKeyboardButton("💎 Change / Extend Plan", callback_data=f"sub_mgmt_extend_{owner_id}")],
+        [InlineKeyboardButton("❌ Remove Subscription", callback_data=f"main_seller_remove_subscription_{owner_id}")],
+        [InlineKeyboardButton("💬 Contact Seller", callback_data=f"main_owner_message_seller_{owner_id}")],
         [InlineKeyboardButton("✅ Unsuspend Seller" if suspended else "🚫 Suspend Seller",
             callback_data=f"main_seller_unsuspend_{owner_id}" if suspended else f"main_seller_suspend_{owner_id}")],
-        [InlineKeyboardButton("💬 Message Seller", callback_data=f"main_owner_message_seller_{owner_id}")],
-        [InlineKeyboardButton("💎 Change / Extend Plan", callback_data=f"sub_mgmt_extend_{owner_id}")],
         [InlineKeyboardButton("📜 Subscription History", callback_data=f"sub_mgmt_history_{owner_id}")],
-        [InlineKeyboardButton("💰 Seller Revenue", callback_data="sub_mgmt_revenue")],
     ]
     for bot in bots:
         bot_id = int(bot.get("bot_id") or 0)
@@ -648,10 +648,7 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             label = f"▶ Resume ({bot_name})"
             callback = f"main_seller_resumebot_{owner_id}_{bot_id}"
         keyboard.append([InlineKeyboardButton(label[:64], callback_data=callback)])
-    keyboard += [
-        [InlineKeyboardButton("⬅ Sellers", callback_data="main_owner_sellers")],
-        [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
-    ]
+    keyboard.append([InlineKeyboardButton("⬅ Back to Sellers", callback_data="main_owner_sellers")])
     return text, InlineKeyboardMarkup(keyboard)
 
 
@@ -1603,6 +1600,32 @@ async def main_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Owner access only.")
             return
         await seller_owner_view(query, int(action.replace("main_seller_view_", "")))
+        return
+
+    if action.startswith("main_seller_remove_subscription_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_", "", 1))
+        await query.edit_message_text(
+            "⚠️ Remove Seller Subscription\n\n"
+            f"Seller ID: {seller_id}\n\n"
+            "This will remove the seller's current plan assignment. Continue?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Confirm Remove", callback_data=f"main_seller_remove_subscription_confirm_{seller_id}")],
+                [InlineKeyboardButton("↩ Cancel", callback_data=f"main_seller_view_{seller_id}")],
+            ]),
+        )
+        return
+
+    if action.startswith("main_seller_remove_subscription_confirm_"):
+        if not await is_admin(user_id):
+            await query.edit_message_text("❌ Owner access only.")
+            return
+        seller_id = int(action.replace("main_seller_remove_subscription_confirm_", "", 1))
+        await get_database()["seller_plan_assignments"].delete_one({"owner_id": seller_id})
+        await query.answer("Seller subscription removed.", show_alert=True)
+        await seller_owner_view(query, seller_id)
         return
 
     if action.startswith("main_seller_suspend_"):
