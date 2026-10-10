@@ -1038,21 +1038,26 @@ async def fulfill_transaction(tx: dict) -> None:
             if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_buyer"):
                 try:
                     limit_text = (
-                        "⚠️ Active Subscriber Limit Reached\\n\\n"
-                        "✅ Your payment has been verified successfully.\\n"
-                        "Your subscription is waiting because the seller's active subscriber limit is full.\\n\\n"
-                        "💾 Your payment and plan details are saved. You do not need to pay again or select the plan again.\\n"
+                        "⚠️ Active Subscriber Limit Reached\n\n"
+                        "✅ Your payment has been verified successfully.\n"
+                        "Your subscription is waiting because the seller's active subscriber limit is full.\n\n"
+                        "💾 Your payment and plan details are saved. You do not need to pay again or select the plan again.\n"
                         "🔔 Your subscription confirmation and group invite link will be sent automatically as soon as a slot becomes available."
                     )
                     from services.bot_manager import bot_manager
                     bot_id = int((tx.get("metadata") or {}).get("bot_id") or 0)
-                    running = bot_manager.get_running(seller_id) or (bot_manager.get_running(bot_id) if bot_id else None)
+                    # Resolve the exact clone runtime first. Seller/data-owner IDs
+                    # are not guaranteed to equal a clone bot ID.
+                    running = bot_manager.get_running(bot_id) if bot_id else None
                     if not running:
                         record = await get_bot_by_data_owner_id(seller_id)
                         if record:
-                            started = await bot_manager.start_bot(int(record.get("bot_id") or bot_id))
-                            if started:
-                                running = bot_manager.get_running(seller_id) or (bot_manager.get_running(bot_id) if bot_id else None)
+                            resolved_bot_id = int(record.get("bot_id") or bot_id or 0)
+                            running = bot_manager.get_running(resolved_bot_id) if resolved_bot_id else None
+                            if not running and resolved_bot_id:
+                                started = await bot_manager.start_bot(resolved_bot_id)
+                                if started:
+                                    running = bot_manager.get_running(resolved_bot_id)
                     if not running:
                         raise GatewayError("Clone bot is unavailable for pending-limit notice")
                     bot = running.application.bot
@@ -1078,12 +1083,11 @@ async def fulfill_transaction(tx: dict) -> None:
                                 tx["transaction_id"], edit_exc,
                             )
                     if not edited:
-                        sent = await bot.send_message(chat_id=int(tx["payer_user_id"]), text=limit_text)
-                        await update_gateway_transaction(
-                            tx["transaction_id"],
-                            payment_message_chat_id=int(sent.chat_id),
-                            payment_message_id=int(sent.message_id),
-                            payment_message_type="text",
+                        # User explicitly requires editing the existing payment page,
+                        # not sending a second warning message. Fresh payment-link
+                        # transactions persist this message ID when checkout is shown.
+                        raise GatewayError(
+                            "Original payment page could not be edited; refusing to send a duplicate message"
                         )
                     await complete_transaction_notification(
                         tx["transaction_id"], "subscriber_limit_buyer",
@@ -1105,6 +1109,7 @@ async def fulfill_transaction(tx: dict) -> None:
                         tx.get("amount", 0),
                         plan=plan,
                         purchased=True,
+                        bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
                     )
                     await complete_transaction_notification(
                         tx["transaction_id"], "subscriber_limit_seller", notice
@@ -1205,6 +1210,7 @@ async def fulfill_transaction(tx: dict) -> None:
                         "group_id": group_id,
                         "target_chat_ids": target_chat_ids,
                     },
+                    bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
                 )
                 if delivery.get("error") or (
                     int(delivery.get("sent", 0) or 0) == 0
