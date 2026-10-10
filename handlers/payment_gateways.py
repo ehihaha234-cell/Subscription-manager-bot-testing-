@@ -120,11 +120,16 @@ def _home_keyboard(scope: str, cfg: dict):
     return _kb(rows)
 
 
-def _gateway_keyboard(scope: str, gateway: str, enabled: bool):
+def _gateway_keyboard(scope: str, gateway: str, enabled: bool, mode: str = "live"):
     rows = [
         [InlineKeyboardButton("⛔ Disable" if enabled else "✅ Enable", callback_data=f"pgcfg_{scope}_{gateway}_toggle")],
         [InlineKeyboardButton("🔑 Set / Replace Credentials", callback_data=f"pgcfg_{scope}_{gateway}_credentials")],
     ]
+    if gateway == "cashfree":
+        selected_mode = "test" if str(mode or "live").lower() == "test" else "live"
+        next_mode = "live" if selected_mode == "test" else "test"
+        mode_label = "TEST / SANDBOX" if selected_mode == "test" else "LIVE"
+        rows.append([InlineKeyboardButton(f"🧪 Mode: {mode_label} (tap to switch)", callback_data=f"pgcfg_{scope}_{gateway}_mode_{next_mode}")])
     if gateway == "razorpay":
         rows += [
             [InlineKeyboardButton("🔐 Set Webhook Secret", callback_data=f"pgcfg_{scope}_razorpay_field_webhook_secret")],
@@ -148,7 +153,8 @@ def _gateway_header(scope: str, gateway: str, gcfg: dict) -> str:
     else:
         credential_lines = (
             f"Client ID: {_masked(gcfg.get('client_id'))}\n"
-            f"Client Secret: {'Added' if gcfg.get('client_secret') else 'Not added'}"
+            f"Client Secret: {'Added' if gcfg.get('client_secret') else 'Not added'}\n"
+            f"Mode: {'TEST / SANDBOX' if str(gcfg.get('mode') or 'live').lower() == 'test' else 'LIVE'}"
         )
     return (
         f"💳 {gateway.title()}\n\n"
@@ -226,7 +232,7 @@ async def gateway_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not suffix:
         await q.edit_message_text(
             _gateway_header(scope, gateway, gcfg),
-            reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled"))),
+            reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled")), str(gcfg.get("mode") or "live")),
         )
         return
 
@@ -236,15 +242,19 @@ async def gateway_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             missing = ", ".join(gateway_missing_fields(gateway, gcfg))
             await q.answer(f"Set credentials first: {missing}", show_alert=True)
             return
-        cfg = await save_gateway_config(scope, owner_id, gateway, {"enabled": enable, "mode": "live"})
+        cfg = await save_gateway_config(scope, owner_id, gateway, {"enabled": enable})
         gcfg = (cfg.get("gateways") or {}).get(gateway) or {}
-        await q.edit_message_text(_gateway_header(scope, gateway, gcfg), reply_markup=_gateway_keyboard(scope, gateway, enable))
+        await q.edit_message_text(_gateway_header(scope, gateway, gcfg), reply_markup=_gateway_keyboard(scope, gateway, enable, str(gcfg.get("mode") or "live")))
         return
 
-    if suffix.startswith("mode_"):
-        cfg = await save_gateway_config(scope, owner_id, gateway, {"mode": "live"})
+    if suffix.startswith("mode_") and gateway == "cashfree":
+        requested_mode = suffix.split("_", 1)[1].strip().lower()
+        if requested_mode not in {"test", "live"}:
+            await q.answer("Invalid mode", show_alert=True)
+            return
+        cfg = await save_gateway_config(scope, owner_id, gateway, {"mode": requested_mode})
         gcfg = (cfg.get("gateways") or {}).get(gateway) or {}
-        await q.edit_message_text(_gateway_header(scope, gateway, gcfg), reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled"))))
+        await q.edit_message_text(_gateway_header(scope, gateway, gcfg), reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled")), str(gcfg.get("mode") or "live")))
         return
 
     if gateway == "razorpay" and suffix == "webhook":
@@ -309,14 +319,14 @@ async def gateway_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = await test_gateway_connection(scope, owner_id, gateway)
             await q.edit_message_text(
                 f"✅ {gateway.title()} connection successful.\n\n"
-                "Mode: LIVE\n"
+                f"Mode: {'TEST / SANDBOX' if result.get('mode') == 'test' else 'LIVE'}\n"
                 f"Account/API access verified.",
-                reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled"))),
+                reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled")), str(gcfg.get("mode") or "live")),
             )
         except GatewayError as exc:
             await q.edit_message_text(
                 f"❌ {gateway.title()} connection failed.\n\n{exc}",
-                reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled"))),
+                reply_markup=_gateway_keyboard(scope, gateway, bool(gcfg.get("enabled")), str(gcfg.get("mode") or "live")),
             )
         return
 
@@ -367,7 +377,7 @@ async def gateway_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             payload = {"client_id": values[0], "client_secret": values[1]}
         else:
             raise ValueError("Invalid format")
-        cfg = await save_gateway_config(state["scope"], state["owner_id"], gateway, {**payload, "mode": "live"})
+        cfg = await save_gateway_config(state["scope"], state["owner_id"], gateway, payload)
         context.user_data.pop("pgcfg_wait", None)
         try:
             await update.effective_message.delete()
@@ -377,7 +387,7 @@ async def gateway_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=_gateway_header(state["scope"], gateway, gcfg),
-            reply_markup=_gateway_keyboard(state["scope"], gateway, bool(gcfg.get("enabled"))),
+            reply_markup=_gateway_keyboard(state["scope"], gateway, bool(gcfg.get("enabled")), str(gcfg.get("mode") or "live")),
         )
     except Exception as exc:
         await update.effective_message.reply_text(f"❌ Could not save: {exc}\n\n{_credential_help(gateway)}")
