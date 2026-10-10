@@ -42,7 +42,7 @@ from database.payment_gateways import (
 )
 from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase, seller_subscriber_limit_status
-from database.seller_bots import get_decrypted_bot_token, get_bots
+from database.seller_bots import get_decrypted_bot_token, get_bots, get_bot_by_data_owner_id
 from database.platform_features import create_invoice, audit
 
 
@@ -889,12 +889,14 @@ async def _delete_pending_payment_message(tx: dict) -> None:
         return
     try:
         from services.bot_manager import bot_manager
-        running = bot_manager.get_running(int(tx.get("owner_id") or 0))
+        data_owner_id = int((tx.get("metadata") or {}).get("data_owner_id") or tx.get("owner_id") or 0)
+        bot_id = int((tx.get("metadata") or {}).get("bot_id") or 0)
+        running = bot_manager.get_running(data_owner_id) or (bot_manager.get_running(bot_id) if bot_id else None)
         if not running:
-            record = await get_bot_by_data_owner_id(int(tx.get("owner_id") or 0))
+            record = await get_bot_by_data_owner_id(data_owner_id)
             if record:
-                started = await bot_manager.start_bot(int(record.get("bot_id") or 0))
-                running = bot_manager.get_running(int(tx.get("owner_id") or 0)) if started else None
+                started = await bot_manager.start_bot(int(record.get("bot_id") or bot_id or 0))
+                running = (bot_manager.get_running(data_owner_id) or (bot_manager.get_running(bot_id) if bot_id else None)) if started else None
         if not running:
             return
         await running.application.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -1016,8 +1018,7 @@ async def fulfill_transaction(tx: dict) -> None:
                 )
         return
     if tx["purpose"] == "child_subscription":
-        await _delete_pending_payment_message(tx)
-        seller_id = tx["owner_id"]
+        seller_id = int((tx.get("metadata") or {}).get("data_owner_id") or tx["owner_id"])
         plan = await get_plan(seller_id, tx["metadata"]["plan_id"])
         if not plan:
             raise GatewayError("Child subscription plan no longer exists")
@@ -1032,22 +1033,61 @@ async def fulfill_transaction(tx: dict) -> None:
                 tx["transaction_id"], "Verified payment waiting for seller subscriber capacity"
             )
 
-            # Replace the old payment screen with a clear pending-limit notice.
-            # Notification claims prevent repeated messages on every recovery run.
+            # Replace the existing payment screen in the SAME clone bot chat.
+            # Never use the main-bot runtime sender for clone subscription payments.
             if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_buyer"):
                 try:
-                    await _delete_pending_payment_message(tx)
-                    from keep_alive import send_runtime_message
-                    await send_runtime_message(
-                        int(tx["payer_user_id"]),
-                        "⚠️ <b>Active Subscriber Limit Reached</b>\n\n"
-                        "✅ Your payment has been verified successfully.\n"
-                        "Your subscription is waiting because the seller's active subscriber limit is full.\n\n"
-                        "💾 Your payment and plan details are saved. You do not need to pay again or select the plan again.\n"
-                        "🔔 Your subscription confirmation and group invite link will be sent automatically as soon as a slot becomes available.",
+                    limit_text = (
+                        "⚠️ Active Subscriber Limit Reached\\n\\n"
+                        "✅ Your payment has been verified successfully.\\n"
+                        "Your subscription is waiting because the seller's active subscriber limit is full.\\n\\n"
+                        "💾 Your payment and plan details are saved. You do not need to pay again or select the plan again.\\n"
+                        "🔔 Your subscription confirmation and group invite link will be sent automatically as soon as a slot becomes available."
                     )
+                    from services.bot_manager import bot_manager
+                    bot_id = int((tx.get("metadata") or {}).get("bot_id") or 0)
+                    running = bot_manager.get_running(seller_id) or (bot_manager.get_running(bot_id) if bot_id else None)
+                    if not running:
+                        record = await get_bot_by_data_owner_id(seller_id)
+                        if record:
+                            started = await bot_manager.start_bot(int(record.get("bot_id") or bot_id))
+                            if started:
+                                running = bot_manager.get_running(seller_id) or (bot_manager.get_running(bot_id) if bot_id else None)
+                    if not running:
+                        raise GatewayError("Clone bot is unavailable for pending-limit notice")
+                    bot = running.application.bot
+                    chat_id = int(tx.get("payment_message_chat_id") or tx["payer_user_id"])
+                    message_id = int(tx.get("payment_message_id") or 0)
+                    edited = False
+                    if message_id:
+                        try:
+                            if tx.get("payment_message_type") == "photo":
+                                await bot.edit_message_caption(
+                                    chat_id=chat_id, message_id=message_id,
+                                    caption=limit_text, reply_markup=None,
+                                )
+                            else:
+                                await bot.edit_message_text(
+                                    chat_id=chat_id, message_id=message_id,
+                                    text=limit_text, reply_markup=None,
+                                )
+                            edited = True
+                        except Exception as edit_exc:
+                            logger.warning(
+                                "Could not edit payment screen for limit notice transaction=%s: %s",
+                                tx["transaction_id"], edit_exc,
+                            )
+                    if not edited:
+                        sent = await bot.send_message(chat_id=int(tx["payer_user_id"]), text=limit_text)
+                        await update_gateway_transaction(
+                            tx["transaction_id"],
+                            payment_message_chat_id=int(sent.chat_id),
+                            payment_message_id=int(sent.message_id),
+                            payment_message_type="text",
+                        )
                     await complete_transaction_notification(
-                        tx["transaction_id"], "subscriber_limit_buyer", {"status": "sent"}
+                        tx["transaction_id"], "subscriber_limit_buyer",
+                        {"status": "edited" if edited else "sent"},
                     )
                 except Exception as exc:
                     await fail_transaction_notification(
@@ -1081,6 +1121,10 @@ async def fulfill_transaction(tx: dict) -> None:
                     )
                     logger.exception("Subscriber-limit notification failed transaction=%s", tx["transaction_id"])
             return
+
+        # Capacity is available now; remove the old pending/limit message before
+        # sending the normal success receipt and private invite link.
+        await _delete_pending_payment_message(tx)
 
         payment = await create_automatic_payment(
             seller_id, tx["payer_user_id"], plan, tx["gateway"],
