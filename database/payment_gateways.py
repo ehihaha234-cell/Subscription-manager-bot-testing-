@@ -538,7 +538,9 @@ async def recoverable_gateway_transactions(limit: int = 100) -> list[dict]:
         ],
     }
     size = max(1, min(int(limit), 500))
-    return await _transactions().find(query).sort("updated_at", 1).limit(size).to_list(length=size)
+    # Preserve first-paid-first-served ordering for verified payments waiting
+    # on subscriber capacity; retry timestamps must not move a buyer to the back.
+    return await _transactions().find(query).sort([("paid_at", 1), ("created_at", 1)]).limit(size).to_list(length=size)
 
 
 async def expire_due_razorpay_qr_transactions(limit: int = 100) -> list[dict]:
