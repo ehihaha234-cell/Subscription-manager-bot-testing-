@@ -24,8 +24,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if gateway == 'razorpay':
             await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'payment_link')))
             return True
-        details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}"
-        await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
+        details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}\nMode: {('TEST / SANDBOX' if str(g.get('mode') or 'live').lower() == 'test' else 'LIVE')}"
+        next_mode = 'live' if str(g.get('mode') or 'live').lower() == 'test' else 'test'
+        await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🧪 Switch to ' + ('LIVE' if next_mode == 'live' else 'TEST / SANDBOX'), callback_data='a_pg_mode_cashfree_' + next_mode)], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
         return True
     if a == 'a_pg_razorpay_mode':
         cfg = await get_gateway_config('seller', owner, decrypt=True)
@@ -44,12 +45,28 @@ async def handle(self, update, context, q, owner, staff, a, role):
             reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'payment_link')),
         )
         return True
+    if a.startswith('a_pg_mode_cashfree_'):
+        mode = a.rsplit('_', 1)[-1].strip().lower()
+        if mode not in {'test', 'live'}:
+            await q.answer('Invalid mode', show_alert=True)
+            return True
+        try:
+            await save_gateway_config('seller', owner, 'cashfree', {'mode': mode})
+        except Exception as exc:
+            await q.answer(str(exc), show_alert=True)
+            return True
+        cfg = await get_gateway_config('seller', owner, decrypt=True)
+        g = (cfg.get('gateways') or {}).get('cashfree', {})
+        details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}\nMode: {('TEST / SANDBOX' if str(g.get('mode') or 'live').lower() == 'test' else 'LIVE')}"
+        next_mode = 'live' if mode == 'test' else 'test'
+        await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🧪 Switch to ' + ('LIVE' if next_mode == 'live' else 'TEST / SANDBOX'), callback_data='a_pg_mode_cashfree_' + next_mode)], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
+        return True
     if a.startswith('a_pg_toggle_'):
         gateway = a.replace('a_pg_toggle_', '')
         cfg = await get_gateway_config('seller', owner, decrypt=True)
         g = (cfg.get('gateways') or {}).get(gateway, {})
         try:
-            await save_gateway_config('seller', owner, gateway, {'enabled': not bool(g.get('enabled')), 'mode': 'live'})
+            await save_gateway_config('seller', owner, gateway, {'enabled': not bool(g.get('enabled'))})
         except Exception as exc:
             await q.answer(str(exc), show_alert=True)
             return True
@@ -58,8 +75,9 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if gateway == 'razorpay':
             await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'payment_link')))
             return True
-        details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}"
-        await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
+        details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}\nMode: {('TEST / SANDBOX' if str(g.get('mode') or 'live').lower() == 'test' else 'LIVE')}"
+        next_mode = 'live' if str(g.get('mode') or 'live').lower() == 'test' else 'test'
+        await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🧪 Switch to ' + ('LIVE' if next_mode == 'live' else 'TEST / SANDBOX'), callback_data='a_pg_mode_cashfree_' + next_mode)], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
         return True
     if a == 'a_pg_webhook_secret':
         context.user_data.clear()
