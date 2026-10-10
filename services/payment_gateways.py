@@ -22,6 +22,7 @@ from database.payment_gateways import (
     complete_transaction_notification,
     fail_transaction_notification,
     get_gateway_config,
+    save_gateway_config,
     get_gateway_transaction,
     get_transaction_by_gateway_order,
     mark_transaction_failed,
@@ -166,7 +167,9 @@ async def test_gateway_connection(scope: str, owner_id: int, gateway: str) -> di
     """Validate stored credentials without creating or charging a payment."""
     cfg = await get_gateway_config(scope, owner_id, decrypt=True)
     settings = (cfg.get("gateways") or {}).get(gateway) or {}
-    mode = "live"
+    mode = str(settings.get("mode") or "live").strip().lower()
+    if mode not in {"test", "live"}:
+        mode = "live"
     if gateway == "razorpay":
         key_id, key_secret = settings.get("key_id"), settings.get("key_secret")
         if not key_id or not key_secret:
@@ -288,7 +291,9 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
 
 
 async def _create_cashfree(tx: dict, s: dict) -> dict:
-    mode = "live"
+    mode = str(s.get("mode") or "live").strip().lower()
+    if mode not in {"test", "live"}:
+        mode = "live"
     base = _cashfree_base(mode)
     amount = round(float(tx["amount"]), 2)
     if amount <= 0:
@@ -735,11 +740,18 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
                         gateway_response=checkout.get("gateway_response") or {},
                     )
                     made += 1
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "Razorpay QR prewarm/cache failed owner_id=%s bot_id=%s plan_id=%s",
                         owner_id, bot_id, plan_id,
                     )
+                    error_text = str(exc).lower()
+                    if "401" in error_text or "authentication failed" in error_text or "bad_request_error" in error_text:
+                        try:
+                            await save_gateway_config("seller", owner_id, "razorpay", {"qr_prewarm_paused": True})
+                            logger.error("Razorpay QR prewarm paused after authentication failure owner_id=%s; replace credentials to retry", owner_id)
+                        except Exception:
+                            logger.exception("Could not pause failing Razorpay QR prewarm owner_id=%s", owner_id)
                     break
             # IMPORTANT: never send prewarmed QR images to the seller/owner chat.
             # The previous Telegram file_id cache implementation had to send a
@@ -753,7 +765,9 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
         try:
             cfg = await get_gateway_config("seller", owner_id, decrypt=True)
             settings = (cfg.get("gateways") or {}).get("razorpay") or {}
-            if not settings.get("enabled") or str(settings.get("checkout_mode") or "payment_link").lower() != "upi_qr":
+            if (not settings.get("enabled")
+                    or settings.get("qr_prewarm_paused")
+                    or str(settings.get("checkout_mode") or "payment_link").lower() != "upi_qr"):
                 return 0
             plans = await get_plans(owner_id, True)
             bots = await get_bots(owner_id)
