@@ -6,15 +6,19 @@ from database.seller_subscriptions import save_pending_limit_selection
 
 
 class ClonePaymentDeliveryMixin:
-    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount=None, plan: dict | None = None, purchased: bool = False) -> dict:
-        """Notify the buyer and seller from the clone bot when its limit is full."""
+    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount=None, plan: dict | None = None, purchased: bool = False, bot_id: int | None = None) -> dict:
+        """Notify the buyer and seller from the exact clone bot when its limit is full."""
         owner_id = int(owner_id)
         user_id = int(user_id)
-        running = self.get_running(owner_id)
+        bot_id = int(bot_id or 0)
+        running = self.get_running(bot_id) if bot_id else None
+        if not running:
+            running = self.get_running(owner_id)
         if not running:
             record = await get_bot_by_data_owner_id(owner_id)
-            started = await self.start_bot(int(record["bot_id"])) if record else False
-            running = self.get_running(owner_id) if started else None
+            resolved_bot_id = int((record or {}).get("bot_id") or bot_id or 0)
+            started = await self.start_bot(resolved_bot_id) if resolved_bot_id else False
+            running = self.get_running(resolved_bot_id) if started and resolved_bot_id else None
         if not running:
             return {"sent": 0, "error": "Clone bot is not running"}
 
@@ -495,18 +499,23 @@ class ClonePaymentDeliveryMixin:
             "reason": reason,
         }
 
-    async def deliver_subscription_access(self, owner_id:int, user_id:int, success_details:dict|None=None):
-        """Send fresh invite links only for chats the user has not joined yet.
+    async def deliver_subscription_access(self, owner_id:int, user_id:int, success_details:dict|None=None, bot_id:int|None=None):
+        """Send invite links using the exact clone that owns this subscription.
 
         When ``success_details`` is supplied by an automatic gateway payment,
         the access message also includes the user and subscription receipt
         details. Manual/admin delivery keeps the existing compact message.
         """
-        running=self.get_running(int(owner_id))
+        owner_id = int(owner_id)
+        bot_id = int(bot_id or 0)
+        running = self.get_running(bot_id) if bot_id else None
         if not running:
-            record=await get_bot_by_data_owner_id(int(owner_id))
-            started=await self.start_bot(int(record["bot_id"])) if record else False
-            running=self.get_running(int(owner_id)) if started else None
+            running = self.get_running(owner_id)
+        if not running:
+            record=await get_bot_by_data_owner_id(owner_id)
+            resolved_bot_id=int((record or {}).get("bot_id") or bot_id or 0)
+            started=await self.start_bot(resolved_bot_id) if resolved_bot_id else False
+            running=self.get_running(resolved_bot_id) if started and resolved_bot_id else None
         if not running:
             return {"sent":0,"already_member":0,"failed":0,"error":"Clone bot is not running"}
 
