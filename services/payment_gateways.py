@@ -1025,23 +1025,61 @@ async def fulfill_transaction(tx: dict) -> None:
         scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(tx["payer_user_id"]), scope_owner_id=scope_owner_id)
         if limit_status.get("at_limit") and not limit_status.get("already_active"):
-            await mark_transaction_failed(tx["transaction_id"], "seller subscriber limit reached")
-            try:
-                from services.bot_manager import bot_manager
-                notice = await bot_manager.notify_subscriber_limit(
-                    seller_id,
-                    int(tx["payer_user_id"]),
-                    plan.get("name", "Subscription"),
-                    tx.get("amount", 0),
-                )
-                await audit(
-                    "child_gateway_subscriber_limit",
-                    tx["payer_user_id"],
-                    seller_id,
-                    {"transaction_id": tx["transaction_id"], **notice},
-                )
-            except Exception as exc:
-                logger.exception("Subscriber-limit notification failed transaction=%s", tx["transaction_id"])
+            # Payment is already verified by the gateway. Do NOT mark it failed:
+            # retain it as paid_unfulfilled so the recovery job can activate it
+            # automatically as soon as subscriber capacity becomes available.
+            await mark_transaction_fulfillment_retry(
+                tx["transaction_id"], "Verified payment waiting for seller subscriber capacity"
+            )
+
+            # Replace the old payment screen with a clear pending-limit notice.
+            # Notification claims prevent repeated messages on every recovery run.
+            if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_buyer"):
+                try:
+                    await _delete_pending_payment_message(tx)
+                    from keep_alive import send_runtime_message
+                    await send_runtime_message(
+                        int(tx["payer_user_id"]),
+                        "⚠️ <b>Active Subscriber Limit Reached</b>\n\n"
+                        "✅ Your payment has been verified successfully.\n"
+                        "Your subscription is waiting because the seller's active subscriber limit is full.\n\n"
+                        "💾 Your payment and plan details are saved. You do not need to pay again or select the plan again.\n"
+                        "🔔 Your subscription confirmation and group invite link will be sent automatically as soon as a slot becomes available.",
+                    )
+                    await complete_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_buyer", {"status": "sent"}
+                    )
+                except Exception as exc:
+                    await fail_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_buyer", str(exc)
+                    )
+                    logger.exception("Buyer subscriber-limit notice failed transaction=%s", tx["transaction_id"])
+
+            if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_seller"):
+                try:
+                    from services.bot_manager import bot_manager
+                    notice = await bot_manager.notify_subscriber_limit(
+                        seller_id,
+                        int(tx["payer_user_id"]),
+                        plan.get("name", "Subscription"),
+                        tx.get("amount", 0),
+                        plan=plan,
+                        purchased=True,
+                    )
+                    await complete_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_seller", notice
+                    )
+                    await audit(
+                        "child_gateway_subscriber_limit",
+                        tx["payer_user_id"],
+                        seller_id,
+                        {"transaction_id": tx["transaction_id"], **notice},
+                    )
+                except Exception as exc:
+                    await fail_transaction_notification(
+                        tx["transaction_id"], "subscriber_limit_seller", str(exc)
+                    )
+                    logger.exception("Subscriber-limit notification failed transaction=%s", tx["transaction_id"])
             return
 
         payment = await create_automatic_payment(
