@@ -144,7 +144,8 @@ async def handle(self, update, context, q, owner, action):
             )
             try:
                 checkout = None
-                if gateway == 'razorpay':
+                if (gateway == 'razorpay' and
+                        str(razorpay_settings.get('checkout_mode') or 'payment_link').lower() == 'upi_qr'):
                     checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
                 if checkout is None:
                     checkout = await create_checkout(tx)
@@ -310,7 +311,12 @@ async def handle(self, update, context, q, owner, action):
         try:
             checkout = None
             if gateway == 'razorpay':
-                checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
+                # The pre-created QR pool is only valid in explicit UPI QR mode.
+                # In Payment Link mode, always create a Razorpay Payment Link.
+                current_gateway_cfg = await get_gateway_config('seller', owner, decrypt=True)
+                current_razorpay = ((current_gateway_cfg.get('gateways') or {}).get('razorpay') or {})
+                if str(current_razorpay.get('checkout_mode') or 'payment_link').lower() == 'upi_qr':
+                    checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
             if checkout is None:
                 checkout = await create_checkout(tx)
             if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
