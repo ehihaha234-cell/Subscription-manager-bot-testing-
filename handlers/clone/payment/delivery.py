@@ -6,7 +6,7 @@ from database.seller_subscriptions import save_pending_limit_selection
 
 
 class ClonePaymentDeliveryMixin:
-    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount=None, plan: dict | None = None) -> dict:
+    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount=None, plan: dict | None = None, purchased: bool = False) -> dict:
         """Notify the buyer and seller from the clone bot when its limit is full."""
         owner_id = int(owner_id)
         user_id = int(user_id)
@@ -69,7 +69,7 @@ class ClonePaymentDeliveryMixin:
         seller_text = (
             "⚠️ Active Subscriber Limit Warning\n\n"
             f"👤 User: {safe_user}\n"
-            "👈 This user is trying to purchase your plan.\n\n"
+            f"👈 This user {'has purchased' if purchased else 'is trying to purchase'} your plan.\n\n"
             f"📦 Plan Group: {group_display}\n\n"
             f"👥 Active Subscribers: {count} / {limit}\n"
             f"📊 Usage: {pct}%\n\n"
