@@ -22,7 +22,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         cfg = await get_gateway_config('seller', owner, decrypt=True)
         g = (cfg.get('gateways') or {}).get(gateway, {})
         if gateway == 'razorpay':
-            await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'upi_qr')))
+            await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'payment_link')))
             return True
         details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}"
         await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
@@ -30,7 +30,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
     if a == 'a_pg_razorpay_mode':
         cfg = await get_gateway_config('seller', owner, decrypt=True)
         g = (cfg.get('gateways') or {}).get('razorpay', {})
-        current_mode = str(g.get('checkout_mode') or 'upi_qr').lower()
+        current_mode = str(g.get('checkout_mode') or 'payment_link').lower()
         new_mode = 'payment_link' if current_mode == 'upi_qr' else 'upi_qr'
         try:
             await save_gateway_config('seller', owner, 'razorpay', {'checkout_mode': new_mode})
@@ -41,7 +41,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         g = (cfg.get('gateways') or {}).get('razorpay', {})
         await q.edit_message_text(
             _seller_razorpay_text(g),
-            reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'upi_qr')),
+            reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'payment_link')),
         )
         return True
     if a.startswith('a_pg_toggle_'):
@@ -56,7 +56,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         cfg = await get_gateway_config('seller', owner, decrypt=True)
         g = (cfg.get('gateways') or {}).get(gateway, {})
         if gateway == 'razorpay':
-            await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'upi_qr')))
+            await q.edit_message_text(_seller_razorpay_text(g), reply_markup=_seller_razorpay_keyboard(bool(g.get('enabled')), str(g.get('checkout_mode') or 'payment_link')))
             return True
         details = f"Client ID: {('Added' if g.get('client_id') else 'Not added')}\nClient Secret: {('Added' if g.get('client_secret') else 'Not added')}"
         await q.edit_message_text(f"💳 Cashfree\n\nStatus: {('Enabled ✅' if g.get('enabled') else 'Disabled ❌')}\n{details}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⛔ Disable' if g.get('enabled') else '✅ Enable', callback_data='a_pg_toggle_cashfree')], [InlineKeyboardButton('🔑 Set / Replace Credentials', callback_data='a_pg_creds_cashfree')], [InlineKeyboardButton('✅ Test Connection', callback_data='a_pg_testconn_cashfree')], [InlineKeyboardButton('⬅ Back', callback_data='a_pg_home')]]))
