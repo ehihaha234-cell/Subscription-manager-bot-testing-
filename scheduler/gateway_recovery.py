@@ -162,6 +162,7 @@ async def recover_failed_invite_deliveries_job() -> None:
                     "expiry_date": expiry,
                     "duration": plan.get("duration_text") or f"{plan.get('duration_minutes', 0)} minutes",
                 },
+                bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
             )
             if delivery.get("error") or (
                 int(delivery.get("sent", 0) or 0) == 0
