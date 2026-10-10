@@ -302,7 +302,7 @@ class CloneLiveSupportMixin:
                 try:
                     if not text:
                         raise ValueError("Webhook Secret cannot be empty")
-                    await save_gateway_config("seller",owner,"razorpay",{"webhook_secret":text,"mode":"live"})
+                    await save_gateway_config("seller",owner,"razorpay",{"webhook_secret":text})
                     context.user_data.clear()
                     cfg=await get_gateway_config("seller",owner,decrypt=True); g=(cfg.get("gateways") or {}).get("razorpay",{})
                     await update.effective_message.reply_text(
@@ -317,7 +317,7 @@ class CloneLiveSupportMixin:
                 values=[x.strip() for x in text.split("|")]
                 try:
                     if gateway=="razorpay" and len(values)==2:
-                        payload={"key_id":values[0],"key_secret":values[1],"mode":"live"}
+                        payload={"key_id":values[0],"key_secret":values[1]}
                     elif gateway=="cashfree" and len(values)==2:
                         payload={"client_id":values[0],"client_secret":values[1]}
                     elif gateway=="phonepe" and len(values)==5:
