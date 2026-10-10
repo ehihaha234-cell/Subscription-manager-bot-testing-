@@ -109,11 +109,17 @@ async def save_gateway_config(
         if isinstance(value, str):
             value = value.strip()
         if key == "mode":
-            # Automatic gateways always operate in live mode.
-            value = "live"
+            value = str(value or "live").strip().lower()
+            if value not in VALID_MODES:
+                raise ValueError("Gateway mode must be test or live")
         item[key] = value
 
-    item["mode"] = "live"
+    # Keep an explicitly selected mode; old configurations default safely to LIVE.
+    item["mode"] = str(item.get("mode") or "live").strip().lower()
+    if item["mode"] not in VALID_MODES:
+        item["mode"] = "live"
+    if gateway == "razorpay" and any(k in values for k in ("key_id", "key_secret")):
+        item.pop("qr_prewarm_paused", None)
 
     if item.get("enabled") and not gateway_is_ready(gateway, item):
         missing = ", ".join(gateway_missing_fields(gateway, item))
