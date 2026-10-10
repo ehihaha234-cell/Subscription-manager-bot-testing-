@@ -88,7 +88,7 @@ async def handle(self, update, context, q, owner, action):
         gateways = gateway_cfg.get('gateways') or {}
         razorpay_settings = gateways.get('razorpay') or {}
         if (razorpay_settings.get('enabled') and
-                str(razorpay_settings.get('checkout_mode') or 'upi_qr').lower() == 'upi_qr' and
+                str(razorpay_settings.get('checkout_mode') or 'payment_link').lower() == 'upi_qr' and
                 bot_id):
             # Same plan: replace the user's previous QR. Other plans remain visible
             # and usable until their own QR expires.
