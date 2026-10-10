@@ -114,6 +114,8 @@ async def handle(self, update, context, q, owner, action):
         stars_enabled = bool(gateway_cfg.get('stars_enabled', False))
         rows = []
         text = ''
+        tracked_gateway_tx_id = None
+        gateway_checkout_ready = False
         seller_account_id = self.seller_account(context)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
@@ -142,6 +144,7 @@ async def handle(self, update, context, q, owner, action):
                     'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
                 },
             )
+            tracked_gateway_tx_id = str(tx.get('transaction_id') or '')
             try:
                 checkout = None
                 if (gateway == 'razorpay' and
@@ -149,6 +152,7 @@ async def handle(self, update, context, q, owner, action):
                     checkout = await _claim_precreated_razorpay_qr(tx, plan, owner, currency)
                 if checkout is None:
                     checkout = await create_checkout(tx)
+                gateway_checkout_ready = bool(checkout and checkout.get('checkout_url'))
                 if gateway == 'razorpay' and checkout.get('checkout_mode') == 'upi_qr':
                     image = None
                     image_url = str(checkout.get('qr_image_url') or checkout.get('checkout_url') or '')
@@ -240,6 +244,22 @@ async def handle(self, update, context, q, owner, action):
                 await self.safe_query_message(q, text, kb)
         else:
             await self.safe_query_message(q, text, kb)
+            # Persist the exact message containing the Payment Link so the paid
+            # webhook can edit this same clone-bot message if the subscriber
+            # limit fills before payment completes.
+            if tracked_gateway_tx_id and gateway_checkout_ready and q.message is not None:
+                try:
+                    await update_gateway_transaction(
+                        tracked_gateway_tx_id,
+                        payment_message_chat_id=int(q.message.chat_id),
+                        payment_message_id=int(q.message.message_id),
+                        payment_message_type='text',
+                    )
+                except Exception:
+                    logger.exception(
+                        'Could not save payment page message transaction_id=%s',
+                        tracked_gateway_tx_id,
+                    )
         return True
     if action.startswith('c_star_'):
         context.user_data.pop('waiting_child_screenshot', None)
