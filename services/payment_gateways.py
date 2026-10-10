@@ -220,7 +220,7 @@ async def _create_razorpay(tx: dict, s: dict) -> dict:
 
     auth = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
     headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
-    mode = str(s.get("checkout_mode") or "upi_qr").lower()
+    mode = str(s.get("checkout_mode") or "payment_link").lower()
 
     if mode == "upi_qr":
         close_minutes = 30 if bool((tx.get("metadata") or {}).get("qr_prewarm")) else 20
@@ -753,7 +753,7 @@ async def prewarm_razorpay_qr_pool_job(target_per_plan: int = 5) -> int:
         try:
             cfg = await get_gateway_config("seller", owner_id, decrypt=True)
             settings = (cfg.get("gateways") or {}).get("razorpay") or {}
-            if not settings.get("enabled") or str(settings.get("checkout_mode") or "upi_qr").lower() != "upi_qr":
+            if not settings.get("enabled") or str(settings.get("checkout_mode") or "payment_link").lower() != "upi_qr":
                 return 0
             plans = await get_plans(owner_id, True)
             bots = await get_bots(owner_id)
@@ -1025,57 +1025,23 @@ async def fulfill_transaction(tx: dict) -> None:
         scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(tx["payer_user_id"]), scope_owner_id=scope_owner_id)
         if limit_status.get("at_limit") and not limit_status.get("already_active"):
-            # Payment is already verified by the gateway. Keep it paid and
-            # recoverable instead of marking it failed; the recovery worker
-            # retries this transaction in FIFO paid_at order when capacity opens.
-            await mark_transaction_fulfillment_retry(
-                tx["transaction_id"], "verified payment waiting for active subscriber capacity"
-            )
+            await mark_transaction_failed(tx["transaction_id"], "seller subscriber limit reached")
             try:
                 from services.bot_manager import bot_manager
-                if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_buyer"):
-                    running = bot_manager.get_running(scope_owner_id)
-                    if running:
-                        await running.application.bot.send_message(
-                            chat_id=int(tx["payer_user_id"]),
-                            text=(
-                                "⚠️ Active Subscriber Limit Reached\n\n"
-                                "Your payment has been received and verified, but the subscription is waiting "
-                                "because the seller's active subscriber limit is full.\n\n"
-                                "✅ Your payment is saved securely. Do not pay again. "
-                                "As soon as a slot becomes available, your subscription will be activated "
-                                "automatically and the group invite link will be sent."
-                            ),
-                        )
-                    await complete_transaction_notification(
-                        tx["transaction_id"], "subscriber_limit_buyer", {"status": "paid_pending_limit"}
-                    )
-                if await claim_transaction_notification(tx["transaction_id"], "subscriber_limit_seller"):
-                    notice = await bot_manager.notify_subscriber_limit(
-                        scope_owner_id,
-                        int(tx["payer_user_id"]),
-                        plan.get("name", "Subscription"),
-                        tx.get("amount", 0),
-                        plan=plan,
-                        purchased=True,
-                    )
-                    await complete_transaction_notification(
-                        tx["transaction_id"], "subscriber_limit_seller", notice
-                    )
+                notice = await bot_manager.notify_subscriber_limit(
+                    seller_id,
+                    int(tx["payer_user_id"]),
+                    plan.get("name", "Subscription"),
+                    tx.get("amount", 0),
+                )
                 await audit(
                     "child_gateway_subscriber_limit",
                     tx["payer_user_id"],
                     seller_id,
-                    {"transaction_id": tx["transaction_id"], "status": "paid_pending_limit"},
+                    {"transaction_id": tx["transaction_id"], **notice},
                 )
             except Exception as exc:
                 logger.exception("Subscriber-limit notification failed transaction=%s", tx["transaction_id"])
-                try:
-                    await fail_transaction_notification(
-                        tx["transaction_id"], "subscriber_limit_notice", str(exc)
-                    )
-                except Exception:
-                    pass
             return
 
         payment = await create_automatic_payment(
