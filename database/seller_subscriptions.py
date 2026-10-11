@@ -336,6 +336,7 @@ async def seller_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": {"$in": scope_list},
                 "active": True,
+                "removed_by_admin": {"$ne": True},
                 "expiry_date": {"$gt": now},
             },
         ),
@@ -344,6 +345,7 @@ async def seller_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": {"$in": scope_list},
                 "active": True,
+                "removed_by_admin": {"$ne": True},
                 "expiry_date": {"$gt": now},
             },
         ),
@@ -377,6 +379,7 @@ async def clone_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": owner_id,
                 "active": True,
+                "removed_by_admin": {"$ne": True},
                 "expiry_date": {"$gt": now},
             },
         ),
@@ -385,6 +388,7 @@ async def clone_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": owner_id,
                 "active": True,
+                "removed_by_admin": {"$ne": True},
                 "expiry_date": {"$gt": now},
             },
         ),
@@ -440,6 +444,7 @@ async def seller_subscriber_limit_status(
                 "user_id": user_id,
                 "group_id": str(group_id).strip(),
                 "active": True,
+                "removed_by_admin": {"$ne": True},
                 "expiry_date": {"$gt": now},
             }, {"_id": 1})
         else:
@@ -447,6 +452,7 @@ async def seller_subscriber_limit_status(
                 "owner_id": scope,
                 "user_id": user_id,
                 "active": True,
+                "removed_by_admin": {"$ne": True},
                 "expiry_date": {"$gt": now},
             }, {"_id": 1})
         already_active = current is not None
