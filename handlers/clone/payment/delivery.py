@@ -4,7 +4,10 @@ from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
 from database.seller_subscriptions import save_pending_limit_selection
 from database.payment_gateways import (
-    create_or_get_stars_transaction, claim_transaction_fulfillment,
+    create_gateway_transaction,
+    get_transaction_by_gateway_payment,
+    update_gateway_transaction,
+    claim_transaction_fulfillment,
     mark_transaction_fulfillment_retry,
 )
 
@@ -215,9 +218,9 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not cfg.get('stars_enabled') or not plan or expected <= 0 or query.currency != 'XTR' or query.total_amount != expected:
                 raise ValueError('plan changed')
-            # This invoice was already issued through the plan-selection flow.
-            # Capacity may have filled after it opened; allow verified payment to
-            # complete and queue fulfillment instead of rejecting pre-checkout.
+            # This Stars invoice may have been opened while capacity was available.
+            # If the limit fills before checkout completes, accept the verified
+            # payment and queue fulfillment (same behavior as automatic gateways).
             await query.answer(ok=True)
         except Exception:
             await query.answer(ok=False, error_message='This Stars invoice is no longer valid. Reopen the payment page.')
@@ -226,8 +229,9 @@ class ClonePaymentDeliveryMixin:
         payment = update.effective_message.successful_payment
         if not payment or payment.currency != 'XTR':
             return
+        transaction_id = None
         try:
-            kind, scope, owner_text, user_text, plan_id = payment.invoice_payload.split(':', 4)
+            kind, scope, owner_text, user_text, plan_id = str(payment.invoice_payload or '').split(':', 4)
             owner = int(owner_text)
             user_id = int(user_text)
             if kind != 'stars' or scope != 'clone' or owner != self.owner(context) or user_id != int(update.effective_user.id):
@@ -237,42 +241,63 @@ class ClonePaymentDeliveryMixin:
             if not plan or expected <= 0 or payment.total_amount != expected:
                 raise ValueError('price mismatch')
 
-            # Store Stars payments in the same durable fulfillment queue as
-            # automatic gateway payments. The Telegram charge ID is the provider
-            # reference, so duplicate successful_payment updates reuse one record.
-            reference = str(payment.telegram_payment_charge_id or '').strip()
-            if not reference:
-                raise ValueError('missing Stars charge reference')
-            seller_account_id = self.seller_account(context)
-            tx = await create_or_get_stars_transaction(
-                owner_id=owner, payer_user_id=user_id,
-                gateway_payment_id=reference, amount=0, currency='XTR',
-                purpose='child_subscription', reference_id=reference,
-                metadata={
-                    'plan_id': str(plan_id), 'data_owner_id': int(owner),
-                    'seller_account_id': int(seller_account_id),
-                    'bot_id': int(context.application.bot_data.get('bot_id') or 0),
-                    'stars_amount': int(payment.total_amount),
-                    'stars_charge_id': reference,
-                },
-            )
-            if tx.get('status') == 'fulfilled' or tx.get('fulfilled_at') is not None:
-                # Telegram can redeliver a successful_payment update.
-                return
+            charge_id = str(payment.telegram_payment_charge_id or '').strip()
+            if not charge_id:
+                raise ValueError('missing Telegram Stars charge ID')
 
-            work = await claim_transaction_fulfillment(tx['transaction_id'])
+            # Stars and external gateways now share the same durable fulfillment
+            # queue, limit guard, retry handling, FIFO recovery and invite delivery.
+            tx = await get_transaction_by_gateway_payment('telegram_stars', charge_id)
+            if tx and (tx.get('status') == 'fulfilled' or tx.get('fulfilled_at') is not None):
+                return
+            if not tx:
+                seller_account_id = self.seller_account(context)
+                bot_id = int(context.application.bot_data.get('bot_id') or 0)
+                tx = await create_gateway_transaction(
+                    scope='seller',
+                    owner_id=seller_account_id,
+                    payer_user_id=user_id,
+                    gateway='telegram_stars',
+                    amount=0,
+                    currency='XTR',
+                    purpose='child_subscription',
+                    reference_id=charge_id,
+                    metadata={
+                        'plan_id': str(plan_id),
+                        'data_owner_id': int(owner),
+                        'seller_account_id': int(seller_account_id),
+                        'bot_id': bot_id,
+                        'stars_amount': int(payment.total_amount),
+                        'stars_charge_id': charge_id,
+                    },
+                )
+            transaction_id = str(tx['transaction_id'])
+            # Keep the original paid_at timestamp on redelivered Telegram updates
+            # so a retry cannot move an older purchase behind newer pending users.
+            if not tx.get('paid_at'):
+                await update_gateway_transaction(
+                    transaction_id,
+                    status='paid',
+                    gateway_payment_id=charge_id,
+                    paid_at=datetime.now(timezone.utc),
+                    payment_provider='telegram_stars',
+                    raw_success={'invoice_payload': str(payment.invoice_payload), 'total_amount': int(payment.total_amount)},
+                )
+            work = await claim_transaction_fulfillment(transaction_id)
             if not work:
                 return
             try:
                 from services.payment_gateways import fulfill_transaction
                 await fulfill_transaction(work)
             except Exception as exc:
-                await mark_transaction_fulfillment_retry(tx['transaction_id'], str(exc))
+                await mark_transaction_fulfillment_retry(transaction_id, str(exc))
                 raise
         except Exception:
             logger.exception(
-                'Clone Stars fulfillment failed owner=%s user=%s',
-                context.application.bot_data.get('seller_owner_id'), update.effective_user.id,
+                'Clone Stars fulfillment failed owner=%s user=%s transaction=%s',
+                context.application.bot_data.get('seller_owner_id'),
+                update.effective_user.id,
+                transaction_id,
             )
             await update.effective_message.reply_text(
                 '⚠️ Your Stars payment was received, but activation needs support review. Keep this receipt and contact support.'
