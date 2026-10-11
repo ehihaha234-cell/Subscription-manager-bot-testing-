@@ -28,6 +28,7 @@ from database.payment_gateways import (
     mark_transaction_failed,
     mark_transaction_fulfilled,
     mark_transaction_fulfillment_retry,
+    has_earlier_pending_child_subscription,
     reserve_webhook_event,
     mark_valid_webhook_received,
     update_gateway_transaction,
@@ -1038,6 +1039,22 @@ async def fulfill_transaction(tx: dict) -> None:
             raise GatewayError("Child subscription plan no longer exists")
         seller_account_id = int((tx.get('metadata') or {}).get('seller_account_id') or seller_id)
         scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
+
+        # Enforce FIFO across all clone bots owned by this seller. A newer
+        # webhook may arrive while an older paid transaction is still pending;
+        # leave the newer one queued so the oldest paid user gets the next slot.
+        if await has_earlier_pending_child_subscription(
+            seller_account_id,
+            str(tx.get("transaction_id") or ""),
+            tx.get("paid_at"),
+            tx.get("created_at"),
+        ):
+            await mark_transaction_fulfillment_retry(
+                tx["transaction_id"],
+                "Waiting for an earlier verified subscription payment (FIFO)",
+            )
+            return
+
         limit_status = await seller_subscriber_limit_status(
             seller_account_id,
             int(tx["payer_user_id"]),
