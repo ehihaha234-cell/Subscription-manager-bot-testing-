@@ -224,7 +224,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             return True
         try:
             seller_account_id = self.seller_account(context)
-            limit_status = await seller_subscriber_limit_status(seller_account_id, int(p['user_id']), scope_owner_id=owner)
+            limit_status = await seller_subscriber_limit_status(seller_account_id, int(p['user_id']), scope_owner_id=owner, group_id=str(p.get("group_id") or ""))
             if limit_status.get('at_limit') and not limit_status.get('already_active'):
                 # Keep this manual payment pending. The seller can upgrade the
                 # plan and press Approve again once capacity is available.
