@@ -43,7 +43,7 @@ from database.payment_gateways import (
 )
 from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase, seller_subscriber_limit_status
-from database.seller_bots import get_decrypted_bot_token, get_bots, get_bot_by_data_owner_id, get_bot_by_bot_id
+from database.seller_bots import get_decrypted_bot_token, get_bots, get_bot_by_data_owner_id
 from database.platform_features import create_invoice, audit
 
 
@@ -1032,41 +1032,19 @@ async def fulfill_transaction(tx: dict) -> None:
                 )
         return
     if tx["purpose"] == "child_subscription":
-        metadata = tx.get("metadata") or {}
-        # Resolve the canonical clone data scope from the saved bot record when
-        # possible. Older transactions can have stale/missing owner metadata;
-        # using that value directly can count the wrong clone's subscribers.
-        bot_id = int(metadata.get("bot_id") or 0)
-        bot_record = await get_bot_by_bot_id(bot_id) if bot_id else None
-        seller_id = int(
-            (bot_record or {}).get("data_owner_id")
-            or metadata.get("data_owner_id")
-            or tx["owner_id"]
-        )
-        seller_account_id = int(
-            (bot_record or {}).get("owner_id")
-            or (bot_record or {}).get("seller_account_id")
-            or metadata.get("seller_account_id")
-            or seller_id
-        )
-        plan_id = str(metadata.get("plan_id") or tx.get("reference_id") or "")
-        plan = await get_plan(seller_id, plan_id)
+        seller_id = int((tx.get("metadata") or {}).get("data_owner_id") or tx["owner_id"])
+        plan = await get_plan(seller_id, tx["metadata"]["plan_id"])
         if not plan:
             raise GatewayError("Child subscription plan no longer exists")
-        scope_owner_id = seller_id
+        seller_account_id = int((tx.get('metadata') or {}).get('seller_account_id') or seller_id)
+        scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
         limit_status = await seller_subscriber_limit_status(
             seller_account_id,
             int(tx["payer_user_id"]),
             scope_owner_id=scope_owner_id,
+            group_id=str(plan.get("group_id") or ""),
         )
-        logger.info(
-            "Child payment capacity check transaction=%s seller_account=%s scope_owner=%s user=%s active=%s limit=%s already_active=%s at_limit=%s",
-            tx.get("transaction_id"), seller_account_id, scope_owner_id,
-            tx.get("payer_user_id"), limit_status.get("count"),
-            limit_status.get("limit"), limit_status.get("already_active"),
-            limit_status.get("at_limit"),
-        )
-        if limit_status.get("at_limit"):
+        if limit_status.get("at_limit") and not limit_status.get("already_active"):
             # Payment is already verified by the gateway. Do NOT mark it failed:
             # retain it as paid_unfulfilled so the recovery job can activate it
             # automatically as soon as subscriber capacity becomes available.
