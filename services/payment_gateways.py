@@ -1102,15 +1102,21 @@ async def fulfill_transaction(tx: dict) -> None:
                                 tx["transaction_id"], edit_exc,
                             )
                     if not edited:
-                        # User explicitly requires editing the existing payment page,
-                        # not sending a second warning message. Fresh payment-link
-                        # transactions persist this message ID when checkout is shown.
-                        raise GatewayError(
-                            "Original payment page could not be edited; refusing to send a duplicate message"
-                        )
+                        if str(tx.get("gateway") or "") == "telegram_stars":
+                            # Stars invoices are Telegram-native and do not have a
+                            # provider checkout message to edit. Send this warning
+                            # once through the same clone bot instead.
+                            await bot.send_message(chat_id=int(tx["payer_user_id"]), text=limit_text)
+                            edited = True
+                        else:
+                            # For gateway checkout, do not create a duplicate warning
+                            # if the original payment page cannot be edited.
+                            raise GatewayError(
+                                "Original payment page could not be edited; refusing to send a duplicate message"
+                            )
                     await complete_transaction_notification(
                         tx["transaction_id"], "subscriber_limit_buyer",
-                        {"status": "edited" if edited else "sent"},
+                        {"status": "edited" if tx.get("payment_message_id") else "sent"},
                     )
                 except Exception as exc:
                     await fail_transaction_notification(
@@ -1153,6 +1159,7 @@ async def fulfill_transaction(tx: dict) -> None:
         payment = await create_automatic_payment(
             seller_id, tx["payer_user_id"], plan, tx["gateway"],
             tx["transaction_id"], tx.get("gateway_payment_id", ""),
+            stars_amount=(tx.get("metadata") or {}).get("stars_amount") if tx.get("gateway") == "telegram_stars" else None,
         )
 
         # Capture the state before activation so every payment method can show
