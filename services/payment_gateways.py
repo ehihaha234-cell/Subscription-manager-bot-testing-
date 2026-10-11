@@ -1039,7 +1039,7 @@ async def fulfill_transaction(tx: dict) -> None:
         seller_account_id = int((tx.get('metadata') or {}).get('seller_account_id') or seller_id)
         scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
         limit_status = await seller_subscriber_limit_status(seller_account_id, int(tx["payer_user_id"]), scope_owner_id=scope_owner_id)
-        if limit_status.get("at_limit") and not limit_status.get("already_active"):
+        if limit_status.get("at_limit"):
             # Payment is already verified by the gateway. Do NOT mark it failed:
             # retain it as paid_unfulfilled so the recovery job can activate it
             # automatically as soon as subscriber capacity becomes available.
