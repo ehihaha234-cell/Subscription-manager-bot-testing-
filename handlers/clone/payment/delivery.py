@@ -3,6 +3,10 @@
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
 from database.seller_subscriptions import save_pending_limit_selection
+from database.payment_gateways import (
+    create_or_get_stars_transaction, claim_transaction_fulfillment,
+    mark_transaction_fulfillment_retry,
+)
 
 
 class ClonePaymentDeliveryMixin:
@@ -211,13 +215,9 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not cfg.get('stars_enabled') or not plan or expected <= 0 or query.currency != 'XTR' or query.total_amount != expected:
                 raise ValueError('plan changed')
-            seller_account_id = int(context.application.bot_data.get("seller_account_id") or owner)
-            limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
-            if limit_status.get('at_limit') and not limit_status.get('already_active'):
-                await save_pending_limit_selection(seller_account_id, owner, user_id, str(plan_id), str(plan.get('name') or 'Plan'))
-                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected, plan=plan)
-                await query.answer(ok=False, error_message='Subscriber limit reached. Please wait for the admin approval.')
-                return
+            # This invoice was already issued through the plan-selection flow.
+            # Capacity may have filled after it opened; allow verified payment to
+            # complete and queue fulfillment instead of rejecting pre-checkout.
             await query.answer(ok=True)
         except Exception:
             await query.answer(ok=False, error_message='This Stars invoice is no longer valid. Reopen the payment page.')
@@ -236,63 +236,44 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not plan or expected <= 0 or payment.total_amount != expected:
                 raise ValueError('price mismatch')
-            reference = payment.telegram_payment_charge_id
-            group_id = str(plan.get('group_id') or '').strip()
-            target_ids = [int(x) for x in (plan.get('target_chat_ids') or [])]
-            now = datetime.now(timezone.utc)
-            if group_id:
-                previous = await get_plan_group_subscription(owner, user_id, group_id)
-                previous_expiry = (previous or {}).get('expiry_date')
-                if previous_expiry and previous_expiry.tzinfo is None:
-                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
-                was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
-            else:
-                previous = await get_subscription(owner, user_id)
-                previous_expiry = (previous or {}).get('expiry_date')
-                if previous_expiry and previous_expiry.tzinfo is None:
-                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
-                was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
+
+            # Store Stars payments in the same durable fulfillment queue as
+            # automatic gateway payments. The Telegram charge ID is the provider
+            # reference, so duplicate successful_payment updates reuse one record.
+            reference = str(payment.telegram_payment_charge_id or '').strip()
+            if not reference:
+                raise ValueError('missing Stars charge reference')
             seller_account_id = self.seller_account(context)
-            limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
-            if limit_status.get('at_limit') and not limit_status.get('already_active'):
-                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected, plan=plan)
-                await update.effective_message.reply_text('⚠️ Subscriber limit reached. Payment was received but this subscription could not be activated. Please contact the seller.')
-                return
-            await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference, stars_amount=payment.total_amount)
-            if group_id:
-                result = await fulfill_plan_group_subscription(
-                    owner, user_id, f'stars:{reference}', group_id,
-                    plan['name'], plan['duration_minutes'], amount=0,
-                    duration_text=plan['duration_text'], target_chat_ids=target_ids,
-                )
-            else:
-                result = await fulfill_subscription_payment(
-                    owner, user_id, f'stars:{reference}', plan['name'],
-                    plan['duration_minutes'], amount=0,
-                    duration_text=plan['duration_text'],
-                )
-            await record_payment_subscription_snapshot(
-                owner, reference,
-                (result.get('subscription') or {}).get('start_date') or now,
-                result.get('expiry_date'),
+            tx = await create_or_get_stars_transaction(
+                owner_id=owner, payer_user_id=user_id,
+                gateway_payment_id=reference, amount=0, currency='XTR',
+                purpose='child_subscription', reference_id=reference,
+                metadata={
+                    'plan_id': str(plan_id), 'data_owner_id': int(owner),
+                    'seller_account_id': int(seller_account_id),
+                    'bot_id': int(context.application.bot_data.get('bot_id') or 0),
+                    'stars_amount': int(payment.total_amount),
+                    'stars_charge_id': reference,
+                },
             )
-            details = {
-                'plan_name': plan['name'],
-                'amount': 0,
-                'stars_amount': payment.total_amount,
-                'gateway': 'Telegram Stars',
-                'transaction_id': reference,
-                'payment_date': now,
-                'expiry_date': result.get('expiry_date'),
-                'duration': plan['duration_text'],
-                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
-                'was_already_active': was_active,
-                'previous_expiry': previous_expiry,
-            }
-            await self.deliver_subscription_access(owner, user_id, details)
-            await self.notify_automatic_payment_success(owner, user_id, details)
+            if tx.get('status') == 'fulfilled' or tx.get('fulfilled_at') is not None:
+                # Telegram can redeliver a successful_payment update.
+                return
+
+            work = await claim_transaction_fulfillment(tx['transaction_id'])
+            if not work:
+                return
+            try:
+                from services.payment_gateways import fulfill_transaction
+                await fulfill_transaction(work)
+            except Exception as exc:
+                await mark_transaction_fulfillment_retry(tx['transaction_id'], str(exc))
+                raise
         except Exception:
-            logger.exception('Clone Stars fulfillment failed owner=%s user=%s', context.application.bot_data.get('seller_owner_id'), update.effective_user.id)
+            logger.exception(
+                'Clone Stars fulfillment failed owner=%s user=%s',
+                context.application.bot_data.get('seller_owner_id'), update.effective_user.id,
+            )
             await update.effective_message.reply_text(
                 '⚠️ Your Stars payment was received, but activation needs support review. Keep this receipt and contact support.'
             )
