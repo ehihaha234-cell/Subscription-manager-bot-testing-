@@ -336,9 +336,7 @@ async def seller_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": {"$in": scope_list},
                 "active": True,
-                # A missing/null expiry represents an unlimited/legacy active
-                # subscription. It must count toward the subscriber quota too.
-                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
+                "expiry_date": {"$gt": now},
             },
         ),
         db["seller_plan_group_subscriptions"].distinct(
@@ -346,7 +344,7 @@ async def seller_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": {"$in": scope_list},
                 "active": True,
-                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
+                "expiry_date": {"$gt": now},
             },
         ),
     )
@@ -379,8 +377,7 @@ async def clone_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": owner_id,
                 "active": True,
-                # Count permanent subscriptions (null/missing expiry) as active.
-                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
+                "expiry_date": {"$gt": now},
             },
         ),
         db["seller_plan_group_subscriptions"].distinct(
@@ -388,7 +385,7 @@ async def clone_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": owner_id,
                 "active": True,
-                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
+                "expiry_date": {"$gt": now},
             },
         ),
     )
@@ -409,25 +406,56 @@ async def clone_active_subscriber_count(owner_id: int) -> int:
     return len(await clone_active_subscriber_ids(owner_id))
 
 
-async def seller_subscriber_limit_status(owner_id: int, user_id: int, scope_owner_id: int | None = None) -> dict:
-    """Return subscriber-limit status, scoped to one clone when requested.
+async def seller_subscriber_limit_status(
+    owner_id: int,
+    user_id: int,
+    scope_owner_id: int | None = None,
+    group_id: str | None = None,
+) -> dict:
+    """Return the active subscriber count and whether this purchase is a renewal.
 
-    ``owner_id`` is the seller account used to resolve the plan. ``scope_owner_id``
-    is the current clone's data owner. Omitting it preserves legacy seller-wide
-    behavior for callers that explicitly need an account-wide count.
+    ``owner_id`` resolves the seller's limit. ``scope_owner_id`` identifies the
+    current clone's subscriber data. When ``group_id`` is supplied, renewal
+    eligibility is checked against the exact selected subscription: a live
+    subscription to a different Plan Group must not let a removed/expired user
+    bypass the limit for this group. An empty group_id checks the clone-wide
+    subscription record. Omitting group_id preserves legacy callers' behavior.
     """
     owner_id = int(owner_id)
     user_id = int(user_id)
     plan, _ = await effective_plan(owner_id)
     if scope_owner_id is not None:
-        active_ids = await clone_active_subscriber_ids(int(scope_owner_id))
+        scope = int(scope_owner_id)
+        active_ids = await clone_active_subscriber_ids(scope)
     else:
+        scope = owner_id
         active_ids = await seller_active_subscriber_ids(owner_id)
+
+    already_active = user_id in active_ids
+    if group_id is not None:
+        now = datetime.now(timezone.utc)
+        if str(group_id).strip():
+            current = await get_database()["seller_plan_group_subscriptions"].find_one({
+                "owner_id": scope,
+                "user_id": user_id,
+                "group_id": str(group_id).strip(),
+                "active": True,
+                "expiry_date": {"$gt": now},
+            }, {"_id": 1})
+        else:
+            current = await get_database()["seller_subscriptions"].find_one({
+                "owner_id": scope,
+                "user_id": user_id,
+                "active": True,
+                "expiry_date": {"$gt": now},
+            }, {"_id": 1})
+        already_active = current is not None
+
     limit = int(plan.get("active_subscriber_limit", 25))
     return {
         "count": len(active_ids),
         "limit": limit,
-        "already_active": user_id in active_ids,
+        "already_active": already_active,
         "at_limit": limit >= 0 and len(active_ids) >= limit,
         "plan_name": str(plan.get("name") or "Free").strip(),
     }
