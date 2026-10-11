@@ -117,7 +117,7 @@ async def handle(self, update, context, q, owner, action):
         tracked_gateway_tx_id = None
         gateway_checkout_ready = False
         seller_account_id = self.seller_account(context)
-        limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
+        limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner, group_id=str(plan.get("group_id") or ""))
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
             await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or action.replace('c_select_', '')), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
@@ -272,6 +272,23 @@ async def handle(self, update, context, q, owner, action):
         if not cfg.get('stars_enabled') or not plan or stars <= 0:
             await q.answer('Telegram Stars is unavailable for this plan.', show_alert=True)
             return True
+        seller_account_id = self.seller_account(context)
+        limit_status = await seller_subscriber_limit_status(
+            seller_account_id, int(q.from_user.id), scope_owner_id=owner,
+            group_id=str(plan.get("group_id") or ""),
+        )
+        if limit_status.get('at_limit') and not limit_status.get('already_active'):
+            await save_pending_limit_selection(
+                seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or plan_id),
+                str(plan.get('name') or 'Plan'),
+            )
+            await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), stars, plan=plan)
+            await q.answer()
+            await q.message.reply_text(
+                '⚠️ Subscriber Limit Reached\n\nThe active subscriber limit has been reached.\nPlease wait for the admin approval.',
+                reply_markup=back_keyboard,
+            )
+            return True
         await context.bot.send_invoice(
             chat_id=q.from_user.id,
             title=f"{plan['name']} Subscription",
@@ -294,7 +311,7 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('Plan not found', show_alert=True)
             return True
         seller_account_id = self.seller_account(context)
-        limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
+        limit_status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner, group_id=str(plan.get("group_id") or ""))
         if limit_status.get('at_limit') and not limit_status.get('already_active'):
             await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan.get('plan_id') or plan_id), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
@@ -400,7 +417,7 @@ async def handle(self, update, context, q, owner, action):
             await q.answer('Plan not found', show_alert=True)
             return True
         seller_account_id = self.seller_account(context)
-        status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner)
+        status = await seller_subscriber_limit_status(seller_account_id, int(q.from_user.id), scope_owner_id=owner, group_id=str(plan.get("group_id") or ""))
         if status.get('at_limit') and not status.get('already_active'):
             await save_pending_limit_selection(seller_account_id, owner, int(q.from_user.id), str(plan_id), str(plan.get('name') or 'Plan'))
             await self.notify_subscriber_limit(owner, int(q.from_user.id), plan.get('name'), plan.get('price'), plan=plan)
