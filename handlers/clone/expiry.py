@@ -162,3 +162,20 @@ class CloneExpiryMixin:
                 )
             except Exception:
                 pass
+
+        # Expired subscriptions can free capacity without an admin action.
+        # Recheck pending selections on each existing expiry cycle (60 seconds);
+        # the resume routine only opens payment pages for users whose clone now
+        # has capacity and clears each selection after it is handled.
+        try:
+            from services.bot_manager import bot_manager
+            seller_account_id = int(
+                context.application.bot_data.get('seller_account_id') or owner
+            )
+            await bot_manager.resume_pending_limited_purchases(seller_account_id)
+        except Exception:
+            logger.exception(
+                'Could not resume limited plan selections after expiry scan owner=%s',
+                owner,
+            )
+
