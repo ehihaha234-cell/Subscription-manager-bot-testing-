@@ -243,16 +243,18 @@ async def handle(self, update, context, q, owner, action):
                 logger.exception('Stored manual payment QR could not be sent; falling back to text')
                 await self.safe_query_message(q, text, kb)
         else:
-            await self.safe_query_message(q, text, kb)
+            payment_page_message = await self.safe_query_message(q, text, kb)
             # Persist the exact message containing the Payment Link so the paid
-            # webhook can edit this same clone-bot message if the subscriber
-            # limit fills before payment completes.
+            # webhook can replace this same clone-bot message with the limit
+            # notice when capacity is full. Prefer the message returned by the
+            # Telegram edit operation, and fall back to the callback message.
             if tracked_gateway_tx_id and gateway_checkout_ready and q.message is not None:
                 try:
+                    saved_message = payment_page_message or q.message
                     await update_gateway_transaction(
                         tracked_gateway_tx_id,
-                        payment_message_chat_id=int(q.message.chat_id),
-                        payment_message_id=int(q.message.message_id),
+                        payment_message_chat_id=int(saved_message.chat_id),
+                        payment_message_id=int(saved_message.message_id),
                         payment_message_type='text',
                     )
                 except Exception:
