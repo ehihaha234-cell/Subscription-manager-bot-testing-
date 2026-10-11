@@ -117,7 +117,7 @@ class CloneMediaHandlersMixin:
             if not plan: await update.effective_message.reply_text("Select a plan first"); return
             photo=update.effective_message.photo[-1]
             seller_account_id = self.seller_account(context)
-            limit_status = await seller_subscriber_limit_status(seller_account_id, int(update.effective_user.id), scope_owner_id=owner)
+            limit_status = await seller_subscriber_limit_status(seller_account_id, int(update.effective_user.id), scope_owner_id=owner, group_id=str(plan.get("group_id") or ""))
             if limit_status.get("at_limit") and not limit_status.get("already_active"):
                 await save_pending_limit_selection(seller_account_id, owner, int(update.effective_user.id), str(plan.get("plan_id") or ""), str(plan.get("name") or "Plan"))
                 await self.notify_subscriber_limit(owner, int(update.effective_user.id), plan.get("name"), plan.get("price"), plan=plan)
