@@ -336,7 +336,9 @@ async def seller_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": {"$in": scope_list},
                 "active": True,
-                "expiry_date": {"$gt": now},
+                # A missing/null expiry represents an unlimited/legacy active
+                # subscription. It must count toward the subscriber quota too.
+                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
             },
         ),
         db["seller_plan_group_subscriptions"].distinct(
@@ -344,7 +346,7 @@ async def seller_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": {"$in": scope_list},
                 "active": True,
-                "expiry_date": {"$gt": now},
+                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
             },
         ),
     )
@@ -377,7 +379,8 @@ async def clone_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": owner_id,
                 "active": True,
-                "expiry_date": {"$gt": now},
+                # Count permanent subscriptions (null/missing expiry) as active.
+                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
             },
         ),
         db["seller_plan_group_subscriptions"].distinct(
@@ -385,7 +388,7 @@ async def clone_active_subscriber_ids(owner_id: int):
             {
                 "owner_id": owner_id,
                 "active": True,
-                "expiry_date": {"$gt": now},
+                "$or": [{"expiry_date": {"$gt": now}}, {"expiry_date": None}],
             },
         ),
     )
