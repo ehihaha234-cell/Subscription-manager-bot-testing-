@@ -573,6 +573,51 @@ async def defer_cashfree_verification(
     )
 
 
+async def has_earlier_pending_child_subscription(
+    seller_account_id: int,
+    transaction_id: str,
+    paid_at=None,
+    created_at=None,
+) -> bool:
+    """Return whether an older verified child purchase must be fulfilled first.
+
+    Scope by seller account (not just one clone), because active-subscriber
+    capacity is shared across the seller's clone bots. Include `fulfilling`
+    rows so a newer webhook cannot race ahead while an older purchase is being
+    activated. Fulfilled rows are excluded.
+    """
+    current_paid_at = paid_at or created_at or datetime.now(timezone.utc)
+    current_created_at = created_at or current_paid_at
+    query = {
+        "transaction_id": {"$ne": str(transaction_id)},
+        "purpose": "child_subscription",
+        "status": {"$in": ["paid", "paid_unfulfilled", "fulfilling"]},
+        "fulfilled_at": {"$exists": False},
+        "$and": [
+            {
+                "$or": [
+                    {"metadata.seller_account_id": int(seller_account_id)},
+                    {"owner_id": int(seller_account_id)},
+                ]
+            },
+            {
+                "$or": [
+                    {"paid_at": {"$lt": current_paid_at}},
+                    {
+                        "paid_at": current_paid_at,
+                        "created_at": {"$lt": current_created_at},
+                    },
+                    {
+                        "paid_at": {"$exists": False},
+                        "created_at": {"$lt": current_created_at},
+                    },
+                ]
+            },
+        ],
+    }
+    return await _transactions().find_one(query, {"_id": 1}) is not None
+
+
 async def recoverable_gateway_transactions(limit: int = 100) -> list[dict]:
     """Return paid work and due Cashfree verifications without retry storms."""
     now = datetime.now(timezone.utc)
