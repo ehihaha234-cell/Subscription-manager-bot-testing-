@@ -1040,6 +1040,7 @@ async def create_automatic_payment(owner_id,user_id,plan,gateway,transaction_id,
         "group_id":str(plan.get("group_id") or ""),
         "target_chat_ids":[int(x) for x in (plan.get("target_chat_ids") or [])],
         "payment_method":gateway,"gateway_payment_id":str(gateway_payment_id or ""),
+        "stars_amount":int(stars_amount) if stars_amount is not None else None,
         "status":"approved","admin_id":0,"processed_at":now,"created_at":now,"updated_at":now,
     }
     result=await c(PAYMENTS).update_one(

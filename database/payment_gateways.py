@@ -63,6 +63,15 @@ async def initialize_payment_gateway_indexes():
     await _events().create_index("created_at", expireAfterSeconds=30 * 24 * 60 * 60)
     await _transactions().create_index([("status", 1), ("fulfillment_lease_until", 1)])
     await _transactions().create_index([("gateway_payment_id", 1)], sparse=True)
+    # Telegram Stars charge IDs are globally unique provider references. This
+    # partial unique index prevents duplicate paid transactions on redelivered
+    # successful_payment updates without changing older gateway records.
+    await _transactions().create_index(
+        [("gateway", 1), ("gateway_payment_id", 1)],
+        unique=True,
+        partialFilterExpression={"gateway": "telegram_stars", "gateway_payment_id": {"$type": "string"}},
+        name="uniq_telegram_stars_charge",
+    )
     await _razorpay_qr_pool().create_index("qr_code_id", unique=True)
     await _razorpay_qr_pool().create_index([("owner_id", 1), ("bot_id", 1), ("plan_id", 1), ("status", 1), ("qr_close_by", 1)])
 
@@ -253,6 +262,45 @@ async def get_gateway_transaction(transaction_id: str) -> dict | None:
 
 async def get_transaction_by_gateway_order(gateway: str, gateway_order_id: str) -> dict | None:
     return await _transactions().find_one({"gateway": gateway, "gateway_order_id": str(gateway_order_id)})
+
+async def get_transaction_by_gateway_payment(gateway: str, gateway_payment_id: str) -> dict | None:
+    """Find an existing transaction by the provider's unique payment reference."""
+    return await _transactions().find_one({
+        "gateway": str(gateway),
+        "gateway_payment_id": str(gateway_payment_id),
+    })
+
+async def create_or_get_stars_transaction(
+    *, owner_id: int, payer_user_id: int, gateway_payment_id: str,
+    amount: float, currency: str, purpose: str, reference_id: str, metadata: dict,
+) -> dict:
+    """Atomically persist one paid Telegram Stars transaction per charge ID."""
+    now = datetime.now(timezone.utc)
+    charge_id = str(gateway_payment_id)
+    doc = {
+        "transaction_id": "gtw_" + uuid4().hex[:20],
+        "scope": "seller",
+        "owner_id": int(owner_id),
+        "payer_user_id": int(payer_user_id),
+        "gateway": "telegram_stars",
+        "gateway_payment_id": charge_id,
+        "amount": float(amount),
+        "currency": str(currency).upper(),
+        "purpose": str(purpose),
+        "reference_id": str(reference_id),
+        "metadata": metadata or {},
+        "status": "paid",
+        "paid_at": now,
+        "payment_provider": "telegram_stars",
+        "created_at": now,
+        "updated_at": now,
+    }
+    return await _transactions().find_one_and_update(
+        {"gateway": "telegram_stars", "gateway_payment_id": charge_id},
+        {"$setOnInsert": doc},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
 
 
 async def claim_transaction_success(transaction_id: str, gateway_payment_id: str, raw_event: dict | None = None) -> dict | None:
