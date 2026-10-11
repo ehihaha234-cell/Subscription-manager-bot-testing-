@@ -63,15 +63,6 @@ async def initialize_payment_gateway_indexes():
     await _events().create_index("created_at", expireAfterSeconds=30 * 24 * 60 * 60)
     await _transactions().create_index([("status", 1), ("fulfillment_lease_until", 1)])
     await _transactions().create_index([("gateway_payment_id", 1)], sparse=True)
-    # Telegram Stars charge IDs are globally unique provider references. This
-    # partial unique index prevents duplicate paid transactions on redelivered
-    # successful_payment updates without changing older gateway records.
-    await _transactions().create_index(
-        [("gateway", 1), ("gateway_payment_id", 1)],
-        unique=True,
-        partialFilterExpression={"gateway": "telegram_stars", "gateway_payment_id": {"$type": "string"}},
-        name="uniq_telegram_stars_charge",
-    )
     await _razorpay_qr_pool().create_index("qr_code_id", unique=True)
     await _razorpay_qr_pool().create_index([("owner_id", 1), ("bot_id", 1), ("plan_id", 1), ("status", 1), ("qr_close_by", 1)])
 
@@ -263,44 +254,13 @@ async def get_gateway_transaction(transaction_id: str) -> dict | None:
 async def get_transaction_by_gateway_order(gateway: str, gateway_order_id: str) -> dict | None:
     return await _transactions().find_one({"gateway": gateway, "gateway_order_id": str(gateway_order_id)})
 
+
 async def get_transaction_by_gateway_payment(gateway: str, gateway_payment_id: str) -> dict | None:
-    """Find an existing transaction by the provider's unique payment reference."""
+    """Find a transaction by the provider's unique payment/charge reference."""
     return await _transactions().find_one({
         "gateway": str(gateway),
         "gateway_payment_id": str(gateway_payment_id),
     })
-
-async def create_or_get_stars_transaction(
-    *, owner_id: int, payer_user_id: int, gateway_payment_id: str,
-    amount: float, currency: str, purpose: str, reference_id: str, metadata: dict,
-) -> dict:
-    """Atomically persist one paid Telegram Stars transaction per charge ID."""
-    now = datetime.now(timezone.utc)
-    charge_id = str(gateway_payment_id)
-    doc = {
-        "transaction_id": "gtw_" + uuid4().hex[:20],
-        "scope": "seller",
-        "owner_id": int(owner_id),
-        "payer_user_id": int(payer_user_id),
-        "gateway": "telegram_stars",
-        "gateway_payment_id": charge_id,
-        "amount": float(amount),
-        "currency": str(currency).upper(),
-        "purpose": str(purpose),
-        "reference_id": str(reference_id),
-        "metadata": metadata or {},
-        "status": "paid",
-        "paid_at": now,
-        "payment_provider": "telegram_stars",
-        "created_at": now,
-        "updated_at": now,
-    }
-    return await _transactions().find_one_and_update(
-        {"gateway": "telegram_stars", "gateway_payment_id": charge_id},
-        {"$setOnInsert": doc},
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
 
 
 async def claim_transaction_success(transaction_id: str, gateway_payment_id: str, raw_event: dict | None = None) -> dict | None:
@@ -571,51 +531,6 @@ async def defer_cashfree_verification(
         },
         return_document=ReturnDocument.AFTER,
     )
-
-
-async def has_earlier_pending_child_subscription(
-    seller_account_id: int,
-    transaction_id: str,
-    paid_at=None,
-    created_at=None,
-) -> bool:
-    """Return whether an older verified child purchase must be fulfilled first.
-
-    Scope by seller account (not just one clone), because active-subscriber
-    capacity is shared across the seller's clone bots. Include `fulfilling`
-    rows so a newer webhook cannot race ahead while an older purchase is being
-    activated. Fulfilled rows are excluded.
-    """
-    current_paid_at = paid_at or created_at or datetime.now(timezone.utc)
-    current_created_at = created_at or current_paid_at
-    query = {
-        "transaction_id": {"$ne": str(transaction_id)},
-        "purpose": "child_subscription",
-        "status": {"$in": ["paid", "paid_unfulfilled", "fulfilling"]},
-        "fulfilled_at": {"$exists": False},
-        "$and": [
-            {
-                "$or": [
-                    {"metadata.seller_account_id": int(seller_account_id)},
-                    {"owner_id": int(seller_account_id)},
-                ]
-            },
-            {
-                "$or": [
-                    {"paid_at": {"$lt": current_paid_at}},
-                    {
-                        "paid_at": current_paid_at,
-                        "created_at": {"$lt": current_created_at},
-                    },
-                    {
-                        "paid_at": {"$exists": False},
-                        "created_at": {"$lt": current_created_at},
-                    },
-                ]
-            },
-        ],
-    }
-    return await _transactions().find_one(query, {"_id": 1}) is not None
 
 
 async def recoverable_gateway_transactions(limit: int = 100) -> list[dict]:
