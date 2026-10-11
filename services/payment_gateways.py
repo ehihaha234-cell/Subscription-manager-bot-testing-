@@ -28,7 +28,6 @@ from database.payment_gateways import (
     mark_transaction_failed,
     mark_transaction_fulfilled,
     mark_transaction_fulfillment_retry,
-    has_earlier_pending_child_subscription,
     reserve_webhook_event,
     mark_valid_webhook_received,
     update_gateway_transaction,
@@ -1039,22 +1038,6 @@ async def fulfill_transaction(tx: dict) -> None:
             raise GatewayError("Child subscription plan no longer exists")
         seller_account_id = int((tx.get('metadata') or {}).get('seller_account_id') or seller_id)
         scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
-
-        # Enforce FIFO across all clone bots owned by this seller. A newer
-        # webhook may arrive while an older paid transaction is still pending;
-        # leave the newer one queued so the oldest paid user gets the next slot.
-        if await has_earlier_pending_child_subscription(
-            seller_account_id,
-            str(tx.get("transaction_id") or ""),
-            tx.get("paid_at"),
-            tx.get("created_at"),
-        ):
-            await mark_transaction_fulfillment_retry(
-                tx["transaction_id"],
-                "Waiting for an earlier verified subscription payment (FIFO)",
-            )
-            return
-
         limit_status = await seller_subscriber_limit_status(
             seller_account_id,
             int(tx["payer_user_id"]),
@@ -1118,19 +1101,18 @@ async def fulfill_transaction(tx: dict) -> None:
                                 "Could not edit payment screen for limit notice transaction=%s: %s",
                                 tx["transaction_id"], edit_exc,
                             )
+                    if not edited and str(tx.get("gateway") or "").lower() == "telegram_stars":
+                        # Telegram's successful_payment update does not carry the
+                        # original invoice message ID. For Stars, send one durable,
+                        # idempotently-claimed notice rather than losing the warning.
+                        await bot.send_message(chat_id=int(tx["payer_user_id"]), text=limit_text)
+                        edited = True
                     if not edited:
-                        if str(tx.get("gateway") or "") == "telegram_stars":
-                            # Stars invoices are Telegram-native and do not have a
-                            # provider checkout message to edit. Send this warning
-                            # once through the same clone bot instead.
-                            await bot.send_message(chat_id=int(tx["payer_user_id"]), text=limit_text)
-                            edited = True
-                        else:
-                            # For gateway checkout, do not create a duplicate warning
-                            # if the original payment page cannot be edited.
-                            raise GatewayError(
-                                "Original payment page could not be edited; refusing to send a duplicate message"
-                            )
+                        # For external gateway checkout, preserve the existing
+                        # single-message behavior: edit the original payment page.
+                        raise GatewayError(
+                            "Original payment page could not be edited; refusing to send a duplicate message"
+                        )
                     await complete_transaction_notification(
                         tx["transaction_id"], "subscriber_limit_buyer",
                         {"status": "edited" if tx.get("payment_message_id") else "sent"},
@@ -1176,7 +1158,6 @@ async def fulfill_transaction(tx: dict) -> None:
         payment = await create_automatic_payment(
             seller_id, tx["payer_user_id"], plan, tx["gateway"],
             tx["transaction_id"], tx.get("gateway_payment_id", ""),
-            stars_amount=(tx.get("metadata") or {}).get("stars_amount") if tx.get("gateway") == "telegram_stars" else None,
         )
 
         # Capture the state before activation so every payment method can show
