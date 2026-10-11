@@ -335,6 +335,22 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await context.bot.send_message(user_id, '❌ Your Plan Group subscription was removed by admin.')
         except Exception:
             pass
+
+        # A removed Plan Group frees capacity immediately. Resume previously
+        # blocked plan selections for this seller/clone without waiting for a
+        # seller-plan upgrade. The recovery routine re-checks capacity per item.
+        try:
+            from services.bot_manager import bot_manager
+            seller_account_id = int(
+                context.application.bot_data.get('seller_account_id') or owner
+            )
+            await bot_manager.resume_pending_limited_purchases(seller_account_id)
+        except Exception:
+            logger.exception(
+                'Could not resume limited plan selections after admin removal owner=%s user=%s group=%s',
+                owner, user_id, gid,
+            )
+
         await self.show_user_details(q, owner, user_id)
         return True
 
