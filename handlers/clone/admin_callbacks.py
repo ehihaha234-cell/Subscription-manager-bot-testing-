@@ -24,7 +24,67 @@ class CloneAdminCallbacksMixin:
         # completely unresponsive.
         role = staff_record.get("role", "moderator")
 
-        # Clear pending User Management input states whenever navigation returns
+        if action == "a_backup_restore":
+            if role != "seller":
+                await q.answer("Only the seller can restore a clone backup.", show_alert=True)
+                return
+            context.user_data.pop("clone_backup_bytes", None)
+            context.user_data["awaiting_clone_backup_upload"] = True
+            await q.edit_message_text(
+                "💾 <b>Clone Bot Backup & Restore</b>\\n\\n"
+                "Send the .json.gz backup file created from Owner Dashboard → Clone Bot Backup.\\n\\n"
+                "The backup will be restored only into this clone bot.\\n"
+                "Maximum file size: 20 MB.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="a_home")]]),
+                parse_mode="HTML",
+            )
+            return
+        if action in {"a_backup_mode_merge", "a_backup_mode_replace"}:
+            if role != "seller":
+                await q.answer("Only the seller can restore a clone backup.", show_alert=True)
+                return
+            raw = context.user_data.get("clone_backup_bytes")
+            if not raw:
+                await q.answer("Please upload the backup file again.", show_alert=True)
+                return
+            mode = "merge" if action.endswith("merge") else "replace"
+            await q.answer()
+            status = await q.message.reply_text("⏳ Preparing restore…")
+            progress_state = {"done": -1}
+            async def progress(done, total, current):
+                if done == progress_state["done"] and done != total:
+                    return
+                progress_state["done"] = done
+                percent = 100 if total <= 0 else min(100, int(done * 100 / total))
+                filled = min(10, int(percent / 10))
+                bar = "█" * filled + "░" * (10 - filled)
+                try:
+                    await status.edit_text(
+                        f"♻️ <b>Restore Progress</b>\\n\\n[{bar}] {percent}%\\n"
+                        f"Processed: {done:,} / {total:,}\\nCurrent: {html.escape(str(current))}",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            try:
+                from services.clone_backup import restore_clone_backup
+                result = await restore_clone_backup(raw, int(owner), mode, progress_callback=progress)
+                context.user_data.pop("clone_backup_bytes", None)
+                context.user_data.pop("awaiting_clone_backup_upload", None)
+                await status.edit_text(
+                    "✅ <b>Clone backup restored.</b>\\n\\n"
+                    f"Mode: <b>{mode.title()}</b>\\n"
+                    f"Restored: {result['restored']:,}\\n"
+                    f"Skipped existing records: {result['skipped']:,}\\n"
+                    f"Backup records: {result['records']:,}",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                logger.exception("Clone backup restore failed owner=%s mode=%s", owner, mode)
+                await status.edit_text(f"❌ Restore failed: {html.escape(str(exc)[:400])}")
+            return
+
+        # Resolve the staff role BEFORE any feature-specific dispatch.
         # to a user-details screen. This prevents a duration/ban-reason message
         # sent after Back from being processed as the previous pending action.
         if action.startswith("a_user_view_"):
