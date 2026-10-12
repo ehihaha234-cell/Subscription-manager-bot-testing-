@@ -31,9 +31,9 @@ class CloneAdminCallbacksMixin:
             context.user_data.pop("clone_backup_bytes", None)
             context.user_data["awaiting_clone_backup_upload"] = True
             await q.edit_message_text(
-                "💾 <b>Clone Bot Backup & Restore</b>\\n\\n"
-                "Send the .json.gz backup file created from Owner Dashboard → Clone Bot Backup.\\n\\n"
-                "The backup will be restored only into this clone bot.\\n"
+                "💾 <b>Clone Bot Backup & Restore</b>\n\n"
+                "Send the .json.gz backup file created from Owner Dashboard → Clone Bot Backup.\n\n"
+                "The backup will be restored only into this clone bot.\n"
                 "Maximum file size: 20 MB.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="a_home")]]),
                 parse_mode="HTML",
@@ -60,8 +60,8 @@ class CloneAdminCallbacksMixin:
                 bar = "█" * filled + "░" * (10 - filled)
                 try:
                     await status.edit_text(
-                        f"♻️ <b>Restore Progress</b>\\n\\n[{bar}] {percent}%\\n"
-                        f"Processed: {done:,} / {total:,}\\nCurrent: {html.escape(str(current))}",
+                        f"♻️ <b>Restore Progress</b>\n\n[{bar}] {percent}%\n"
+                        f"Processed: {done:,} / {total:,}\nCurrent: {html.escape(str(current))}",
                         parse_mode="HTML",
                     )
                 except Exception:
@@ -72,10 +72,10 @@ class CloneAdminCallbacksMixin:
                 context.user_data.pop("clone_backup_bytes", None)
                 context.user_data.pop("awaiting_clone_backup_upload", None)
                 await status.edit_text(
-                    "✅ <b>Clone backup restored.</b>\\n\\n"
-                    f"Mode: <b>{mode.title()}</b>\\n"
-                    f"Restored: {result['restored']:,}\\n"
-                    f"Skipped existing records: {result['skipped']:,}\\n"
+                    "✅ <b>Clone backup restored.</b>\n\n"
+                    f"Mode: <b>{mode.title()}</b>\n"
+                    f"Restored: {result['restored']:,}\n"
+                    f"Skipped existing records: {result['skipped']:,}\n"
                     f"Backup records: {result['records']:,}",
                     parse_mode="HTML",
                 )
