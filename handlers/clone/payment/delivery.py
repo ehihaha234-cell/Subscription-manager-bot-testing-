@@ -585,6 +585,10 @@ class ClonePaymentDeliveryMixin:
                 "failed":0,
                 "error":"No connected channel/group has the required Telegram invite permission",
             }
+        links=[]
+        failed_lines=[]
+        already_member=0
+        failed=0
         if success_details:
             permitted_ids = {int(ch.get("chat_id", 0)) for ch in channels}
             for ch in connected_channels:
@@ -596,10 +600,6 @@ class ClonePaymentDeliveryMixin:
                     failed += 1
                     failed_lines.append(f"❌ {ch.get('title') or 'Group/Channel'}: invite failed (Chat not found or invite permission unavailable).")
 
-        links=[]
-        failed_lines=[]
-        already_member=0
-        failed=0
         if no_connected_targets and success_details:
             failed = 1
             failed_lines.append("❌ Invite failed: selected Plan Group has no valid connected target groups.")
