@@ -54,9 +54,9 @@ class CloneRuntimeAppMixin:
         context.user_data["clone_backup_bytes"] = raw
         context.user_data.pop("awaiting_clone_backup_upload", None)
         await message.reply_text(
-            "✅ <b>Backup verified</b>\\n\\n"
-            f"📦 Records: {manifest.get('records', 0):,}\\n"
-            f"🔐 SHA-256: {str(manifest.get('sha256', ''))[:16]}…\\n\\n"
+            "✅ <b>Backup verified</b>\n\n"
+            f"📦 Records: {manifest.get('records', 0):,}\n"
+            f"🔐 SHA-256: {str(manifest.get('sha256', ''))[:16]}…\n\n"
             "Choose how to restore into this clone:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
