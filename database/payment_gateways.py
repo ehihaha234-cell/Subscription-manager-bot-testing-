@@ -272,6 +272,60 @@ async def claim_transaction_success(transaction_id: str, gateway_payment_id: str
     )
 
 
+async def has_earlier_paid_child_transaction(transaction: dict) -> bool:
+    """Return True when an older paid child-subscription transaction is waiting.
+
+    Recovery sorting alone is not enough: a newer webhook can arrive while a
+    recovery job is processing an older paid_unfulfilled transaction. This
+    guard serializes fulfillment by seller payment time across clone bots.
+    """
+    transaction_id = str(transaction.get("transaction_id") or "")
+    metadata = transaction.get("metadata") or {}
+    seller_id = int(metadata.get("seller_account_id") or transaction.get("owner_id") or 0)
+    if not transaction_id or not seller_id:
+        return False
+
+    query = {
+        "purpose": "child_subscription",
+        "fulfilled_at": {"$exists": False},
+        "transaction_id": {"$ne": transaction_id},
+        "status": {"$in": ["paid", "paid_unfulfilled", "fulfilling"]},
+        "$or": [
+            {"owner_id": seller_id},
+            {"metadata.seller_account_id": seller_id},
+        ],
+    }
+    older = await _transactions().find_one(
+        query,
+        sort=[("paid_at", 1), ("created_at", 1)],
+        projection={"transaction_id": 1, "paid_at": 1, "created_at": 1},
+    )
+    if not older:
+        return False
+
+    current_key = (
+        transaction.get("paid_at") or transaction.get("created_at")
+    )
+    older_key = older.get("paid_at") or older.get("created_at")
+    if current_key is None or older_key is None:
+        # Missing timestamps are treated conservatively as older work.
+        return True
+    if getattr(current_key, "tzinfo", None) is None:
+        current_key = current_key.replace(tzinfo=timezone.utc)
+    if getattr(older_key, "tzinfo", None) is None:
+        older_key = older_key.replace(tzinfo=timezone.utc)
+    if older_key < current_key:
+        return True
+    if older_key == current_key:
+        older_created = older.get("created_at")
+        current_created = transaction.get("created_at")
+        if older_created and current_created and older_created < current_created:
+            return True
+        # Equal timestamps are uncommon; transaction ID gives deterministic order.
+        return str(older.get("transaction_id") or "") < transaction_id
+    return False
+
+
 async def claim_transaction_fulfillment(
     transaction_id: str,
     *,
