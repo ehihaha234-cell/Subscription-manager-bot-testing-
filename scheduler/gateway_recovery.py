@@ -136,6 +136,20 @@ async def recover_failed_invite_deliveries_job() -> None:
             if not plan:
                 raise GatewayError("Child subscription plan no longer exists")
 
+            # Recover only the purchased plan's configured targets. Do not send
+            # another full "Payment verified automatically" receipt on retries.
+            target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
+            if not target_chat_ids and plan.get("group_id"):
+                from database.seller_data import get_plan_group
+                plan_group = await get_plan_group(seller_id, str(plan.get("group_id")))
+                target_chat_ids = [int(x) for x in ((plan_group or {}).get("chat_ids") or [])]
+                if not target_chat_ids:
+                    target_chat_ids = [
+                        int(item.get("chat_id"))
+                        for item in ((plan_group or {}).get("targets") or [])
+                        if isinstance(item, dict) and item.get("chat_id") is not None
+                    ]
+
             # Ensure the subscription exists before retrying access delivery.
             # This repairs already-fulfilled gateway transactions from older
             # code where the payment record was saved but activation was skipped.
@@ -153,23 +167,12 @@ async def recover_failed_invite_deliveries_job() -> None:
             delivery = await bot_manager.deliver_subscription_access(
                 seller_id,
                 user_id,
-                success_details={
-                    "plan_name": plan.get("name", "Subscription"),
-                    "amount": tx.get("amount", 0),
-                    "gateway": tx.get("gateway", ""),
-                    "transaction_id": tx.get("gateway_payment_id") or transaction_id,
-                    "payment_date": tx.get("paid_at") or tx.get("updated_at") or tx.get("created_at"),
-                    "expiry_date": expiry,
-                    "duration": plan.get("duration_text") or f"{plan.get('duration_minutes', 0)} minutes",
-                    "group_id": plan.get("group_id"),
-                    "target_chat_ids": [int(x) for x in (plan.get("target_chat_ids") or [])],
-                    "was_already_active": bool((tx.get("fulfillment_result") or {}).get("was_already_active")),
-                },
+                success_details=None,
                 bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
+                target_chat_ids=target_chat_ids,
             )
             if delivery.get("error") or (
-                not delivery.get("receipt_sent")
-                and int(delivery.get("sent", 0) or 0) == 0
+                int(delivery.get("sent", 0) or 0) == 0
                 and int(delivery.get("already_member", 0) or 0) == 0
             ):
                 raise GatewayError(
