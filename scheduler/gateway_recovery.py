@@ -161,11 +161,15 @@ async def recover_failed_invite_deliveries_job() -> None:
                     "payment_date": tx.get("paid_at") or tx.get("updated_at") or tx.get("created_at"),
                     "expiry_date": expiry,
                     "duration": plan.get("duration_text") or f"{plan.get('duration_minutes', 0)} minutes",
+                    "group_id": plan.get("group_id"),
+                    "target_chat_ids": [int(x) for x in (plan.get("target_chat_ids") or [])],
+                    "was_already_active": bool((tx.get("fulfillment_result") or {}).get("was_already_active")),
                 },
                 bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
             )
             if delivery.get("error") or (
-                int(delivery.get("sent", 0) or 0) == 0
+                not delivery.get("receipt_sent")
+                and int(delivery.get("sent", 0) or 0) == 0
                 and int(delivery.get("already_member", 0) or 0) == 0
             ):
                 raise GatewayError(
