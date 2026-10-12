@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from database.mongo import get_database
+from pymongo.errors import DuplicateKeyError
 
 CLONE_BACKUP_FORMAT = "telegram-saas-clone-backup"
 CLONE_BACKUP_VERSION = 1
@@ -138,7 +139,7 @@ def _natural_key(collection: str, document: dict[str, Any]) -> dict[str, Any]:
         "seller_settings": ("owner_id",),
         "seller_users": ("owner_id", "user_id"),
         "seller_payments": ("owner_id", "payment_id"),
-        "seller_subscriptions": ("owner_id", "user_id", "plan_id"),
+        "seller_subscriptions": ("owner_id", "user_id"),
         "seller_plan_group_subscriptions": ("owner_id", "user_id", "group_id"),
         "seller_plans": ("owner_id", "plan_id"),
         "seller_channels": ("owner_id", "chat_id"),
@@ -220,8 +221,16 @@ async def restore_clone_backup(
                         if progress_callback:
                             await progress_callback(done, max(total, 1), name)
                         continue
-            await db[name].insert_one(doc)
-            restored += 1
+            try:
+                await db[name].insert_one(doc)
+                restored += 1
+            except DuplicateKeyError:
+                # Existing target data can collide with a MongoDB unique index
+                # even when the natural-key lookup above did not find it.
+                # During Merge, preserve the target record and continue safely.
+                if mode != "merge":
+                    raise
+                skipped += 1
             done += 1
             if progress_callback:
                 await progress_callback(done, max(total, 1), name)
