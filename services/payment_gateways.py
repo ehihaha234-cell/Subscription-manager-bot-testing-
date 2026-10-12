@@ -1179,7 +1179,10 @@ async def fulfill_transaction(tx: dict) -> None:
         # Capture the state before activation so every payment method can show
         # whether this purchase created a new subscription or extended an active one.
         group_id = str(plan.get("group_id") or "").strip()
-        target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
+        # Use the target snapshot captured when checkout was created. A group
+        # connected later must not be added to an older purchase.
+        tx_metadata = tx.get("metadata") or {}
+        target_chat_ids = [int(x) for x in (tx_metadata.get("target_chat_ids") or plan.get("target_chat_ids") or [])]
         now = datetime.now(timezone.utc)
         if group_id:
             existing_sub = await get_plan_group_subscription(seller_id, tx["payer_user_id"], group_id)
@@ -1250,6 +1253,7 @@ async def fulfill_transaction(tx: dict) -> None:
                         "previous_expiry": previous_expiry,
                         "group_id": group_id,
                         "target_chat_ids": target_chat_ids,
+                        "group_id": group_id,
                     },
                     bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
                 )
