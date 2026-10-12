@@ -1053,6 +1053,8 @@ async def _owner_clone_backup_form(record):
     bot_id = int(record.get("bot_id") or 0)
     seller_id = int(record.get("seller_account_id") or record.get("owner_id") or 0)
     data_scope_id = int(record.get("data_owner_id") or record.get("owner_id") or 0)
+    db = get_database()
+    active_count = total_users_count = channel_count = plan_count = pending_count = success_count = 0
 
     seller = (await get_seller(seller_id)) if seller_id else {}
     seller = seller or {}
