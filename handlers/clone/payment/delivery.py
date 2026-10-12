@@ -536,15 +536,42 @@ class ClonePaymentDeliveryMixin:
         timezone_name = await self.seller_timezone(int(owner_id))
         connected_channels=await get_channels(int(owner_id))
         target_ids = set()
+        selected_group_id = str((success_details or {}).get("group_id") or "").strip()
         if success_details and success_details.get("target_chat_ids"):
             try:
                 target_ids = {int(x) for x in success_details.get("target_chat_ids") or []}
             except (TypeError, ValueError):
                 target_ids = set()
+        # Defensive fallback: derive targets from the selected Plan Group bundle.
+        # If a Plan Group was selected but cannot be resolved, NEVER fall back to
+        # every connected chat, as that can leak an unrelated group's invite link.
+        if success_details and selected_group_id and not target_ids:
+            try:
+                target_group = await get_plan_group(int(owner_id), selected_group_id)
+                for target in (target_group or {}).get("targets") or []:
+                    if not isinstance(target, dict):
+                        continue
+                    try:
+                        target_ids.add(int(target.get("chat_id")))
+                    except (TypeError, ValueError):
+                        continue
+            except Exception:
+                logger.exception(
+                    "Could not resolve selected Plan Group targets owner=%s group=%s",
+                    owner_id, selected_group_id,
+                )
+        if success_details and selected_group_id and not target_ids:
+            return {
+                "sent": 0, "already_member": 0, "failed": 0,
+                "error": "Selected Plan Group targets could not be resolved; unrelated groups were not used",
+            }
         if target_ids:
-            connected_channels = [ch for ch in connected_channels if int(ch.get("chat_id", 0)) in target_ids]
+            connected_channels = [
+                ch for ch in connected_channels
+                if int(ch.get("chat_id", 0)) in target_ids
+            ]
         if not connected_channels:
-            return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
+            return {"sent":0,"already_member":0,"failed":0,"error":"No selected Plan Group channel/group is connected to this clone bot" if selected_group_id else "No channel/group is connected to this clone bot"}
 
         # Automatic invite delivery is controlled only by the clone bot's
         # current Telegram permission. There is no stored enable/disable
