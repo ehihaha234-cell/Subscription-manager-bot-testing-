@@ -543,15 +543,6 @@ async def _seller_owner_details(owner_id: int, selected_bot_id: int | None = Non
             + ("\n".join(channel_lines) if channel_lines else "   None")
         )
 
-    if selected_bot_id is not None and bots:
-        selected_scope = int(bots[0].get("data_owner_id") or owner_id)
-        active_count = await clone_active_subscriber_count(selected_scope)
-        total_users_count = await db["seller_users"].count_documents({"owner_id": selected_scope})
-        channel_count = await db["seller_channels"].count_documents({"owner_id": selected_scope, "active": True})
-        plan_count = await db["seller_plans"].count_documents({"owner_id": selected_scope, "active": {"$ne": False}})
-        pending_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "pending"})
-        success_count = await db["seller_payments"].count_documents({"owner_id": selected_scope, "status": "approved"})
-
     expiry = (assignment or {}).get("expiry_date")
     if expiry and expiry.tzinfo is None: expiry = expiry.replace(tzinfo=timezone.utc)
     activated = (assignment or {}).get("created_at")
@@ -924,10 +915,24 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
             raise ApplicationHandlerStop
 
         context.user_data.clear()
-        text, markup = await _owner_clone_backup_form(record)
-        await update.effective_message.reply_text(
-            text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
-        )
+        try:
+            text, markup = await _owner_clone_backup_form(record)
+            await update.effective_message.reply_text(
+                text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
+            )
+        except Exception:
+            logger.exception(
+                "Owner clone backup search result failed for identifier=%s bot_id=%s",
+                raw, record.get("bot_id"),
+            )
+            await update.effective_message.reply_text(
+                "⚠️ Clone Bot was found, but its backup details could not be loaded. "
+                "The error has been logged. Please try again.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Search Again", callback_data="main_owner_clone_backups")],
+                    [InlineKeyboardButton("⬅ Owner Dashboard", callback_data="main_owner_dashboard")],
+                ]),
+            )
         raise ApplicationHandlerStop
 
     if context.user_data.get("owner_seller_search"):
@@ -1046,7 +1051,7 @@ async def _owner_clone_backup_form(record):
     is also current instead of relying only on the registration snapshot.
     """
     bot_id = int(record.get("bot_id") or 0)
-    seller_id = int(record.get("owner_id") or record.get("seller_account_id") or 0)
+    seller_id = int(record.get("seller_account_id") or record.get("owner_id") or 0)
     data_scope_id = int(record.get("data_owner_id") or record.get("owner_id") or 0)
 
     seller = (await get_seller(seller_id)) if seller_id else {}
@@ -1111,8 +1116,8 @@ async def _owner_clone_backup_form(record):
         if seller_id else escape(seller_name)
     )
 
-    if selected_bot_id is not None and bots:
-        selected_scope = int(bots[0].get("data_owner_id") or owner_id)
+    if bot_id and data_scope_id:
+        selected_scope = int(data_scope_id)
         active_count = await clone_active_subscriber_count(selected_scope)
         total_users_count = await db["seller_users"].count_documents({"owner_id": selected_scope})
         channel_count = await db["seller_channels"].count_documents({"owner_id": selected_scope, "active": True})
