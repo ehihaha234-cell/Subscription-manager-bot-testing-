@@ -22,6 +22,51 @@ class CloneRuntimeAppMixin:
             exc_info=(type(context.error), context.error, context.error.__traceback__),
         )
 
+    async def clone_backup_document(self, update, context):
+        if not context.user_data.get("awaiting_clone_backup_upload"):
+            return
+        message = update.effective_message
+        user = update.effective_user
+        if not message or not message.document or not user:
+            return
+        staff_record = await self.staff_record(update, context)
+        if not staff_record or staff_record.get("role") != "seller":
+            await message.reply_text("❌ Only the clone bot seller can restore backups.")
+            return
+        document = message.document
+        filename = str(document.file_name or "")
+        if not filename.lower().endswith(".json.gz"):
+            await message.reply_text("❌ Please upload a .json.gz Clone Bot backup file.")
+            return
+        if int(document.file_size or 0) > 20 * 1024 * 1024:
+            await message.reply_text("❌ Backup file exceeds the 20 MB safety limit.")
+            return
+        try:
+            file_obj = await context.bot.get_file(document.file_id)
+            raw = bytes(await file_obj.download_as_bytearray())
+            # Validate format/checksum before offering a destructive Replace option.
+            from services.clone_backup import validate_clone_backup
+            manifest = validate_clone_backup(raw)
+        except Exception as exc:
+            logger.exception("Clone backup upload validation failed owner=%s", self.owner(context))
+            await message.reply_text(f"❌ Backup rejected: {str(exc)[:300]}")
+            return
+        context.user_data["clone_backup_bytes"] = raw
+        context.user_data.pop("awaiting_clone_backup_upload", None)
+        await message.reply_text(
+            "✅ <b>Backup verified</b>\\n\\n"
+            f"📦 Records: {manifest.get('records', 0):,}\\n"
+            f"🔐 SHA-256: {str(manifest.get('sha256', ''))[:16]}…\\n\\n"
+            "Choose how to restore into this clone:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Merge", callback_data="a_backup_mode_merge")],
+                [InlineKeyboardButton("♻️ Replace", callback_data="a_backup_mode_replace")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="a_home")],
+            ]),
+        )
+        raise ApplicationHandlerStop
+
     async def business_automation_text_handler(self, update, context):
         handled = await group_manager.handle_text(self, update, context)
         if handled:
@@ -460,6 +505,7 @@ class CloneRuntimeAppMixin:
         app.add_handler(CommandHandler("connectsupport",self.connect_support_command))
         app.add_handler(CommandHandler("confirm", self.seller_broadcast_confirm_command))
         app.add_handler(CommandHandler("cancel", self.seller_broadcast_cancel_command))
+        app.add_handler(MessageHandler(filters.Document.ALL, self.clone_backup_document), group=-125)
         app.add_handler(MessageHandler(filters.COMMAND,self.support_template_command_handler),group=9)
         app.add_handler(
             CommandHandler(
