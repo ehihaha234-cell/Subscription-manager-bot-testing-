@@ -132,21 +132,17 @@ class ClonePaymentDeliveryMixin:
                 continue
 
             status = await seller_subscriber_limit_status(
-                int(seller_id), user_id, scope_owner_id=scope
+                int(seller_id), user_id, scope_owner_id=scope,
+                group_id=str(plan.get("group_id") or ""),
             )
             if status.get("at_limit") and not status.get("already_active"):
                 continue
 
             bot = running.application.bot
             try:
-                # Notice only: no buttons on this message. The original payment
-                # screen is then recreated below using the normal plan-selection flow.
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        "✅ Your selected plan is available again."
-                    ),
-                )
+                # Recreate the payment page through the normal plan-selection
+                # handler. Avoid a separate "available" message so a race where
+                # capacity fills again cannot leave a misleading success notice.
 
                 class _ResumeMessage:
                     def __init__(self, chat_id):
@@ -196,6 +192,16 @@ class ClonePaymentDeliveryMixin:
                     f"c_select_{plan_id}",
                 )
                 if handled:
+                    # Re-check after rendering: capacity can fill between the
+                    # pre-check and the plan handler. Keep the selection queued
+                    # if that happened, and never clear another group's pending
+                    # selection just because the handler returned True.
+                    final_status = await seller_subscriber_limit_status(
+                        int(seller_id), user_id, scope_owner_id=scope,
+                        group_id=str(plan.get("group_id") or ""),
+                    )
+                    if final_status.get("at_limit") and not final_status.get("already_active"):
+                        continue
                     await clear_pending_limit_selection(seller_id, scope, user_id)
                     resumed += 1
             except Exception:
@@ -258,7 +264,7 @@ class ClonePaymentDeliveryMixin:
                     owner_id=seller_account_id,
                     payer_user_id=user_id,
                     gateway='telegram_stars',
-                    amount=0,
+                    amount=float(payment.total_amount),
                     currency='XTR',
                     purpose='child_subscription',
                     reference_id=charge_id,
@@ -267,6 +273,7 @@ class ClonePaymentDeliveryMixin:
                         'data_owner_id': int(owner),
                         'seller_account_id': int(seller_account_id),
                         'bot_id': bot_id,
+                        'plan_amount': float(plan.get('price') or 0),
                         'stars_amount': int(payment.total_amount),
                         'stars_charge_id': charge_id,
                     },
