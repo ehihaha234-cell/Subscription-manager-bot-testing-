@@ -42,7 +42,7 @@ from database.payment_gateways import (
     list_available_razorpay_qr_pool_entries,
     claim_active_razorpay_qr_transaction_for_cancel,
 )
-from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan, get_plans, create_automatic_payment, get_subscription
+from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan_group, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase, seller_subscriber_limit_status
 from database.seller_bots import get_decrypted_bot_token, get_bots, get_bot_by_data_owner_id
 from database.platform_features import create_invoice, audit
@@ -1180,6 +1180,20 @@ async def fulfill_transaction(tx: dict) -> None:
         # whether this purchase created a new subscription or extended an active one.
         group_id = str(plan.get("group_id") or "").strip()
         target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
+        # Plan Group targets are stored on the group bundle, not necessarily on
+        # each individual plan. Resolve the bundle before sending any invite.
+        if group_id and not target_chat_ids:
+            target_group = await get_plan_group(seller_id, group_id)
+            if target_group:
+                for target in (target_group.get("targets") or []):
+                    if not isinstance(target, dict):
+                        continue
+                    try:
+                        chat_id = int(target.get("chat_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    if chat_id not in target_chat_ids:
+                        target_chat_ids.append(chat_id)
         now = datetime.now(timezone.utc)
         if group_id:
             existing_sub = await get_plan_group_subscription(seller_id, tx["payer_user_id"], group_id)
