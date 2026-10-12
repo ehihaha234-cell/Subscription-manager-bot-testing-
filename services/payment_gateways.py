@@ -42,7 +42,7 @@ from database.payment_gateways import (
     list_available_razorpay_qr_pool_entries,
     claim_active_razorpay_qr_transaction_for_cancel,
 )
-from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan_group, get_plan, get_plans, create_automatic_payment, get_subscription
+from database.seller_data import fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, get_plan, get_plans, create_automatic_payment, get_subscription
 from database.seller_subscriptions import get_paid_plan, process_verified_plan_purchase, seller_subscriber_limit_status
 from database.seller_bots import get_decrypted_bot_token, get_bots, get_bot_by_data_owner_id
 from database.platform_features import create_invoice, audit
@@ -1179,26 +1179,7 @@ async def fulfill_transaction(tx: dict) -> None:
         # Capture the state before activation so every payment method can show
         # whether this purchase created a new subscription or extended an active one.
         group_id = str(plan.get("group_id") or "").strip()
-        target_chat_ids = []
-        # Resolve invite targets from the selected Plan Group itself. Older plan
-        # records may not carry target_chat_ids, so an empty list must never mean
-        # "send an invite to every connected group".
-        if group_id:
-            target_group = await get_plan_group(seller_id, group_id)
-            if target_group:
-                raw_targets = target_group.get("chat_ids") or [
-                    target.get("chat_id") for target in (target_group.get("targets") or [])
-                    if isinstance(target, dict)
-                ]
-                for value in raw_targets:
-                    try:
-                        chat_id = int(value)
-                    except (TypeError, ValueError):
-                        continue
-                    if chat_id not in target_chat_ids:
-                        target_chat_ids.append(chat_id)
-        else:
-            target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
+        target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
         now = datetime.now(timezone.utc)
         if group_id:
             existing_sub = await get_plan_group_subscription(seller_id, tx["payer_user_id"], group_id)
@@ -1273,7 +1254,8 @@ async def fulfill_transaction(tx: dict) -> None:
                     bot_id=int((tx.get("metadata") or {}).get("bot_id") or 0),
                 )
                 if delivery.get("error") or (
-                    int(delivery.get("sent", 0) or 0) == 0
+                    not delivery.get("receipt_sent")
+                    and int(delivery.get("sent", 0) or 0) == 0
                     and int(delivery.get("already_member", 0) or 0) == 0
                 ):
                     raise GatewayError(
