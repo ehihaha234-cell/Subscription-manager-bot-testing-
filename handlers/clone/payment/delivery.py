@@ -658,12 +658,14 @@ class ClonePaymentDeliveryMixin:
                             "Your new purchase has been added to your existing subscription.\n\n"
                             f"📅 Previous Expiry: {_format_dt(success_details.get('previous_expiry'))}\n"
                             f"📅 New Expiry: {_format_dt(success_details.get('expiry_date'))}\n\n"
-                            "🔗 A fresh private invite link has been generated for you."
+                            + ("🔗 A fresh private invite link has been generated for you."
+                             if links else "🔗 Invite link could not be generated for the selected Plan Group.")
                         )
                     else:
                         subscription_note = (
                             f"⏳ Expiry Date: {_format_dt(success_details.get('expiry_date'))}\n\n"
-                            "🔗 Your fresh private invite link has been generated."
+                            + ("🔗 Your fresh private invite link has been generated."
+                             if links else "🔗 Invite link could not be generated for the selected Plan Group.")
                         )
 
                     success_amount_line = (
@@ -713,7 +715,7 @@ class ClonePaymentDeliveryMixin:
                         if str(ch.get("title") or "Premium Channel/Group") not in successful_titles
                     ]
                     text += (
-                        "\\n\\n❌ Invite failed for: "
+                        "\n\n❌ Invite failed for: "
                         + (", ".join(failed_names) if failed_names else "the selected Plan Group")
                         + ". Please contact the seller."
                     )
