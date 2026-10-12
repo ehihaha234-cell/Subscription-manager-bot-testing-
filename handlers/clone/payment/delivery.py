@@ -544,10 +544,32 @@ class ClonePaymentDeliveryMixin:
                 target_ids = {int(x) for x in scoped_target_ids or []}
             except (TypeError, ValueError):
                 target_ids = set()
-        if target_ids:
+
+        # Plan Group targets are authoritative. Resolve them from the saved group
+        # if the plan did not persist target_chat_ids; never use unrelated channels.
+        group_id = str((success_details or {}).get("group_id") or "").strip()
+        if group_id and not target_ids:
+            try:
+                plan_group = await get_plan_group(int(owner_id), group_id)
+                group_targets = (plan_group or {}).get("chat_ids") or []
+                if not group_targets:
+                    group_targets = [
+                        item.get("chat_id") for item in ((plan_group or {}).get("targets") or [])
+                        if isinstance(item, dict) and item.get("chat_id") is not None
+                    ]
+                target_ids = {int(x) for x in group_targets if x is not None}
+            except Exception:
+                logger.exception("Could not resolve Plan Group targets owner=%s group_id=%s", owner_id, group_id)
+
+        if group_id:
+            # An empty target list is a configuration problem, not permission to
+            # invite from every connected group.
+            connected_channels = [
+                ch for ch in connected_channels
+                if target_ids and int(ch.get("chat_id", 0)) in target_ids
+            ]
+        elif target_ids:
             connected_channels = [ch for ch in connected_channels if int(ch.get("chat_id", 0)) in target_ids]
-        if not connected_channels:
-            return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
 
         # Automatic invite delivery is controlled only by the clone bot's
         # current Telegram permission. There is no stored enable/disable
@@ -573,14 +595,8 @@ class ClonePaymentDeliveryMixin:
                     "Invite permission check failed owner=%s chat=%s: %s",
                     owner_id, chat_id, exc,
                 )
-        if not channels:
-            return {
-                "sent":0,
-                "already_member":0,
-                "failed":0,
-                "error":"No connected channel/group has the required Telegram invite permission",
-            }
-
+        # Do not return early here: even when invite permissions are missing,
+        # the payer must still receive the full payment receipt and failed-group status.
         links=[]
         already_member=0
         failed=0
@@ -619,7 +635,7 @@ class ClonePaymentDeliveryMixin:
                 failed+=1
                 logger.warning("Invite creation failed owner=%s chat=%s user=%s: %s",owner_id,chat_id,user_id,exc)
 
-        if links:
+        if links or success_details:
             try:
                 if success_details:
                     try:
@@ -685,6 +701,23 @@ class ClonePaymentDeliveryMixin:
                         + "\n\n".join(links)
                     )
 
+                if success_details and (failed or not links):
+                    successful_titles = {
+                        str(ch.get("title") or "Premium Channel/Group")
+                        for ch in connected_channels
+                        if any(str(ch.get("title") or "Premium Channel/Group") in link for link in links)
+                    }
+                    failed_names = [
+                        str(ch.get("title") or ch.get("chat_id") or "Group/Channel")
+                        for ch in connected_channels
+                        if str(ch.get("title") or "Premium Channel/Group") not in successful_titles
+                    ]
+                    text += (
+                        "\\n\\n❌ Invite failed for: "
+                        + (", ".join(failed_names) if failed_names else "the selected Plan Group")
+                        + ". Please contact the seller."
+                    )
+
                 bot_dm_error = ""
                 try:
                     await bot.send_message(
@@ -745,5 +778,5 @@ class ClonePaymentDeliveryMixin:
             error = "Invite link could not be created for any connected channel/group"
         elif failed and not links:
             error = "Invite link creation failed for all connected channel/groups"
-        return {"sent":len(links),"already_member":already_member,"failed":failed,"error":error}
+        return {"sent":len(links),"already_member":already_member,"failed":failed,"error":error,"receipt_sent":bool(success_details)}
 
