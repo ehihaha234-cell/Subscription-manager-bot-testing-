@@ -17,6 +17,7 @@ from paytmchecksum import PaytmChecksum
 from config import PUBLIC_BASE_URL
 from database.payment_gateways import (
     claim_transaction_fulfillment,
+    has_earlier_paid_child_transaction,
     claim_transaction_success,
     claim_transaction_notification,
     complete_transaction_notification,
@@ -1032,10 +1033,24 @@ async def fulfill_transaction(tx: dict) -> None:
                 )
         return
     if tx["purpose"] == "child_subscription":
+        # Do not let a newer webhook steal capacity from an older paid purchase
+        # that is still waiting in the fulfillment queue.
+        if await has_earlier_paid_child_transaction(tx):
+            await mark_transaction_fulfillment_retry(
+                tx["transaction_id"],
+                "Waiting for an earlier paid subscription transaction (FIFO)",
+            )
+            return
+
         seller_id = int((tx.get("metadata") or {}).get("data_owner_id") or tx["owner_id"])
         plan = await get_plan(seller_id, tx["metadata"]["plan_id"])
         if not plan:
             raise GatewayError("Child subscription plan no longer exists")
+        tx_metadata = tx.get("metadata") or {}
+        payment_amount = float(
+            tx_metadata.get("plan_amount", tx.get("amount", 0)) or 0
+        )
+        stars_amount = int(tx_metadata.get("stars_amount") or 0)
         seller_account_id = int((tx.get('metadata') or {}).get('seller_account_id') or seller_id)
         scope_owner_id = int((tx.get('metadata') or {}).get('data_owner_id') or seller_id)
         limit_status = await seller_subscriber_limit_status(
@@ -1158,6 +1173,7 @@ async def fulfill_transaction(tx: dict) -> None:
         payment = await create_automatic_payment(
             seller_id, tx["payer_user_id"], plan, tx["gateway"],
             tx["transaction_id"], tx.get("gateway_payment_id", ""),
+            stars_amount=stars_amount or None,
         )
 
         # Capture the state before activation so every payment method can show
@@ -1185,7 +1201,7 @@ async def fulfill_transaction(tx: dict) -> None:
         if group_id:
             subscription_result = await fulfill_plan_group_subscription(
                 seller_id, tx["payer_user_id"], f"gateway:{tx['transaction_id']}",
-                group_id, plan["name"], plan["duration_minutes"], tx["amount"],
+                group_id, plan["name"], plan["duration_minutes"], payment_amount,
                 plan.get("duration_text"), target_chat_ids=target_chat_ids,
             )
         else:
@@ -1195,7 +1211,7 @@ async def fulfill_transaction(tx: dict) -> None:
                 f"gateway:{tx['transaction_id']}",
                 plan["name"],
                 plan["duration_minutes"],
-                tx["amount"],
+                payment_amount,
                 plan.get("duration_text"),
             )
         expiry = subscription_result.get("expiry_date")
@@ -1207,7 +1223,7 @@ async def fulfill_transaction(tx: dict) -> None:
         )
 
         invoice = await create_invoice(seller_id, tx["payer_user_id"], payment, "Seller")
-        await audit("child_gateway_payment_paid", tx["payer_user_id"], seller_id, {"transaction_id": tx["transaction_id"], "gateway": tx["gateway"], "invoice_no": invoice.get("invoice_no")})
+        await audit("child_gateway_payment_paid", tx["payer_user_id"], seller_id, {"transaction_id": tx["transaction_id"], "gateway": tx["gateway"], "invoice_no": invoice.get("invoice_no"), "stars_amount": stars_amount})
         await mark_transaction_fulfilled(
             tx["transaction_id"],
             {"expiry_date": expiry, "invoice_no": invoice.get("invoice_no")},
@@ -1223,7 +1239,8 @@ async def fulfill_transaction(tx: dict) -> None:
                     tx["payer_user_id"],
                     success_details={
                         "plan_name": plan.get("name", "Subscription"),
-                        "amount": tx.get("amount", 0),
+                        "amount": payment_amount,
+                        "stars_amount": stars_amount,
                         "gateway": tx.get("gateway", ""),
                         "transaction_id": tx.get("transaction_id", ""),
                         "payment_date": tx.get("paid_at") or tx.get("updated_at") or tx.get("created_at"),
@@ -1271,7 +1288,8 @@ async def fulfill_transaction(tx: dict) -> None:
                     tx["payer_user_id"],
                     {
                         "plan_name": plan.get("name", "Subscription"),
-                        "amount": tx.get("amount", 0),
+                        "amount": payment_amount,
+                        "stars_amount": stars_amount,
                         "gateway": tx.get("gateway", ""),
                         "transaction_id": tx.get("gateway_payment_id") or tx.get("transaction_id", ""),
                         "payment_date": tx.get("paid_at") or tx.get("updated_at") or tx.get("created_at"),
