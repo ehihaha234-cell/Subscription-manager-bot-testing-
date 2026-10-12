@@ -536,55 +536,23 @@ class ClonePaymentDeliveryMixin:
         timezone_name = await self.seller_timezone(int(owner_id))
         connected_channels=await get_channels(int(owner_id))
         target_ids = set()
-        if success_details:
+        if success_details and success_details.get("target_chat_ids"):
             try:
-                target_ids = {int(x) for x in (success_details.get("target_chat_ids") or [])}
+                target_ids = {int(x) for x in success_details.get("target_chat_ids") or []}
             except (TypeError, ValueError):
                 target_ids = set()
-            group_id = str(success_details.get("group_id") or "").strip()
-            if group_id and not target_ids:
-                try:
-                    target_group = await get_plan_group(int(owner_id), group_id)
-                except Exception:
-                    target_group = None
-                if target_group:
-                    raw_targets = target_group.get("chat_ids") or [
-                        target.get("chat_id") for target in (target_group.get("targets") or [])
-                        if isinstance(target, dict)
-                    ]
-                    for value in raw_targets:
-                        try:
-                            target_ids.add(int(value))
-                        except (TypeError, ValueError):
-                            continue
-            # Automatic-payment delivery must fail closed: an unresolved or
-            # empty Plan Group target list must never fall back to all channels.
-            if group_id and not target_ids:
-                error = f"Could not resolve the selected Plan Group ({group_id}); no invite link was sent."
-                try:
-                    await bot.send_message(
-                        chat_id=int(user_id),
-                        text="✅ Your payment was verified, but the invite link could not be delivered because the selected Plan Group could not be resolved. Please contact the seller. No unrelated group link was sent.",
-                    )
-                except TelegramError:
-                    pass
-                return {"sent":0,"already_member":0,"failed":1,"error":error}
-            if target_ids:
-                connected_channels = [
-                    ch for ch in connected_channels
-                    if int(ch.get("chat_id", 0)) in target_ids
-                ]
-        if not connected_channels:
-            error = "No connected channel/group belongs to the selected Plan Group" if success_details and success_details.get("group_id") else "No channel/group is connected to this clone bot"
-            if success_details:
-                try:
-                    await bot.send_message(
-                        chat_id=int(user_id),
-                        text="✅ Your payment was verified, but invite delivery failed for the selected Plan Group. Please contact the seller. No unrelated group link was sent.",
-                    )
-                except TelegramError:
-                    pass
-            return {"sent":0,"already_member":0,"failed":1,"error":error}
+        if success_details:
+            # A gateway receipt must be scoped strictly to the purchased plan.
+            # An empty target list is not permission to use all connected chats.
+            connected_channels = [
+                ch for ch in connected_channels
+                if int(ch.get("chat_id", 0)) in target_ids
+            ] if target_ids else []
+        elif target_ids:
+            connected_channels = [ch for ch in connected_channels if int(ch.get("chat_id", 0)) in target_ids]
+        no_connected_targets = not connected_channels
+        if no_connected_targets and not success_details:
+            return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
 
         # Automatic invite delivery is controlled only by the clone bot's
         # current Telegram permission. There is no stored enable/disable
@@ -610,27 +578,31 @@ class ClonePaymentDeliveryMixin:
                     "Invite permission check failed owner=%s chat=%s: %s",
                     owner_id, chat_id, exc,
                 )
-        if not channels:
-            error = "No selected Plan Group chat has the required Telegram invite permission"
-            if success_details:
+        if not channels and not success_details:
+            return {
+                "sent":0,
+                "already_member":0,
+                "failed":0,
+                "error":"No connected channel/group has the required Telegram invite permission",
+            }
+        if success_details:
+            permitted_ids = {int(ch.get("chat_id", 0)) for ch in channels}
+            for ch in connected_channels:
                 try:
-                    failed_names = ", ".join(str(ch.get("title") or ch.get("chat_id")) for ch in connected_channels)
-                    await bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
-                            "✅ Your payment was verified successfully, but invite delivery failed.\n"
-                            f"❌ Invite failed for: {failed_names or 'selected group(s)'}\\n"
-                            "Please contact the seller. No unrelated group link was sent."
-                        ),
-                    )
-                except TelegramError:
-                    pass
-            return {"sent":0,"already_member":0,"failed":len(connected_channels) or 1,"error":error}
+                    chat_id = int(ch.get("chat_id", 0))
+                except (TypeError, ValueError):
+                    continue
+                if chat_id not in permitted_ids:
+                    failed += 1
+                    failed_lines.append(f"❌ {ch.get('title') or 'Group/Channel'}: invite failed (Chat not found or invite permission unavailable).")
 
         links=[]
+        failed_lines=[]
         already_member=0
         failed=0
-        failed_titles=[]
+        if no_connected_targets and success_details:
+            failed = 1
+            failed_lines.append("❌ Invite failed: selected Plan Group has no valid connected target groups.")
 
         for ch in channels:
             chat_id=int(ch["chat_id"])
@@ -664,10 +636,12 @@ class ClonePaymentDeliveryMixin:
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
             except TelegramError as exc:
                 failed+=1
-                failed_titles.append(str(ch.get("title") or chat_id))
+                reason = "Chat not found" if "chat not found" in str(exc).lower() else "Invite link creation failed"
+                failed_lines.append(f"❌ {ch.get('title') or 'Group/Channel'}: invite failed ({reason}).")
                 logger.warning("Invite creation failed owner=%s chat=%s user=%s: %s",owner_id,chat_id,user_id,exc)
 
-        if links:
+        receipt_sent = False
+        if links or success_details:
             try:
                 if success_details:
                     try:
@@ -724,8 +698,8 @@ class ClonePaymentDeliveryMixin:
                         f"{target_line}"
                         f"{subscription_note}\n\n"
                         "Join using your private invite link(s):\n\n"
-                        + "\n\n".join(links)
-                        + (("\n\n❌ Invite failed for:\n" + "\n".join(f"• {html.escape(name)}" for name in failed_titles)) if failed_titles else "")
+                        + ("\n\n".join(links) if links else "")
+                        + (("\n\n" if links else "") + "\n".join(failed_lines) if failed_lines else "")
                     )
                 else:
                     text = (
@@ -741,6 +715,7 @@ class ClonePaymentDeliveryMixin:
                         text=text,
                         disable_web_page_preview=True,
                     )
+                    receipt_sent = True
                 except TelegramError as exc:
                     bot_dm_error = str(exc)
                     logger.warning(
@@ -794,5 +769,5 @@ class ClonePaymentDeliveryMixin:
             error = "Invite link could not be created for any connected channel/group"
         elif failed and not links:
             error = "Invite link creation failed for all connected channel/groups"
-        return {"sent":len(links),"already_member":already_member,"failed":failed,"error":error}
+        return {"sent":len(links),"already_member":already_member,"failed":failed,"error":error,"receipt_sent":receipt_sent}
 
