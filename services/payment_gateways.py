@@ -1179,21 +1179,26 @@ async def fulfill_transaction(tx: dict) -> None:
         # Capture the state before activation so every payment method can show
         # whether this purchase created a new subscription or extended an active one.
         group_id = str(plan.get("group_id") or "").strip()
-        target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
-        # Plan Group targets are stored on the group bundle, not necessarily on
-        # each individual plan. Resolve the bundle before sending any invite.
-        if group_id and not target_chat_ids:
+        target_chat_ids = []
+        # Resolve invite targets from the selected Plan Group itself. Older plan
+        # records may not carry target_chat_ids, so an empty list must never mean
+        # "send an invite to every connected group".
+        if group_id:
             target_group = await get_plan_group(seller_id, group_id)
             if target_group:
-                for target in (target_group.get("targets") or []):
-                    if not isinstance(target, dict):
-                        continue
+                raw_targets = target_group.get("chat_ids") or [
+                    target.get("chat_id") for target in (target_group.get("targets") or [])
+                    if isinstance(target, dict)
+                ]
+                for value in raw_targets:
                     try:
-                        chat_id = int(target.get("chat_id"))
+                        chat_id = int(value)
                     except (TypeError, ValueError):
                         continue
                     if chat_id not in target_chat_ids:
                         target_chat_ids.append(chat_id)
+        else:
+            target_chat_ids = [int(x) for x in (plan.get("target_chat_ids") or [])]
         now = datetime.now(timezone.utc)
         if group_id:
             existing_sub = await get_plan_group_subscription(seller_id, tx["payer_user_id"], group_id)
