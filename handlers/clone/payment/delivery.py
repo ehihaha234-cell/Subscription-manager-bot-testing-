@@ -536,42 +536,55 @@ class ClonePaymentDeliveryMixin:
         timezone_name = await self.seller_timezone(int(owner_id))
         connected_channels=await get_channels(int(owner_id))
         target_ids = set()
-        selected_group_id = str((success_details or {}).get("group_id") or "").strip()
-        if success_details and success_details.get("target_chat_ids"):
+        if success_details:
             try:
-                target_ids = {int(x) for x in success_details.get("target_chat_ids") or []}
+                target_ids = {int(x) for x in (success_details.get("target_chat_ids") or [])}
             except (TypeError, ValueError):
                 target_ids = set()
-        # Defensive fallback: derive targets from the selected Plan Group bundle.
-        # If a Plan Group was selected but cannot be resolved, NEVER fall back to
-        # every connected chat, as that can leak an unrelated group's invite link.
-        if success_details and selected_group_id and not target_ids:
-            try:
-                target_group = await get_plan_group(int(owner_id), selected_group_id)
-                for target in (target_group or {}).get("targets") or []:
-                    if not isinstance(target, dict):
-                        continue
-                    try:
-                        target_ids.add(int(target.get("chat_id")))
-                    except (TypeError, ValueError):
-                        continue
-            except Exception:
-                logger.exception(
-                    "Could not resolve selected Plan Group targets owner=%s group=%s",
-                    owner_id, selected_group_id,
-                )
-        if success_details and selected_group_id and not target_ids:
-            return {
-                "sent": 0, "already_member": 0, "failed": 0,
-                "error": "Selected Plan Group targets could not be resolved; unrelated groups were not used",
-            }
-        if target_ids:
-            connected_channels = [
-                ch for ch in connected_channels
-                if int(ch.get("chat_id", 0)) in target_ids
-            ]
+            group_id = str(success_details.get("group_id") or "").strip()
+            if group_id and not target_ids:
+                try:
+                    target_group = await get_plan_group(int(owner_id), group_id)
+                except Exception:
+                    target_group = None
+                if target_group:
+                    raw_targets = target_group.get("chat_ids") or [
+                        target.get("chat_id") for target in (target_group.get("targets") or [])
+                        if isinstance(target, dict)
+                    ]
+                    for value in raw_targets:
+                        try:
+                            target_ids.add(int(value))
+                        except (TypeError, ValueError):
+                            continue
+            # Automatic-payment delivery must fail closed: an unresolved or
+            # empty Plan Group target list must never fall back to all channels.
+            if group_id and not target_ids:
+                error = f"Could not resolve the selected Plan Group ({group_id}); no invite link was sent."
+                try:
+                    await bot.send_message(
+                        chat_id=int(user_id),
+                        text="✅ Your payment was verified, but the invite link could not be delivered because the selected Plan Group could not be resolved. Please contact the seller. No unrelated group link was sent.",
+                    )
+                except TelegramError:
+                    pass
+                return {"sent":0,"already_member":0,"failed":1,"error":error}
+            if target_ids:
+                connected_channels = [
+                    ch for ch in connected_channels
+                    if int(ch.get("chat_id", 0)) in target_ids
+                ]
         if not connected_channels:
-            return {"sent":0,"already_member":0,"failed":0,"error":"No selected Plan Group channel/group is connected to this clone bot" if selected_group_id else "No channel/group is connected to this clone bot"}
+            error = "No connected channel/group belongs to the selected Plan Group" if success_details and success_details.get("group_id") else "No channel/group is connected to this clone bot"
+            if success_details:
+                try:
+                    await bot.send_message(
+                        chat_id=int(user_id),
+                        text="✅ Your payment was verified, but invite delivery failed for the selected Plan Group. Please contact the seller. No unrelated group link was sent.",
+                    )
+                except TelegramError:
+                    pass
+            return {"sent":0,"already_member":0,"failed":1,"error":error}
 
         # Automatic invite delivery is controlled only by the clone bot's
         # current Telegram permission. There is no stored enable/disable
@@ -598,16 +611,26 @@ class ClonePaymentDeliveryMixin:
                     owner_id, chat_id, exc,
                 )
         if not channels:
-            return {
-                "sent":0,
-                "already_member":0,
-                "failed":0,
-                "error":"No connected channel/group has the required Telegram invite permission",
-            }
+            error = "No selected Plan Group chat has the required Telegram invite permission"
+            if success_details:
+                try:
+                    failed_names = ", ".join(str(ch.get("title") or ch.get("chat_id")) for ch in connected_channels)
+                    await bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
+                            "✅ Your payment was verified successfully, but invite delivery failed.\n"
+                            f"❌ Invite failed for: {failed_names or 'selected group(s)'}\\n"
+                            "Please contact the seller. No unrelated group link was sent."
+                        ),
+                    )
+                except TelegramError:
+                    pass
+            return {"sent":0,"already_member":0,"failed":len(connected_channels) or 1,"error":error}
 
         links=[]
         already_member=0
         failed=0
+        failed_titles=[]
 
         for ch in channels:
             chat_id=int(ch["chat_id"])
@@ -641,6 +664,7 @@ class ClonePaymentDeliveryMixin:
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
             except TelegramError as exc:
                 failed+=1
+                failed_titles.append(str(ch.get("title") or chat_id))
                 logger.warning("Invite creation failed owner=%s chat=%s user=%s: %s",owner_id,chat_id,user_id,exc)
 
         if links:
@@ -701,6 +725,7 @@ class ClonePaymentDeliveryMixin:
                         f"{subscription_note}\n\n"
                         "Join using your private invite link(s):\n\n"
                         + "\n\n".join(links)
+                        + (("\n\n❌ Invite failed for:\n" + "\n".join(f"• {html.escape(name)}" for name in failed_titles)) if failed_titles else "")
                     )
                 else:
                     text = (
