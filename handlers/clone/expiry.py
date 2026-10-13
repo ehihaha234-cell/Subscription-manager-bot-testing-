@@ -112,7 +112,7 @@ class CloneExpiryMixin:
         for sub in await expired_subscriptions(owner):
             uid=sub["user_id"]
 
-            for invite_doc in await active_invites_for_user(owner, uid):
+            for invite_doc in await all_invites_for_user(owner, uid):
                 try:
                     await context.bot.revoke_chat_invite_link(
                         int(invite_doc["chat_id"]), invite_doc["invite_link"]
