@@ -608,7 +608,6 @@ class ClonePaymentDeliveryMixin:
             try:
                 invite=await bot.create_chat_invite_link(
                     chat_id=chat_id,
-                    member_limit=1,
                     name=f"Subscription access {user_id}",
                 )
                 await save_invite(owner_id, user_id, chat_id, invite.invite_link)
