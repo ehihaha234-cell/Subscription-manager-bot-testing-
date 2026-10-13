@@ -165,6 +165,13 @@ async def active_invites_for_user(owner_id: int, user_id: int):
     ).to_list(length=500)
 
 
+async def all_invites_for_user(owner_id: int, user_id: int):
+    """Return every recorded invite for a user, including inactive/used links."""
+    return await _c(INVITES).find(
+        {"owner_id": int(owner_id), "user_id": int(user_id)}
+    ).sort("updated_at", -1).to_list(length=1000)
+
+
 async def deactivate_invite(owner_id: int, invite_link: str):
     await _c(INVITES).update_one(
         {"owner_id": int(owner_id), "invite_link": invite_link},
