@@ -280,7 +280,7 @@ from services.protected_bot import ProtectedExtBot
 from handlers.content_protection import content_protection_handlers
 from database.content_protection import get_content_protection_settings
 
-from database.subscription_guard import save_invite, active_invites_for_user, deactivate_invite
+from database.subscription_guard import save_invite, active_invites_for_user, all_invites_for_user, deactivate_invite
 from database.staff import active_staff, list_staff, promote_staff, remove_staff, set_staff_status, log_staff_action
 from services.subscription_guard import subscription_guard_chat_member, subscription_guard_new_members
 from handlers.subscription_guard import subscription_guard_handlers
