@@ -28,7 +28,7 @@ from database.seller_data import (
     get_plan_group,
     get_seller_settings,
 )
-from database.subscription_guard import is_whitelisted, active_invites_for_user, all_invites_for_user, deactivate_invite
+from database.subscription_guard import is_whitelisted
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -236,26 +236,6 @@ async def check_expired_plan_group_subscriptions():
                 pass
         target_ids = list(dict.fromkeys(target_ids))
         channels = {int(x.get("chat_id")): str(x.get("title") or "Group/Channel") for x in await get_seller_channels(owner_id)}
-        # Revoke tracked invite URLs for this user's expiring Plan Group targets.
-        for invite_doc in await all_invites_for_user(owner_id, user_id):
-            try:
-                invite_chat_id = int(invite_doc.get("chat_id", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if invite_chat_id not in target_ids:
-                continue
-            invite_link = str(invite_doc.get("invite_link") or "").strip()
-            if invite_link:
-                try:
-                    await bot.revoke_chat_invite_link(
-                        chat_id=invite_chat_id, invite_link=invite_link
-                    )
-                except Exception:
-                    logger.warning(
-                        "Plan Group invite revoke failed owner=%s user=%s chat=%s",
-                        owner_id, user_id, invite_chat_id, exc_info=True,
-                    )
-                await deactivate_invite(owner_id, invite_link)
         removed_names = []
         failed = False
         for chat_id in target_ids:
@@ -266,9 +246,11 @@ async def check_expired_plan_group_subscriptions():
                 member = await bot.get_chat_member(chat_id, user_id)
                 if getattr(member, "status", "") in {"creator", "administrator"} or await is_whitelisted(owner_id, chat_id, user_id):
                     continue
-                await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-                await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
-                removed_names.append(channels.get(chat_id, str(chat_id)))
+                status = getattr(member, "status", "")
+                if status in {"member", "restricted"}:
+                    await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                    await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+                    removed_names.append(channels.get(chat_id, str(chat_id)))
             except Exception as exc:
                 failed = True
                 logger.warning("Plan Group expiry removal failed owner=%s user=%s group=%s chat=%s: %s", owner_id, user_id, group_id, chat_id, exc)
