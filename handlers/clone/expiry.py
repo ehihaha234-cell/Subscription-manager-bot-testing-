@@ -112,7 +112,7 @@ class CloneExpiryMixin:
         for sub in await expired_subscriptions(owner):
             uid=sub["user_id"]
 
-            for invite_doc in await all_invites_for_user(owner, uid):
+            for invite_doc in await active_invites_for_user(owner, uid):
                 try:
                     await context.bot.revoke_chat_invite_link(
                         int(invite_doc["chat_id"]), invite_doc["invite_link"]
@@ -123,15 +123,14 @@ class CloneExpiryMixin:
 
             for ch in await get_channels(owner):
                 try:
-                    await context.bot.ban_chat_member(
-                        ch["chat_id"],
-                        uid,
-                    )
-                    await context.bot.unban_chat_member(
-                        ch["chat_id"],
-                        uid,
-                        only_if_banned=True,
-                    )
+                    chat_id = int(ch["chat_id"])
+                    # Expiry jobs can run repeatedly. Only kick a user who is
+                    # currently in the chat; don't ban/unban an already-removed user.
+                    member = await context.bot.get_chat_member(chat_id, int(uid))
+                    if getattr(member, "status", "") not in {"member", "restricted"}:
+                        continue
+                    await context.bot.ban_chat_member(chat_id=chat_id, user_id=int(uid))
+                    await context.bot.unban_chat_member(chat_id=chat_id, user_id=int(uid), only_if_banned=True)
                 except Exception:
                     pass
 
