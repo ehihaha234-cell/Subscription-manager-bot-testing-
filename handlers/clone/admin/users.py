@@ -78,29 +78,12 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                     pass
         except Exception:
             pass
-        # Revoke old links for this user/chat before issuing a fresh subscription link.
-        for old_invite in await all_invites_for_user(owner, int(user_id)):
-            if int(old_invite.get("chat_id", 0) or 0) != chat_id:
-                continue
-            old_link = str(old_invite.get("invite_link") or "").strip()
-            if old_link:
-                try:
-                    await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=old_link)
-                except Exception:
-                    logger.warning(
-                        "Could not revoke replaced invite owner=%s user=%s chat=%s",
-                        owner, user_id, chat_id, exc_info=True,
-                    )
-                await deactivate_invite(owner, old_link)
-
         try:
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
-                member_limit=1,
                 name=f"Subscription access {user_id}",
             )
-            await save_invite(owner, int(user_id), chat_id, invite.invite_link)
-            links.append(f"📢 {title}\\n{invite.invite_link}")
+            links.append(f"📢 {title}\n{invite.invite_link}")
         except Exception:
             logger.exception(
                 "Failed creating Plan Group access link owner=%s user=%s chat=%s",
@@ -334,28 +317,6 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if not result.get('removed'):
             await q.edit_message_text('❌ Plan Group subscription is no longer active.', reply_markup=self.back(f'a_user_view_{user_id}'))
             return True
-
-        removed_chat_ids = {int(value) for value in result.get('target_chat_ids', [])}
-        # Revoke tracked invite URLs before removing the user from the Plan Group.
-        for invite_doc in await all_invites_for_user(owner, user_id):
-            try:
-                invite_chat_id = int(invite_doc.get("chat_id", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if invite_chat_id not in removed_chat_ids:
-                continue
-            old_link = str(invite_doc.get("invite_link") or "").strip()
-            if old_link:
-                try:
-                    await context.bot.revoke_chat_invite_link(
-                        chat_id=invite_chat_id, invite_link=old_link
-                    )
-                except Exception:
-                    logger.warning(
-                        'Plan Group invite revoke failed owner=%s user=%s chat=%s',
-                        owner, user_id, invite_chat_id, exc_info=True,
-                    )
-                await deactivate_invite(owner, old_link)
 
         for chat_id in result.get('target_chat_ids', []):
             try:
