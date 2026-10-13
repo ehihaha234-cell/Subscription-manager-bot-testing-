@@ -11,7 +11,7 @@ from database.seller_data import active_plan_group_subscriptions_for_chat, get_c
 from database.subscription_guard import (
     add_whitelist, get_guard_settings, is_whitelisted, log_guard_event,
     get_guard_chat_status,
-    active_invites_for_user, deactivate_invite, mark_invite_used, record_join_attempt,
+    active_invites_for_user, deactivate_invite, is_subscription_invite, record_join_attempt,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,12 +111,18 @@ async def subscription_guard_chat_member(update: Update, context: ContextTypes.D
 
     invite = getattr(event, "invite_link", None)
     if settings.get("auto_revoke_invites", True) and invite and getattr(invite, "invite_link", None):
+        # Subscription links are tied to the subscription lifecycle. Do not
+        # revoke/deactivate them on join; expiry/removal handlers revoke them.
         try:
-            await context.bot.revoke_chat_invite_link(event.chat.id, invite.invite_link)
-            await log_guard_event(owner_id, event.chat.id, user.id, "invite_revoked", "Used invite link revoked")
-        except TelegramError:
-            pass
-        await mark_invite_used(owner_id, invite.invite_link)
+            tracked_subscription_link = await is_subscription_invite(owner_id, invite.invite_link)
+        except Exception:
+            tracked_subscription_link = False
+        if not tracked_subscription_link:
+            try:
+                await context.bot.revoke_chat_invite_link(event.chat.id, invite.invite_link)
+                await log_guard_event(owner_id, event.chat.id, user.id, "invite_revoked", "Used non-subscription invite link revoked")
+            except TelegramError:
+                pass
 
     if await _active(owner_id, user.id, event.chat.id):
         await log_guard_event(owner_id, event.chat.id, user.id, "allowed", "Active subscription")
