@@ -246,11 +246,9 @@ async def check_expired_plan_group_subscriptions():
                 member = await bot.get_chat_member(chat_id, user_id)
                 if getattr(member, "status", "") in {"creator", "administrator"} or await is_whitelisted(owner_id, chat_id, user_id):
                     continue
-                status = getattr(member, "status", "")
-                if status in {"member", "restricted"}:
-                    await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-                    await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
-                    removed_names.append(channels.get(chat_id, str(chat_id)))
+                await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+                removed_names.append(channels.get(chat_id, str(chat_id)))
             except Exception as exc:
                 failed = True
                 logger.warning("Plan Group expiry removal failed owner=%s user=%s group=%s chat=%s: %s", owner_id, user_id, group_id, chat_id, exc)
