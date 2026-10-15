@@ -145,6 +145,13 @@ async def deactivate_other_invites(
     )
 
 
+async def is_subscription_invite(owner_id: int, invite_link: str) -> bool:
+    """Return whether an invite link is tracked as a subscription invite."""
+    return bool(await _c(INVITES).find_one({
+        "owner_id": int(owner_id), "invite_link": str(invite_link)
+    }, {"_id": 1}))
+
+
 async def mark_invite_used(owner_id: int, invite_link: str):
     await _c(INVITES).update_one(
         {"owner_id": int(owner_id), "invite_link": invite_link},
@@ -152,24 +159,10 @@ async def mark_invite_used(owner_id: int, invite_link: str):
     )
 
 
-async def is_subscription_invite(owner_id: int, invite_link: str) -> bool:
-    """Whether an invite URL belongs to a recorded subscription delivery."""
-    return bool(await _c(INVITES).find_one({
-        "owner_id": int(owner_id), "invite_link": str(invite_link)
-    }, {"_id": 1}))
-
-
 async def active_invites_for_user(owner_id: int, user_id: int):
     return await _c(INVITES).find(
         {"owner_id": int(owner_id), "user_id": int(user_id), "active": True}
     ).to_list(length=500)
-
-
-async def all_invites_for_user(owner_id: int, user_id: int):
-    """Return every recorded invite for a user, including inactive/used links."""
-    return await _c(INVITES).find(
-        {"owner_id": int(owner_id), "user_id": int(user_id)}
-    ).sort("updated_at", -1).to_list(length=1000)
 
 
 async def deactivate_invite(owner_id: int, invite_link: str):
