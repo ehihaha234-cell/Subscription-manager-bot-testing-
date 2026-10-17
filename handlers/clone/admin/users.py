@@ -81,6 +81,7 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
         try:
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
+                member_limit=1,
                 name=f"Subscription access {user_id}",
             )
             links.append(f"📢 {title}\n{invite.invite_link}")
