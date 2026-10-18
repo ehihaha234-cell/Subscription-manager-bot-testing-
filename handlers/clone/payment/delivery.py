@@ -616,8 +616,19 @@ class ClonePaymentDeliveryMixin:
                 try:
                     from database.subscription_invites import record_subscription_invite
                     expiry = (success_details or {}).get("expiry_date")
+                    if not expiry:
+                        current_sub = await get_subscription(owner_id, user_id)
+                        expiry = (current_sub or {}).get("expiry_date")
                     if expiry:
-                        await record_subscription_invite(owner_id, user_id, chat_id, invite.invite_link, expiry, group_id=(success_details or {}).get("group_id"))
+                        await record_subscription_invite(
+                            owner_id, user_id, chat_id, invite.invite_link, expiry,
+                            group_id=(success_details or {}).get("group_id"),
+                        )
+                    else:
+                        logger.error(
+                            "Invite link created without subscription expiry owner=%s user=%s chat=%s",
+                            owner_id, user_id, chat_id,
+                        )
                 except Exception:
                     logger.exception("Could not record subscription invite expiry owner=%s user=%s chat=%s", owner_id, user_id, chat_id)
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
