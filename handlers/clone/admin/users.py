@@ -2,7 +2,7 @@
 
 from handlers.common.clone_context import *
 from uuid import uuid4
-from datetime import timezone
+from datetime import datetime, timezone
 
 
 def _duration_minutes(value: str):
@@ -99,9 +99,16 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
             telegram_expire_date = None
             if expiry_date is not None:
                 normalized_expiry = expiry_date
+                if isinstance(normalized_expiry, str):
+                    normalized_expiry = datetime.fromisoformat(normalized_expiry.replace("Z", "+00:00"))
                 if getattr(normalized_expiry, "tzinfo", None) is None:
                     normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
-                telegram_expire_date = int(normalized_expiry.timestamp())
+                normalized_expiry = normalized_expiry.astimezone(timezone.utc)
+                if normalized_expiry <= datetime.now(timezone.utc):
+                    raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
+                # python-telegram-bot expects a datetime here and serializes it
+                # to Telegram's Unix timestamp. Keep the exact subscription expiry.
+                telegram_expire_date = normalized_expiry
 
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
