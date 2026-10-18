@@ -228,6 +228,26 @@ async def check_expired_plan_group_subscriptions():
         if not running:
             continue
         bot = running.application.bot
+
+        # Revoke links as soon as the subscription is due, independently of
+        # whether the member-removal/finalization step succeeds. Otherwise a
+        # failed or already-finalized removal can leave the old invite usable.
+        # This uses the normal subscription-invite collection, not Subscription Guard.
+        try:
+            from database.subscription_invites import revoke_subscription_invites
+            revoked_count = await revoke_subscription_invites(
+                bot, owner_id, user_id=user_id, group_id=group_id, due_only=True
+            )
+            logger.info(
+                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s revoked=%s",
+                owner_id, user_id, group_id, revoked_count,
+            )
+        except Exception:
+            logger.exception(
+                "Plan Group invite revocation failed owner=%s user=%s group=%s",
+                owner_id, user_id, group_id,
+            )
+
         target_ids = []
         for value in row.get("target_chat_ids") or []:
             try:
@@ -257,13 +277,6 @@ async def check_expired_plan_group_subscriptions():
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
             continue
-        # Revoke only invite links issued for this expired Plan Group subscription.
-        # Do not couple this to Subscription Guard or alter member-removal behavior.
-        try:
-            from database.subscription_invites import revoke_subscription_invites
-            await revoke_subscription_invites(bot, owner_id, user_id=user_id, group_id=group_id)
-        except Exception:
-            logger.exception("Plan Group invite revocation failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
         try:
             group = await get_plan_group(owner_id, group_id) or {}
             # Only show chats from this expired Plan Group that were actually removed.
