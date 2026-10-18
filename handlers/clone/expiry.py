@@ -118,8 +118,14 @@ class CloneExpiryMixin:
                         int(invite_doc["chat_id"]), invite_doc["invite_link"]
                     )
                 except Exception:
-                    pass
-                await deactivate_invite(owner, invite_doc["invite_link"])
+                    # Keep the record eligible for retry if Telegram did not
+                    # confirm revocation. Do not mark a still-valid link revoked.
+                    logger.exception(
+                        "Invite revocation failed owner=%s user=%s chat=%s",
+                        owner, uid, invite_doc.get("chat_id")
+                    )
+                else:
+                    await deactivate_invite(owner, invite_doc["invite_link"])
 
             for ch in await get_channels(owner):
                 try:
