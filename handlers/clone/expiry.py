@@ -112,20 +112,21 @@ class CloneExpiryMixin:
         for sub in await expired_subscriptions(owner):
             uid=sub["user_id"]
 
+            # Revoke links from the normal subscription lifecycle collection.
+            # A failed Telegram API call remains pending for a later expiry-job retry.
             for invite_doc in await active_invites_for_user(owner, uid):
                 try:
                     await context.bot.revoke_chat_invite_link(
-                        int(invite_doc["chat_id"]), invite_doc["invite_link"]
+                        chat_id=int(invite_doc["chat_id"]),
+                        invite_link=str(invite_doc["invite_link"]),
                     )
-                except Exception:
-                    # Keep the record eligible for retry if Telegram did not
-                    # confirm revocation. Do not mark a still-valid link revoked.
-                    logger.exception(
-                        "Invite revocation failed owner=%s user=%s chat=%s",
-                        owner, uid, invite_doc.get("chat_id")
+                except Exception as exc:
+                    logger.warning(
+                        "Subscription invite revoke failed owner=%s user=%s chat=%s: %s",
+                        owner, uid, invite_doc.get("chat_id"), exc,
                     )
-                else:
-                    await deactivate_invite(owner, invite_doc["invite_link"])
+                    continue
+                await deactivate_invite(owner, invite_doc["invite_link"])
 
             for ch in await get_channels(owner):
                 try:
