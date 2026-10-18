@@ -146,35 +146,20 @@ async def deactivate_other_invites(
 
 
 async def mark_invite_used(owner_id: int, invite_link: str):
-    """Mark an invite as used but retain its record until subscription expiry.
-
-    Telegram member_limit=1 prevents a second use. Keeping active=True here is
-    intentional: the expiry worker still needs to find and revoke the link at
-    the subscription's expiry time. get_active_invite excludes used links.
-    """
     await _c(INVITES).update_one(
         {"owner_id": int(owner_id), "invite_link": invite_link},
-        {"$set": {"used": True, "used_at": datetime.now(timezone.utc)}},
+        {"$set": {"used": True, "active": False, "used_at": datetime.now(timezone.utc)}},
     )
 
 
-async def invites_for_user_chats(owner_id: int, user_id: int, chat_ids):
-    """Return recorded invite links for this user in the specified chats."""
-    ids = [int(chat_id) for chat_id in (chat_ids or [])]
-    if not ids:
-        return []
-    return await _c(INVITES).find({
-        "owner_id": int(owner_id),
-        "user_id": int(user_id),
-        "chat_id": {"$in": ids},
-        "active": True,
-    }).to_list(length=1000)
-
-
-async def active_invites_for_user(owner_id: int, user_id: int):
-    return await _c(INVITES).find(
-        {"owner_id": int(owner_id), "user_id": int(user_id), "active": True}
-    ).to_list(length=500)
+async def active_invites_for_user(owner_id: int, user_id: int, chat_ids=None):
+    query = {"owner_id": int(owner_id), "user_id": int(user_id), "active": True}
+    if chat_ids is not None:
+        normalized = list(dict.fromkeys(int(chat_id) for chat_id in chat_ids))
+        if not normalized:
+            return []
+        query["chat_id"] = {"$in": normalized}
+    return await _c(INVITES).find(query).to_list(length=500)
 
 
 async def deactivate_invite(owner_id: int, invite_link: str):
