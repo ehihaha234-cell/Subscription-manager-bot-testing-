@@ -84,6 +84,7 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 member_limit=1,
                 name=f"Subscription access {user_id}",
             )
+            await save_invite(owner, user_id, chat_id, invite.invite_link, subscription_scope=f"plan_group:{group_id}")
             links.append(f"📢 {title}\n{invite.invite_link}")
         except Exception:
             logger.exception(
@@ -318,6 +319,16 @@ async def handle(self, update, context, q, owner, staff, a, role):
         if not result.get('removed'):
             await q.edit_message_text('❌ Plan Group subscription is no longer active.', reply_markup=self.back(f'a_user_view_{user_id}'))
             return True
+
+        # Revoke only this removed Plan Group's links; do not touch Subscription Guard.
+        for chat_id in result.get('target_chat_ids', []):
+            for invite_doc in await active_invites_for_user_chat(owner, user_id, int(chat_id)):
+                try:
+                    await context.bot.revoke_chat_invite_link(int(chat_id), str(invite_doc['invite_link']))
+                except Exception as exc:
+                    logger.warning('Admin-remove invite revoke failed owner=%s user=%s chat=%s: %s', owner, user_id, chat_id, exc)
+                    continue
+                await deactivate_invite(owner, invite_doc['invite_link'])
 
         for chat_id in result.get('target_chat_ids', []):
             try:
