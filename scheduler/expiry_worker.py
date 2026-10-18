@@ -28,7 +28,7 @@ from database.seller_data import (
     get_plan_group,
     get_seller_settings,
 )
-from database.subscription_guard import is_whitelisted
+from database.subscription_guard import is_whitelisted, invites_for_user_chats, deactivate_invite
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -257,6 +257,29 @@ async def check_expired_plan_group_subscriptions():
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
             continue
+
+        # Revoke this user's recorded invite links only after the Plan Group
+        # subscription has actually transitioned to expired. Do not revoke on
+        # join; used one-time links remain recorded until this point.
+        revoke_chat_ids = []
+        for chat_id in target_ids:
+            if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                continue
+            revoke_chat_ids.append(chat_id)
+        for invite_doc in await invites_for_user_chats(owner_id, user_id, revoke_chat_ids):
+            link = str(invite_doc.get("invite_link") or "")
+            chat_id = int(invite_doc.get("chat_id") or 0)
+            if not link or not chat_id:
+                continue
+            try:
+                await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=link)
+            except Exception as exc:
+                logger.warning("Plan Group invite revoke failed owner=%s user=%s group=%s chat=%s: %s", owner_id, user_id, group_id, chat_id, exc)
+            finally:
+                try:
+                    await deactivate_invite(owner_id, link)
+                except Exception:
+                    logger.exception("Could not deactivate expired Plan Group invite owner=%s user=%s chat=%s", owner_id, user_id, chat_id)
         try:
             group = await get_plan_group(owner_id, group_id) or {}
             # Only show chats from this expired Plan Group that were actually removed.
