@@ -237,58 +237,47 @@ async def check_expired_plan_group_subscriptions():
                 pass
         target_ids = list(dict.fromkeys(target_ids))
 
-        # Revoke links issued for THIS expired Plan Group regardless of whether
-        # another Plan Group currently covers the same chat. Each invite link
-        # belongs to the subscription that issued it and must not survive that
-        # subscription's expiry. Scope by group_id so unrelated active-plan
-        # links for the same user/chat are not revoked.
+        # Revoke links belonging to THIS expired Plan Group first. Do not skip
+        # revocation merely because another Plan Group still grants membership
+        # in the same chat: invite links are subscription-specific credentials.
+        # Keep the separate membership-removal check below unchanged.
         try:
             from database.subscription_invites import (
                 active_invites_for_user,
+                mark_invite_revoked,
                 revoke_subscription_invites,
             )
-            invite_rows = await active_invites_for_user(owner_id, user_id)
-            recorded_chat_ids = []
-            for invite_row in invite_rows:
-                try:
-                    recorded_chat_ids.append(int(invite_row.get("chat_id")))
-                except (TypeError, ValueError):
-                    continue
-
-            # First revoke the links explicitly attached to this Plan Group.
-            # Do not gate this on active_plan_group_subscriptions_for_chat:
-            # that check concerns access to the chat, not validity of this
-            # subscription's private invite URL.
             revoked_count = await revoke_subscription_invites(
                 bot, owner_id, user_id=user_id, group_id=group_id, due_only=False
             )
-
-            # Legacy records created before group_id was stored need a fallback.
-            # Only use records without group_id, and only when no other active
-            # Plan Group grants access to that chat.
-            legacy_chat_ids = []
-            for invite_row in invite_rows:
-                if invite_row.get("group_id") not in (None, ""):
+            invite_rows = await active_invites_for_user(owner_id, user_id)
+            # Legacy records may predate group_id storage. Revoke only legacy
+            # records for this expired group's target chats, and preserve them
+            # if another active Plan Group still covers that chat.
+            legacy_rows = [
+                r for r in invite_rows
+                if not r.get("group_id")
+                and int(r.get("chat_id", 0) or 0) in target_ids
+            ]
+            for invite_row in legacy_rows:
+                chat_id = int(invite_row.get("chat_id", 0) or 0)
+                if not chat_id or await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
                     continue
                 try:
-                    chat_id = int(invite_row.get("chat_id"))
-                except (TypeError, ValueError):
-                    continue
-                if chat_id not in legacy_chat_ids:
-                    legacy_chat_ids.append(chat_id)
-            legacy_revoked = 0
-            for chat_id in legacy_chat_ids:
-                if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
-                    continue
-                legacy_revoked += await revoke_subscription_invites(
-                    bot, owner_id, user_id=user_id, chat_ids=[chat_id], due_only=False
-                )
-            revoked_count += legacy_revoked
+                    await bot.revoke_chat_invite_link(
+                        chat_id=chat_id, invite_link=str(invite_row["invite_link"])
+                    )
+                    await mark_invite_revoked(owner_id, invite_row["invite_link"])
+                    revoked_count += 1
+                except Exception as exc:
+                    logger.warning(
+                        "Legacy invite revocation failed owner=%s user=%s chat=%s group=%s error=%s",
+                        owner_id, user_id, chat_id, group_id, exc,
+                    )
             logger.info(
-                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s target_chats=%s recorded_chats=%s group_records=%s legacy_chats=%s revoked=%s",
-                owner_id, user_id, group_id, target_ids, recorded_chat_ids,
-                sum(1 for item in invite_rows if str(item.get("group_id") or "") == group_id),
-                legacy_chat_ids, revoked_count,
+                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s target_chats=%s records_found=%s revoked=%s legacy_checked=%s",
+                owner_id, user_id, group_id, target_ids, len(invite_rows),
+                revoked_count, len(legacy_rows),
             )
         except Exception:
             logger.exception(
