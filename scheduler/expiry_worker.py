@@ -29,7 +29,6 @@ from database.seller_data import (
     get_seller_settings,
 )
 from database.subscription_guard import is_whitelisted
-from services.subscription_guard import revoke_user_invites_for_chats
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -258,16 +257,13 @@ async def check_expired_plan_group_subscriptions():
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
             continue
-        # Revoke only links in chats no longer covered by another active Plan Group.
-        revoke_chat_ids = []
-        for chat_id in target_ids:
-            if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
-                revoke_chat_ids.append(chat_id)
+        # Revoke only invite links issued for this expired Plan Group subscription.
+        # Do not couple this to Subscription Guard or alter member-removal behavior.
         try:
-            revoked_count = await revoke_user_invites_for_chats(bot, owner_id, user_id, revoke_chat_ids)
-            logger.info("Plan Group expiry invite revocation owner=%s user=%s group=%s revoked=%s", owner_id, user_id, group_id, revoked_count)
+            from database.subscription_invites import revoke_subscription_invites
+            await revoke_subscription_invites(bot, owner_id, user_id=user_id, group_id=group_id)
         except Exception:
-            logger.exception("Plan Group expiry invite revocation failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
+            logger.exception("Plan Group invite revocation failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
         try:
             group = await get_plan_group(owner_id, group_id) or {}
             # Only show chats from this expired Plan Group that were actually removed.
