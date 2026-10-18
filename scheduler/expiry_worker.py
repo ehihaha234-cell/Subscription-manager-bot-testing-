@@ -237,10 +237,11 @@ async def check_expired_plan_group_subscriptions():
                 pass
         target_ids = list(dict.fromkeys(target_ids))
 
-        # Revoke links from the normal subscription lifecycle by the actual
-        # recorded chat IDs, not only target_chat_ids on the Plan Group row.
-        # Older/admin-extended subscriptions can have stale/missing target IDs.
-        # Preserve links for chats still covered by another active Plan Group.
+        # Revoke links issued for THIS expired Plan Group regardless of whether
+        # another Plan Group currently covers the same chat. Each invite link
+        # belongs to the subscription that issued it and must not survive that
+        # subscription's expiry. Scope by group_id so unrelated active-plan
+        # links for the same user/chat are not revoked.
         try:
             from database.subscription_invites import (
                 active_invites_for_user,
@@ -253,22 +254,41 @@ async def check_expired_plan_group_subscriptions():
                     recorded_chat_ids.append(int(invite_row.get("chat_id")))
                 except (TypeError, ValueError):
                     continue
-            # Fall back to subscription targets for legacy records without an
-            # invite record; these IDs cannot themselves identify a link.
-            candidate_chat_ids = list(dict.fromkeys(recorded_chat_ids or target_ids))
-            eligible_chat_ids = []
-            for chat_id in candidate_chat_ids:
-                if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
-                    eligible_chat_ids.append(chat_id)
-            revoked_count = 0
-            for chat_id in eligible_chat_ids:
-                revoked_count += await revoke_subscription_invites(
+
+            # First revoke the links explicitly attached to this Plan Group.
+            # Do not gate this on active_plan_group_subscriptions_for_chat:
+            # that check concerns access to the chat, not validity of this
+            # subscription's private invite URL.
+            revoked_count = await revoke_subscription_invites(
+                bot, owner_id, user_id=user_id, group_id=group_id, due_only=False
+            )
+
+            # Legacy records created before group_id was stored need a fallback.
+            # Only use records without group_id, and only when no other active
+            # Plan Group grants access to that chat.
+            legacy_chat_ids = []
+            for invite_row in invite_rows:
+                if invite_row.get("group_id") not in (None, ""):
+                    continue
+                try:
+                    chat_id = int(invite_row.get("chat_id"))
+                except (TypeError, ValueError):
+                    continue
+                if chat_id not in legacy_chat_ids:
+                    legacy_chat_ids.append(chat_id)
+            legacy_revoked = 0
+            for chat_id in legacy_chat_ids:
+                if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                    continue
+                legacy_revoked += await revoke_subscription_invites(
                     bot, owner_id, user_id=user_id, chat_ids=[chat_id], due_only=False
                 )
+            revoked_count += legacy_revoked
             logger.info(
-                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s target_chats=%s recorded_chats=%s eligible_chats=%s records_found=%s revoked=%s",
-                owner_id, user_id, group_id, target_ids, candidate_chat_ids,
-                eligible_chat_ids, len(invite_rows), revoked_count,
+                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s target_chats=%s recorded_chats=%s group_records=%s legacy_chats=%s revoked=%s",
+                owner_id, user_id, group_id, target_ids, recorded_chat_ids,
+                sum(1 for item in invite_rows if str(item.get("group_id") or "") == group_id),
+                legacy_chat_ids, revoked_count,
             )
         except Exception:
             logger.exception(
