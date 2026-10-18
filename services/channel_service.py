@@ -5,7 +5,7 @@ from config import BOT_TOKEN
 from database.channels import get_all_channels
 from database.seller_data import get_channels as get_seller_channels
 from database.payments import mark_payment_channel_delivered
-from database.subscription_guard import get_active_invite, save_invite
+from database.subscription_guard import get_active_invite, save_invite, active_invites_for_user, deactivate_invite
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -133,6 +133,22 @@ async def revoke_channel_access(
                 chat_id,
                 exc,
             )
+
+    # Revoke recorded invite links only when the subscription-expiry worker
+    # reaches this expiry flow, never when the user joins.
+    for invite_doc in await active_invites_for_user(0, user_id):
+        try:
+            await bot.revoke_chat_invite_link(
+                chat_id=int(invite_doc["chat_id"]),
+                invite_link=str(invite_doc["invite_link"]),
+            )
+        except TelegramError as exc:
+            logger.warning(
+                "Expiry invite revocation failed user_id=%s chat_id=%s: %s",
+                user_id, invite_doc.get("chat_id"), exc,
+            )
+        finally:
+            await deactivate_invite(0, str(invite_doc["invite_link"]))
 
     if send_notification:
         await send_expiry_notification(user_id, removed=removed)

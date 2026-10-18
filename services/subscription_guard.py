@@ -11,7 +11,7 @@ from database.seller_data import active_plan_group_subscriptions_for_chat, get_c
 from database.subscription_guard import (
     add_whitelist, get_guard_settings, is_whitelisted, log_guard_event,
     get_guard_chat_status,
-    active_invites_for_user, deactivate_invite, mark_invite_used, record_join_attempt,
+    active_invites_for_user, deactivate_invite, record_join_attempt,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,16 +109,15 @@ async def subscription_guard_chat_member(update: Update, context: ContextTypes.D
         await log_guard_event(owner_id, event.chat.id, user.id, "admin_skipped", "Admin/owner/whitelist")
         return
 
+    # Do not revoke subscription invite links on join. Keep their database
+    # records active so the expiry/removal flow can revoke them at subscription
+    # expiry (or when an admin removes the subscription).
     invite = getattr(event, "invite_link", None)
     if invite and getattr(invite, "invite_link", None):
-        # Do not revoke an invite when the user joins. Subscription invite links
-        # are revoked by the expiry/removal flow, not by the join event. Keep the
-        # database record active until expiry so the expiry worker can revoke it.
-        try:
-            await mark_invite_used(owner_id, invite.invite_link)
-            await log_guard_event(owner_id, event.chat.id, user.id, "invite_used", "Invite used; retained for subscription-expiry revocation")
-        except Exception:
-            logger.exception("Could not mark subscription invite as used owner=%s user=%s chat=%s", owner_id, user.id, event.chat.id)
+        logger.info(
+            "Subscription invite used; deferred revocation until subscription end owner=%s chat=%s user=%s",
+            owner_id, event.chat.id, user.id,
+        )
 
     if await _active(owner_id, user.id, event.chat.id):
         await log_guard_event(owner_id, event.chat.id, user.id, "allowed", "Active subscription")
@@ -222,10 +221,10 @@ async def subscription_guard_new_members(update: Update, context: ContextTypes.D
 
 
 
-async def revoke_user_invites(bot, owner_id: int, user_id: int) -> int:
-    """Revoke all active invite links created for one subscriber."""
+async def revoke_user_invites(bot, owner_id: int, user_id: int, chat_ids=None) -> int:
+    """Revoke recorded invite links for a subscriber, optionally scoped to chats."""
     revoked = 0
-    for invite in await active_invites_for_user(owner_id, user_id):
+    for invite in await active_invites_for_user(owner_id, user_id, chat_ids=chat_ids):
         try:
             await bot.revoke_chat_invite_link(
                 int(invite["chat_id"]),
