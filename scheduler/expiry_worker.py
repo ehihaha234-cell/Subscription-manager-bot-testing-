@@ -237,21 +237,38 @@ async def check_expired_plan_group_subscriptions():
                 pass
         target_ids = list(dict.fromkeys(target_ids))
 
-        # Revoke only links for this expired subscription's target chats. This
-        # also catches legacy records that lack/mismatch group_id or have a stale
-        # expiry_date. Do not revoke links for chats covered by another active plan.
-        eligible_chat_ids = []
-        for chat_id in target_ids:
-            if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
-                eligible_chat_ids.append(chat_id)
+        # Revoke links from the normal subscription lifecycle by the actual
+        # recorded chat IDs, not only target_chat_ids on the Plan Group row.
+        # Older/admin-extended subscriptions can have stale/missing target IDs.
+        # Preserve links for chats still covered by another active Plan Group.
         try:
-            from database.subscription_invites import revoke_subscription_invites
-            revoked_count = await revoke_subscription_invites(
-                bot, owner_id, user_id=user_id, chat_ids=eligible_chat_ids, due_only=False
+            from database.subscription_invites import (
+                active_invites_for_user,
+                revoke_subscription_invites,
             )
+            invite_rows = await active_invites_for_user(owner_id, user_id)
+            recorded_chat_ids = []
+            for invite_row in invite_rows:
+                try:
+                    recorded_chat_ids.append(int(invite_row.get("chat_id")))
+                except (TypeError, ValueError):
+                    continue
+            # Fall back to subscription targets for legacy records without an
+            # invite record; these IDs cannot themselves identify a link.
+            candidate_chat_ids = list(dict.fromkeys(recorded_chat_ids or target_ids))
+            eligible_chat_ids = []
+            for chat_id in candidate_chat_ids:
+                if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                    eligible_chat_ids.append(chat_id)
+            revoked_count = 0
+            for chat_id in eligible_chat_ids:
+                revoked_count += await revoke_subscription_invites(
+                    bot, owner_id, user_id=user_id, chat_ids=[chat_id], due_only=False
+                )
             logger.info(
-                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s chats=%s revoked=%s",
-                owner_id, user_id, group_id, eligible_chat_ids, revoked_count,
+                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s target_chats=%s recorded_chats=%s eligible_chats=%s records_found=%s revoked=%s",
+                owner_id, user_id, group_id, target_ids, candidate_chat_ids,
+                eligible_chat_ids, len(invite_rows), revoked_count,
             )
         except Exception:
             logger.exception(
