@@ -235,11 +235,11 @@ async def check_expired_plan_group_subscriptions():
         # This uses the normal subscription-invite collection, not Subscription Guard.
         try:
             from database.subscription_invites import revoke_subscription_invites
-            # Match by owner + subscriber + due expiry, not by group_id alone.
-            # Older invite records may have a missing/different group_id even
-            # though they belong to this user's expired subscription. Restricting
-            # to due_only ensures links for other still-active subscriptions are
-            # not revoked.
+            # Invite records are keyed to the Plan Group at creation time, but
+            # legacy/admin-extended records may have a missing or differently
+            # serialized group_id. At this point the current Plan Group row is
+            # already expired, so revoke every due invite for this owner/user;
+            # due_only prevents revoking links for a still-active extension.
             revoked_count = await revoke_subscription_invites(
                 bot, owner_id, user_id=user_id, due_only=True
             )
