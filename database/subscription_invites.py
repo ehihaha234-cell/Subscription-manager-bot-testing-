@@ -1,8 +1,10 @@
 """Invite-link records for the normal subscription lifecycle (not Subscription Guard)."""
 from datetime import datetime, timezone
+import logging
 from database.mongo import get_database
 
 COLLECTION = "subscription_invite_lifecycle"
+logger = logging.getLogger(__name__)
 
 
 def _collection():
@@ -96,15 +98,12 @@ async def deactivate_invite(owner_id, invite_link):
 
 
 async def revoke_subscription_invites(bot, owner_id, user_id=None, group_id=None, due_only=False, chat_ids=None):
-    """Revoke normal-subscription invite links for the selected user/chats.
-
-    First use the expected owner scope. For legacy Extend records whose owner_id
-    was written differently, fall back only to the same Telegram user and the
-    explicitly selected target chats. Telegram itself validates whether this bot
-    owns each invite link; failures are left retryable.
-    """
     now = _utc()
-    owner_id = int(owner_id)
+    query = {"owner_id": int(owner_id), "status": "active"}
+    if user_id is not None:
+        query["user_id"] = int(user_id)
+    # When called by an already-expired Plan Group, scope by its target chats.
+    # Older invite records may not have group_id saved, so group_id alone misses them.
     normalized_chat_ids = None
     if chat_ids is not None:
         normalized_chat_ids = []
@@ -113,59 +112,34 @@ async def revoke_subscription_invites(bot, owner_id, user_id=None, group_id=None
                 normalized_chat_ids.append(int(value))
             except (TypeError, ValueError):
                 continue
-        normalized_chat_ids = list(dict.fromkeys(normalized_chat_ids))
         if not normalized_chat_ids:
             return 0
-
-    base = {"status": "active"}
-    if user_id is not None:
-        base["user_id"] = int(user_id)
-    if normalized_chat_ids is not None:
-        base["chat_id"] = {"$in": normalized_chat_ids}
+        query["chat_id"] = {"$in": list(dict.fromkeys(normalized_chat_ids))}
     elif group_id is not None:
-        base["group_id"] = str(group_id)
+        query["group_id"] = str(group_id)
     if due_only:
-        base["expiry_date"] = {"$lte": now}
-
-    primary = dict(base)
-    primary["owner_id"] = owner_id
-    rows = await _collection().find(primary).to_list(length=1000)
-
-    # Compatibility for older Extend records: some versions stored the seller
-    # ID in a different owner field. Keep the fallback strictly scoped to the
-    # same user and selected target chats, and de-duplicate by invite URL.
-    if not rows and user_id is not None and normalized_chat_ids:
-        fallback = dict(base)
-        fallback.pop("owner_id", None)
-        rows = await _collection().find(fallback).to_list(length=1000)
-
+        query["expiry_date"] = {"$lte": now}
+    rows = await _collection().find(query).to_list(length=1000)
     revoked = 0
-    seen = set()
     for row in rows:
-        link = str(row.get("invite_link") or "")
-        if not link or link in seen:
-            continue
-        seen.add(link)
         try:
             await bot.revoke_chat_invite_link(
-                chat_id=int(row["chat_id"]), invite_link=link
+                chat_id=int(row["chat_id"]), invite_link=row["invite_link"]
             )
         except Exception as exc:
+            # Telegram can report an already-revoked link; otherwise leave active for retry.
             message = str(exc).lower()
             already_invalid = any(term in message for term in (
                 "invite link is already revoked", "invite link is invalid",
                 "invite link has expired", "invite link not found",
             ))
             if not already_invalid:
+                logger.warning(
+                    "Telegram invite revocation failed owner=%s user=%s chat=%s link_suffix=%s error=%s",
+                    owner_id, row.get("user_id"), row.get("chat_id"),
+                    str(row.get("invite_link", ""))[-12:], exc,
+                )
                 continue
-        # Update by the record's actual owner ID, not the lookup owner argument.
-        try:
-            await _collection().update_one(
-                {"owner_id": row.get("owner_id"), "invite_link": link, "status": "active"},
-                {"$set": {"status": "revoked", "revoked_at": now, "updated_at": now}},
-            )
-        except Exception:
-            pass
+        await mark_invite_revoked(owner_id, row["invite_link"])
         revoked += 1
     return revoked
-
