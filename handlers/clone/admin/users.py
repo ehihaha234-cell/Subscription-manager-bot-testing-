@@ -103,11 +103,9 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 if isinstance(normalized_expiry, str):
                     normalized_expiry = datetime.fromisoformat(normalized_expiry.replace("Z", "+00:00"))
                 if getattr(normalized_expiry, "tzinfo", None) is None:
-                    # MongoDB subscription expiry datetimes are stored as naive UTC
-                    # throughout this project (the expiry worker also treats them as UTC).
-                    # Do NOT interpret them as India local time: that delays invite expiry
-                    # by 5 hours 30 minutes and lets the link remain usable after subscription expiry.
-                    normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
+                    # Subscription expiry values without tzinfo are India local time.
+                    # Treating them as UTC makes Telegram links last 5h30m too long.
+                    normalized_expiry = normalized_expiry.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
                 normalized_expiry = normalized_expiry.astimezone(timezone.utc)
                 if normalized_expiry <= datetime.now(timezone.utc):
                     raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
