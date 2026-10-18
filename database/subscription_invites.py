@@ -95,12 +95,25 @@ async def deactivate_invite(owner_id, invite_link):
     return await mark_invite_revoked(owner_id, invite_link)
 
 
-async def revoke_subscription_invites(bot, owner_id, user_id=None, group_id=None, due_only=False):
+async def revoke_subscription_invites(bot, owner_id, user_id=None, group_id=None, due_only=False, chat_ids=None):
     now = _utc()
     query = {"owner_id": int(owner_id), "status": "active"}
     if user_id is not None:
         query["user_id"] = int(user_id)
-    if group_id is not None:
+    # When called by an already-expired Plan Group, scope by its target chats.
+    # Older invite records may not have group_id saved, so group_id alone misses them.
+    normalized_chat_ids = None
+    if chat_ids is not None:
+        normalized_chat_ids = []
+        for value in chat_ids:
+            try:
+                normalized_chat_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if not normalized_chat_ids:
+            return 0
+        query["chat_id"] = {"$in": list(dict.fromkeys(normalized_chat_ids))}
+    elif group_id is not None:
         query["group_id"] = str(group_id)
     if due_only:
         query["expiry_date"] = {"$lte": now}
