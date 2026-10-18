@@ -1,5 +1,6 @@
 """Invite-link records for the normal subscription lifecycle (not Subscription Guard)."""
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import logging
 from database.mongo import get_database
 
@@ -15,7 +16,8 @@ def _utc(value=None):
     if value is None:
         return datetime.now(timezone.utc)
     if getattr(value, "tzinfo", None) is None:
-        return value.replace(tzinfo=timezone.utc)
+        # Naive subscription dates in this bot are India local time, not UTC.
+        value = value.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
     return value.astimezone(timezone.utc)
 
 
@@ -115,11 +117,7 @@ async def revoke_subscription_invites(bot, owner_id, user_id=None, group_id=None
         if not normalized_chat_ids:
             return 0
         query["chat_id"] = {"$in": list(dict.fromkeys(normalized_chat_ids))}
-    if group_id is not None:
-        # Apply group_id even when chat_ids are also supplied. Previously
-        # passing chat_ids silently dropped the group scope and could select
-        # unrelated links, while callers that filtered active-plan chats
-        # could skip the expired subscription's own link entirely.
+    elif group_id is not None:
         query["group_id"] = str(group_id)
     if due_only:
         query["expiry_date"] = {"$lte": now}
