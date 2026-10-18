@@ -51,7 +51,7 @@ async def _callback_group_allowed(owner, group_id):
 
 
 # --- Point 1: restore access after admin extension ---
-async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, group_id):
+async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, group_id, expiry_date=None):
     """Send fresh Plan Group invite links after Give/Extend.
 
     This is intentionally used for all three states: no previous subscription,
@@ -84,7 +84,9 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 member_limit=1,
                 name=f"Subscription access {user_id}",
             )
-            await save_invite(owner, user_id, chat_id, invite.invite_link, subscription_scope=f"plan_group:{group_id}")
+            if expiry_date:
+                from database.subscription_invites import record_subscription_invite
+                await record_subscription_invite(owner, user_id, chat_id, invite.invite_link, expiry_date, group_id=group_id)
             links.append(f"📢 {title}\n{invite.invite_link}")
         except Exception:
             logger.exception(
@@ -284,7 +286,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
 
         # All three cases must deliver fresh invite links: new subscription,
         # active extension, and expired-subscription reactivation.
-        await _restore_plan_group_access_after_admin_extend(context.bot, owner, user_id, gid)
+        await _restore_plan_group_access_after_admin_extend(context.bot, owner, user_id, gid, result.get("expiry_date"))
         context.user_data.clear()
 
         status_text = 'extended' if was_active else ('reactivated' if previous else 'created')
@@ -316,19 +318,15 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer('❌ Plan Group is not available in this account.', show_alert=True)
             return True
         result = await remove_plan_group_subscription(owner, user_id, gid)
+        if result.get('removed'):
+            try:
+                from database.subscription_invites import revoke_subscription_invites
+                await revoke_subscription_invites(context.bot, owner, user_id=user_id, group_id=gid)
+            except Exception:
+                logger.exception("Invite revocation on admin Plan Group removal failed owner=%s user=%s group=%s", owner, user_id, gid)
         if not result.get('removed'):
             await q.edit_message_text('❌ Plan Group subscription is no longer active.', reply_markup=self.back(f'a_user_view_{user_id}'))
             return True
-
-        # Revoke only this removed Plan Group's links; do not touch Subscription Guard.
-        for chat_id in result.get('target_chat_ids', []):
-            for invite_doc in await active_invites_for_user_chat(owner, user_id, int(chat_id)):
-                try:
-                    await context.bot.revoke_chat_invite_link(int(chat_id), str(invite_doc['invite_link']))
-                except Exception as exc:
-                    logger.warning('Admin-remove invite revoke failed owner=%s user=%s chat=%s: %s', owner, user_id, chat_id, exc)
-                    continue
-                await deactivate_invite(owner, invite_doc['invite_link'])
 
         for chat_id in result.get('target_chat_ids', []):
             try:
