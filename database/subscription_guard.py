@@ -161,16 +161,24 @@ async def active_invites_for_user_chats(owner_id: int, user_id: int, chat_ids: l
     """Return tracked active invite links for this user in the given chats."""
     if not chat_ids:
         return []
+    # Include previously-used/replaced links too: these can remain valid on
+    # Telegram even when their local `active` flag was cleared. Only links
+    # confirmed revoked in Telegram should be excluded from expiry cleanup.
     return await _c(INVITES).find({
         "owner_id": int(owner_id), "user_id": int(user_id),
         "chat_id": {"$in": [int(chat_id) for chat_id in chat_ids]},
-        "active": True,
+        "revoked_at": {"$exists": False},
     }).to_list(length=500)
 
 
 async def active_invites_for_user(owner_id: int, user_id: int):
+    """Return all tracked links not yet confirmed revoked on Telegram.
+
+    Older code marked links inactive when used/replaced without revoking them;
+    expiry/removal must still revoke those links.
+    """
     return await _c(INVITES).find(
-        {"owner_id": int(owner_id), "user_id": int(user_id), "active": True}
+        {"owner_id": int(owner_id), "user_id": int(user_id), "revoked_at": {"$exists": False}}
     ).to_list(length=500)
 
 
