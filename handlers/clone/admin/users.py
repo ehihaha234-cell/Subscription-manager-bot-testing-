@@ -94,32 +94,19 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
         except Exception:
             pass
         try:
-            # Ask Telegram itself to expire this invite at the subscription's
-            # actual expiry. The scheduler still revokes recorded links as a
-            # fallback, but the link no longer depends on that worker running.
-            telegram_expire_date = None
-            if expiry_date is not None:
-                normalized_expiry = expiry_date
-                if isinstance(normalized_expiry, str):
-                    normalized_expiry = datetime.fromisoformat(normalized_expiry.replace("Z", "+00:00"))
-                if getattr(normalized_expiry, "tzinfo", None) is None:
-                    # Subscription expiry values without tzinfo are India local time.
-                    # Treating them as UTC makes Telegram links last 5h30m too long.
-                    normalized_expiry = normalized_expiry.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
-                normalized_expiry = normalized_expiry.astimezone(timezone.utc)
-                if normalized_expiry <= datetime.now(timezone.utc):
-                    raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
-                # python-telegram-bot expects a datetime here and serializes it
-                # to Telegram's Unix timestamp. Keep the exact subscription expiry.
-                telegram_expire_date = normalized_expiry
-
+            # Match the normal payment-delivery lifecycle exactly: create a
+            # one-use invite, save the standard invite record, then attach the
+            # subscription expiry and Plan Group ID. The expiry worker revokes
+            # this recorded link when the subscription expires. Do not set a
+            # separate Telegram expire_date here; that would make admin-extend
+            # links follow a different lifecycle from paid subscription links.
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
                 member_limit=1,
-                expire_date=telegram_expire_date,
                 name=f"Subscription access {user_id}",
             )
             if expiry_date:
+                await save_invite(owner, user_id, chat_id, invite.invite_link)
                 from database.subscription_invites import record_subscription_invite
                 saved = await record_subscription_invite(
                     owner, user_id, chat_id, invite.invite_link,
