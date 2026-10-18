@@ -251,9 +251,49 @@ async def check_expired_plan_group_subscriptions():
                 r for r in invite_rows
                 if str(r.get("group_id") or "") == group_id
             ]
-            revoked_count = await revoke_subscription_invites(
-                bot, owner_id, user_id=user_id, group_id=group_id, due_only=False
-            )
+            # Revoke links for this user's expired Plan Group using target chat IDs too.
+            # Some older/current subscription records can carry a different internal
+            # group_id from the invite record; group_id-only matching misses those links.
+            # Never revoke a chat's links if another active Plan Group still covers it.
+            revoked_count = 0
+            candidate_rows = [
+                r for r in invite_rows
+                if str(r.get("group_id") or "") == group_id
+                or int(r.get("chat_id") or 0) in target_ids
+            ]
+            for invite_row in candidate_rows:
+                try:
+                    chat_id = int(invite_row.get("chat_id") or 0)
+                    invite_link = str(invite_row.get("invite_link") or "")
+                    if not chat_id or not invite_link:
+                        continue
+                    # For links tagged to this group, revoke directly. For links tagged
+                    # to another group or legacy untagged links, preserve them if another
+                    # active Plan Group covers the same target chat.
+                    row_group = str(invite_row.get("group_id") or "")
+                    if row_group != group_id and await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                        continue
+                    try:
+                        await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite_link)
+                    except Exception as exc:
+                        message = str(exc).lower()
+                        already_invalid = any(term in message for term in (
+                            "invite link is already revoked", "invite link is invalid",
+                            "invite link has expired", "invite link not found",
+                        ))
+                        if not already_invalid:
+                            logger.warning(
+                                "Plan Group invite revoke failed owner=%s user=%s chat=%s link_suffix=%s error=%s",
+                                owner_id, user_id, chat_id, invite_link[-12:], exc,
+                            )
+                            continue
+                    if await mark_invite_revoked(owner_id, invite_link):
+                        revoked_count += 1
+                except Exception:
+                    logger.exception(
+                        "Plan Group invite revoke candidate failed owner=%s user=%s group=%s",
+                        owner_id, user_id, group_id,
+                    )
 
             # Compatibility for old records created before group_id was stored.
             # Only use untagged records on this group's targets, and preserve a
