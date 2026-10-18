@@ -229,25 +229,6 @@ async def check_expired_plan_group_subscriptions():
             continue
         bot = running.application.bot
 
-        # Revoke links as soon as the subscription is due, independently of
-        # whether the member-removal/finalization step succeeds. Otherwise a
-        # failed or already-finalized removal can leave the old invite usable.
-        # This uses the normal subscription-invite collection, not Subscription Guard.
-        try:
-            from database.subscription_invites import revoke_subscription_invites
-            revoked_count = await revoke_subscription_invites(
-                bot, owner_id, user_id=user_id, group_id=group_id, due_only=True
-            )
-            logger.info(
-                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s revoked=%s",
-                owner_id, user_id, group_id, revoked_count,
-            )
-        except Exception:
-            logger.exception(
-                "Plan Group invite revocation failed owner=%s user=%s group=%s",
-                owner_id, user_id, group_id,
-            )
-
         target_ids = []
         for value in row.get("target_chat_ids") or []:
             try:
@@ -255,6 +236,29 @@ async def check_expired_plan_group_subscriptions():
             except (TypeError, ValueError):
                 pass
         target_ids = list(dict.fromkeys(target_ids))
+
+        # Revoke only links for this expired subscription's target chats. This
+        # also catches legacy records that lack/mismatch group_id or have a stale
+        # expiry_date. Do not revoke links for chats covered by another active plan.
+        eligible_chat_ids = []
+        for chat_id in target_ids:
+            if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
+                eligible_chat_ids.append(chat_id)
+        try:
+            from database.subscription_invites import revoke_subscription_invites
+            revoked_count = await revoke_subscription_invites(
+                bot, owner_id, user_id=user_id, chat_ids=eligible_chat_ids, due_only=False
+            )
+            logger.info(
+                "Plan Group expiry invite revocation checked owner=%s user=%s group=%s chats=%s revoked=%s",
+                owner_id, user_id, group_id, eligible_chat_ids, revoked_count,
+            )
+        except Exception:
+            logger.exception(
+                "Plan Group invite revocation failed owner=%s user=%s group=%s",
+                owner_id, user_id, group_id,
+            )
+
         channels = {int(x.get("chat_id")): str(x.get("title") or "Group/Channel") for x in await get_seller_channels(owner_id)}
         removed_names = []
         failed = False
