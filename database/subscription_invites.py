@@ -61,6 +61,27 @@ async def active_invites_for_user_chat(owner_id, user_id, chat_id=None):
     return await _collection().find(query).to_list(length=1000)
 
 
+async def update_active_invite_expiry(owner_id, user_id, group_id, expiry_date):
+    """Move existing active links for this user's Plan Group to the new expiry.
+
+    Used by User Management Extend so previously issued links remain tied to
+    the updated subscription expiry instead of being revoked at the old date.
+    This belongs to the normal subscription lifecycle, not Subscription Guard.
+    """
+    if expiry_date is None:
+        return 0
+    result = await _collection().update_many(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "group_id": str(group_id),
+            "status": "active",
+        },
+        {"$set": {"expiry_date": _utc(expiry_date), "updated_at": _utc()}},
+    )
+    return int(getattr(result, "modified_count", 0))
+
+
 async def mark_invite_revoked(owner_id, invite_link):
     now = _utc()
     result = await _collection().update_one(
