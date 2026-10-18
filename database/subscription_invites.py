@@ -115,7 +115,11 @@ async def revoke_subscription_invites(bot, owner_id, user_id=None, group_id=None
         if not normalized_chat_ids:
             return 0
         query["chat_id"] = {"$in": list(dict.fromkeys(normalized_chat_ids))}
-    elif group_id is not None:
+    if group_id is not None:
+        # Apply group_id even when chat_ids are also supplied. Previously
+        # passing chat_ids silently dropped the group scope and could select
+        # unrelated links, while callers that filtered active-plan chats
+        # could skip the expired subscription's own link entirely.
         query["group_id"] = str(group_id)
     if due_only:
         query["expiry_date"] = {"$lte": now}
