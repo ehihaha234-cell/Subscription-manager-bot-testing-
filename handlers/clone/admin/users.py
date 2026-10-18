@@ -2,6 +2,7 @@
 
 from handlers.common.clone_context import *
 from uuid import uuid4
+from datetime import timezone
 
 
 def _duration_minutes(value: str):
@@ -92,9 +93,20 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
         except Exception:
             pass
         try:
+            # Ask Telegram itself to expire this invite at the subscription's
+            # actual expiry. The scheduler still revokes recorded links as a
+            # fallback, but the link no longer depends on that worker running.
+            telegram_expire_date = None
+            if expiry_date is not None:
+                normalized_expiry = expiry_date
+                if getattr(normalized_expiry, "tzinfo", None) is None:
+                    normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
+                telegram_expire_date = int(normalized_expiry.timestamp())
+
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
                 member_limit=1,
+                expire_date=telegram_expire_date,
                 name=f"Subscription access {user_id}",
             )
             if expiry_date:
