@@ -150,6 +150,8 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 try:
                     invite = await _create_invite_with_retry(context, ch['chat_id'])
                     await save_invite(owner, user_id, ch['chat_id'], invite.invite_link)
+                    from database.subscription_invites import record_subscription_invite
+                    await record_subscription_invite(owner, user_id, ch['chat_id'], invite.invite_link, expiry)
                     link_lines.append(f"📢 {ch.get('title', 'Premium Channel')}\n{invite.invite_link}")
                 except Exception as exc:
                     invite_failed += 1
@@ -190,6 +192,11 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 for ch in channels:
                     invite = await _create_invite_with_retry(context, ch['chat_id'])
                     await save_invite(owner, uid, ch['chat_id'], invite.invite_link)
+                    from database.subscription_invites import record_subscription_invite
+                    current_sub = await get_subscription(owner, uid)
+                    current_expiry = (current_sub or {}).get('expiry_date')
+                    if current_expiry:
+                        await record_subscription_invite(owner, uid, ch['chat_id'], invite.invite_link, current_expiry)
                     links.append(f"{ch.get('title', 'Channel')}: {invite.invite_link}")
                 await _send_message_with_retry(context, uid, '🔁 Fresh invite link(s):\n\n' + '\n'.join(links))
                 resolved = await resolve_failed_delivery(claimed['_id'])

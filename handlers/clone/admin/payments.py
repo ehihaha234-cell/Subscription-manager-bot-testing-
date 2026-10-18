@@ -325,6 +325,12 @@ async def handle(self, update, context, q, owner, staff, a, role):
                 try:
                     inv = await context.bot.create_chat_invite_link(ch['chat_id'], member_limit=1)
                     await save_invite(owner, p['user_id'], ch['chat_id'], inv.invite_link)
+                    # Normal subscription lifecycle record (independent of Subscription Guard).
+                    from database.subscription_invites import record_subscription_invite
+                    await record_subscription_invite(
+                        owner, p['user_id'], ch['chat_id'], inv.invite_link, expiry,
+                        group_id=str(group_id) if group_id else None,
+                    )
                     links.append(f"{ch.get('title')}: {inv.invite_link}")
                 except Exception as exc:
                     links.append(f"{ch.get('title')}: invite failed ({exc})")
