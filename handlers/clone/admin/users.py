@@ -62,6 +62,19 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
     if not group:
         return {"sent": 0, "links": []}
 
+    # Extend existing recorded links to the newly calculated subscription expiry
+    # before creating fresh links. The expiry worker can then revoke all links
+    # for this subscription at the same final expiry time.
+    if expiry_date is not None:
+        try:
+            from database.subscription_invites import update_active_invite_expiry
+            await update_active_invite_expiry(owner, user_id, group_id, expiry_date)
+        except Exception:
+            logger.exception(
+                "Failed updating existing invite expiry owner=%s user=%s group=%s",
+                owner, user_id, group_id,
+            )
+
     links = []
     for target in (group.get("targets") or []):
         try:
@@ -86,7 +99,20 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
             )
             if expiry_date:
                 from database.subscription_invites import record_subscription_invite
-                await record_subscription_invite(owner, user_id, chat_id, invite.invite_link, expiry_date, group_id=group_id)
+                saved = await record_subscription_invite(
+                    owner, user_id, chat_id, invite.invite_link,
+                    expiry_date, group_id=group_id,
+                )
+                if not saved:
+                    logger.error(
+                        "Invite expiry record was not saved owner=%s user=%s chat=%s group=%s",
+                        owner, user_id, chat_id, group_id,
+                    )
+            else:
+                logger.error(
+                    "Admin Give/Extend returned no expiry; invite cannot be expiry-tracked owner=%s user=%s group=%s",
+                    owner, user_id, group_id,
+                )
             links.append(f"📢 {title}\n{invite.invite_link}")
         except Exception:
             logger.exception(
