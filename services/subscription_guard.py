@@ -110,13 +110,15 @@ async def subscription_guard_chat_member(update: Update, context: ContextTypes.D
         return
 
     invite = getattr(event, "invite_link", None)
-    if settings.get("auto_revoke_invites", True) and invite and getattr(invite, "invite_link", None):
+    if invite and getattr(invite, "invite_link", None):
+        # Do not revoke an invite when the user joins. Subscription invite links
+        # are revoked by the expiry/removal flow, not by the join event. Keep the
+        # database record active until expiry so the expiry worker can revoke it.
         try:
-            await context.bot.revoke_chat_invite_link(event.chat.id, invite.invite_link)
-            await log_guard_event(owner_id, event.chat.id, user.id, "invite_revoked", "Used invite link revoked")
-        except TelegramError:
-            pass
-        await mark_invite_used(owner_id, invite.invite_link)
+            await mark_invite_used(owner_id, invite.invite_link)
+            await log_guard_event(owner_id, event.chat.id, user.id, "invite_used", "Invite used; retained for subscription-expiry revocation")
+        except Exception:
+            logger.exception("Could not mark subscription invite as used owner=%s user=%s chat=%s", owner_id, user.id, event.chat.id)
 
     if await _active(owner_id, user.id, event.chat.id):
         await log_guard_event(owner_id, event.chat.id, user.id, "allowed", "Active subscription")
