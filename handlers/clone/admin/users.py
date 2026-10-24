@@ -3,6 +3,7 @@
 from handlers.common.clone_context import *
 from uuid import uuid4
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 def _duration_minutes(value: str):
@@ -61,27 +62,6 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
     """
     group = await get_plan_group(owner, str(group_id))
     if not group:
-        logger.error("Give/Extend invite delivery: Plan Group missing owner=%s group=%s", owner, group_id)
-        return {"sent": 0, "links": []}
-
-    # Use the exact seller clone bot, just like normal payment invite delivery.
-    # context.bot may be the main/admin bot in some callback paths; using it can
-    # produce Telegram BadRequest: Chat not found for the clone's private chats.
-    try:
-        from services.bot_manager import bot_manager
-        running = bot_manager.get_running(int(owner))
-        if not running:
-            bot_record = await get_bot_by_data_owner_id(int(owner))
-            clone_bot_id = int((bot_record or {}).get("bot_id") or 0)
-            if clone_bot_id and await bot_manager.start_bot(clone_bot_id):
-                running = bot_manager.get_running(clone_bot_id) or bot_manager.get_running(int(owner))
-        if running:
-            bot = running.application.bot
-        else:
-            logger.error("Give/Extend invite delivery: seller clone is not running owner=%s", owner)
-            return {"sent": 0, "links": []}
-    except Exception:
-        logger.exception("Give/Extend could not resolve seller clone bot owner=%s", owner)
         return {"sent": 0, "links": []}
 
     # Extend existing recorded links to the newly calculated subscription expiry
@@ -123,21 +103,34 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 if isinstance(normalized_expiry, str):
                     normalized_expiry = datetime.fromisoformat(normalized_expiry.replace("Z", "+00:00"))
                 if getattr(normalized_expiry, "tzinfo", None) is None:
-                    # Plan Group subscription datetimes are stored as naive UTC in
-                    # this handler/database. Match the same convention used above.
-                    normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
+                    # Subscription expiry values without tzinfo are India local time.
+                    # Treating them as UTC makes Telegram links last 5h30m too long.
+                    normalized_expiry = normalized_expiry.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
                 normalized_expiry = normalized_expiry.astimezone(timezone.utc)
                 if normalized_expiry <= datetime.now(timezone.utc):
                     raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
-                # python-telegram-bot expects a datetime here and serializes it
-                # to Telegram's Unix timestamp. Keep the exact subscription expiry.
-                telegram_expire_date = normalized_expiry
+                # Pass Telegram's documented Unix timestamp explicitly. This avoids
+                # datetime serialization/version differences and makes the expiry visible
+                # in Telegram's Invite Links screen (e.g. "6 days left").
+                telegram_expire_date = int(normalized_expiry.timestamp())
+
+            if telegram_expire_date is None:
+                raise ValueError(
+                    "Give/Extend did not return a valid subscription expiry; "
+                    "refusing to create an unlimited invite link"
+                )
 
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
                 member_limit=1,
                 expire_date=telegram_expire_date,
                 name=f"Subscription access {user_id}",
+            )
+            logger.info(
+                "Timed Plan Group invite created owner=%s user=%s chat=%s "
+                "subscription_expiry=%s telegram_expire_date=%s",
+                owner, user_id, chat_id, normalized_expiry.isoformat(),
+                telegram_expire_date,
             )
             if expiry_date:
                 from database.subscription_invites import record_subscription_invite
@@ -151,7 +144,9 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                         owner, user_id, chat_id, group_id,
                     )
                     try:
-                        await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite.invite_link)
+                        await bot.revoke_chat_invite_link(
+                            chat_id=chat_id, invite_link=invite.invite_link
+                        )
                     except Exception:
                         logger.exception(
                             "Failed revoking untracked admin invite owner=%s user=%s chat=%s",
