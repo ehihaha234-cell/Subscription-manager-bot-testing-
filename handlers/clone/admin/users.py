@@ -3,7 +3,6 @@
 from handlers.common.clone_context import *
 from uuid import uuid4
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 
 def _duration_minutes(value: str):
@@ -78,40 +77,103 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
             )
 
     links = []
-    for target in (group.get("targets") or []):
+    # Resolve Plan Group targets against the seller's currently connected chats.
+    # A stale/mismatched target chat_id can make Telegram return "Chat not found".
+    try:
+        connected_channels = await get_channels(int(owner))
+    except Exception:
+        logger.exception("Could not load connected chats for admin invite owner=%s group=%s", owner, group_id)
+        connected_channels = []
+
+    connected_by_id = {}
+    for channel in connected_channels:
         try:
-            chat_id = int(target.get("chat_id"))
+            connected_by_id[int(channel.get("chat_id"))] = channel
         except (TypeError, ValueError):
             continue
-        title = str(target.get("title") or chat_id)
+
+    used_chat_ids = set()
+    for target in (group.get("targets") or []):
+        try:
+            configured_chat_id = int(target.get("chat_id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+        channel = connected_by_id.get(configured_chat_id)
+        # If the saved Plan Group target ID is stale, match its saved title
+        # to an active connected channel. Never guess a chat from group_id.
+        if channel is None:
+            target_title = str((target or {}).get("title") or "").strip().casefold()
+            if target_title:
+                matches = [
+                    ch for ch in connected_channels
+                    if str(ch.get("title") or "").strip().casefold() == target_title
+                ]
+                if len(matches) == 1:
+                    channel = matches[0]
+
+        if channel is None:
+            logger.error(
+                "Admin invite target is not connected owner=%s user=%s group=%s configured_chat=%s title=%s",
+                owner, user_id, group_id, configured_chat_id, (target or {}).get("title"),
+            )
+            continue
+
+        try:
+            chat_id = int(channel.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+        if chat_id in used_chat_ids:
+            continue
+        used_chat_ids.add(chat_id)
+        title = str(channel.get("title") or (target or {}).get("title") or chat_id)
+
+        try:
+            # Validate that this bot can actually resolve the target chat before
+            # attempting to create an invite. This gives a clear error for stale IDs.
+            await bot.get_chat(chat_id)
+            me = await bot.get_me()
+            bot_member = await bot.get_chat_member(chat_id, int(me.id))
+            bot_status = getattr(bot_member, "status", "")
+            can_invite = bool(getattr(bot_member, "can_invite_users", False))
+            if not (
+                bot_status == "creator"
+                or (bot_status == "administrator" and can_invite)
+            ):
+                logger.error(
+                    "Admin invite skipped: bot lacks invite permission owner=%s user=%s chat=%s status=%s can_invite=%s",
+                    owner, user_id, chat_id, bot_status, can_invite,
+                )
+                continue
+        except Exception:
+            logger.exception(
+                "Admin invite target chat validation failed owner=%s user=%s group=%s chat=%s",
+                owner, user_id, group_id, chat_id,
+            )
+            continue
+
         try:
             member = await bot.get_chat_member(chat_id, int(user_id))
             if getattr(member, "status", "") == "kicked":
-                try:
-                    await bot.unban_chat_member(chat_id, int(user_id), only_if_banned=True)
-                except Exception:
-                    pass
+                await bot.unban_chat_member(chat_id, int(user_id), only_if_banned=True)
         except Exception:
             pass
+
+        invite = None
         try:
-            # Ask Telegram itself to expire this invite at the subscription's
-            # actual expiry. The scheduler still revokes recorded links as a
-            # fallback, but the link no longer depends on that worker running.
             telegram_expire_date = None
             if expiry_date is not None:
                 normalized_expiry = expiry_date
                 if isinstance(normalized_expiry, str):
                     normalized_expiry = datetime.fromisoformat(normalized_expiry.replace("Z", "+00:00"))
                 if getattr(normalized_expiry, "tzinfo", None) is None:
-                    # Subscription expiry values without tzinfo are India local time.
-                    # Treating them as UTC makes Telegram links last 5h30m too long.
-                    normalized_expiry = normalized_expiry.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+                    normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
                 normalized_expiry = normalized_expiry.astimezone(timezone.utc)
                 if normalized_expiry <= datetime.now(timezone.utc):
-                    raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
-                # python-telegram-bot expects a datetime here and serializes it
-                # to Telegram's Unix timestamp. Keep the exact subscription expiry.
+                    raise ValueError("Subscription expiry is not in the future")
                 telegram_expire_date = normalized_expiry
+            else:
+                raise ValueError("Subscription expiry missing; cannot create a timed invite")
 
             invite = await bot.create_chat_invite_link(
                 chat_id=chat_id,
@@ -119,19 +181,6 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 expire_date=telegram_expire_date,
                 name=f"Subscription access {user_id}",
             )
-            if not expiry_date:
-                logger.error(
-                    "Admin Give/Extend returned no expiry; refusing to deliver invite owner=%s user=%s group=%s",
-                    owner, user_id, group_id,
-                )
-                try:
-                    await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite.invite_link)
-                except Exception:
-                    logger.exception(
-                        "Failed revoking invite without expiry owner=%s user=%s chat=%s",
-                        owner, user_id, chat_id,
-                    )
-                continue
 
             from database.subscription_invites import record_subscription_invite
             saved = await record_subscription_invite(
@@ -146,17 +195,14 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 try:
                     await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite.invite_link)
                 except Exception:
-                    logger.exception(
-                        "Failed revoking untracked invite owner=%s user=%s chat=%s",
-                        owner, user_id, chat_id,
-                    )
+                    logger.exception("Failed revoking untracked admin invite owner=%s user=%s chat=%s", owner, user_id, chat_id)
                 continue
 
-            links.append(f"📢 {title}\n{invite.invite_link}")
+            links.append(f"📢 {title}\\n{invite.invite_link}")
         except Exception:
             logger.exception(
-                "Failed creating Plan Group access link owner=%s user=%s chat=%s",
-                owner, user_id, chat_id,
+                "Failed creating Plan Group access link owner=%s user=%s group=%s chat=%s",
+                owner, user_id, group_id, chat_id,
             )
 
     if links:
