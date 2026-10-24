@@ -3,7 +3,6 @@
 from handlers.common.clone_context import *
 from uuid import uuid4
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 
 def _duration_minutes(value: str):
@@ -103,9 +102,11 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 if isinstance(normalized_expiry, str):
                     normalized_expiry = datetime.fromisoformat(normalized_expiry.replace("Z", "+00:00"))
                 if getattr(normalized_expiry, "tzinfo", None) is None:
-                    # Subscription expiry values without tzinfo are India local time.
-                    # Treating them as UTC makes Telegram links last 5h30m too long.
-                    normalized_expiry = normalized_expiry.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+                    # This handler treats naive subscription expiry values as UTC
+                    # when calculating whether a subscription is active (see previous_expiry).
+                    # Use the same convention for Telegram invite expiry, so the invite
+                    # expires at the exact stored subscription expiry rather than 5h30m late.
+                    normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
                 normalized_expiry = normalized_expiry.astimezone(timezone.utc)
                 if normalized_expiry <= datetime.now(timezone.utc):
                     raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
@@ -130,6 +131,18 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                         "Invite expiry record was not saved owner=%s user=%s chat=%s group=%s",
                         owner, user_id, chat_id, group_id,
                     )
+                    # Do not deliver a link that cannot be tracked/revoked by our
+                    # expiry worker. Telegram's own expire_date remains a fallback.
+                    try:
+                        await bot.revoke_chat_invite_link(
+                            chat_id=chat_id, invite_link=invite.invite_link
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed revoking untracked admin invite owner=%s user=%s chat=%s",
+                            owner, user_id, chat_id,
+                        )
+                    continue
             else:
                 logger.error(
                     "Admin Give/Extend returned no expiry; invite cannot be expiry-tracked owner=%s user=%s group=%s",
