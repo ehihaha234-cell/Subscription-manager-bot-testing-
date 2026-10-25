@@ -1,5 +1,7 @@
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
+from datetime import datetime, timezone
+
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
 from database.seller_subscriptions import save_pending_limit_selection
@@ -605,37 +607,56 @@ class ClonePaymentDeliveryMixin:
             except TelegramError as exc:
                 logger.warning("Membership check failed owner=%s chat=%s user=%s: %s",owner_id,chat_id,user_id,exc)
 
+            invite = None
             try:
-                invite=await bot.create_chat_invite_link(
+                # Normal payment must use the same Telegram-side expiry as the
+                # saved subscription. Do not issue an unlimited fallback link.
+                expiry = (success_details or {}).get("expiry_date")
+                if not expiry:
+                    current_sub = await get_subscription(owner_id, user_id)
+                    expiry = (current_sub or {}).get("expiry_date")
+                if isinstance(expiry, str):
+                    expiry = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                if isinstance(expiry, datetime):
+                    if expiry.tzinfo is None:
+                        # Subscription records in this codebase store naive values as UTC.
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    else:
+                        expiry = expiry.astimezone(timezone.utc)
+                else:
+                    expiry = None
+                if not expiry or expiry <= datetime.now(timezone.utc):
+                    raise ValueError("Subscription expiry is missing or already expired; refusing to create an unlimited invite")
+
+                invite = await bot.create_chat_invite_link(
                     chat_id=chat_id,
                     member_limit=1,
+                    expire_date=expiry,
                     name=f"Subscription access {user_id}",
                 )
+                if not getattr(invite, "expire_date", None):
+                    raise ValueError("Telegram did not return an expiring invite link")
+
+                # Persist the same normalized expiry used by Telegram. If saving
+                # fails, revoke the link and do not send an untracked invite.
+                from database.subscription_invites import record_subscription_invite
+                saved = await record_subscription_invite(
+                    owner_id, user_id, chat_id, invite.invite_link, expiry,
+                    group_id=(success_details or {}).get("group_id"),
+                )
+                if saved is False:
+                    raise ValueError("Could not save invite expiry record")
                 await save_invite(owner_id, user_id, chat_id, invite.invite_link)
-                # Independent normal-subscription lifecycle record; not tied to Subscription Guard.
-                try:
-                    from database.subscription_invites import record_subscription_invite
-                    expiry = (success_details or {}).get("expiry_date")
-                    if not expiry:
-                        current_sub = await get_subscription(owner_id, user_id)
-                        expiry = (current_sub or {}).get("expiry_date")
-                    if expiry:
-                        await record_subscription_invite(
-                            owner_id, user_id, chat_id, invite.invite_link, expiry,
-                            group_id=(success_details or {}).get("group_id"),
-                        )
-                    else:
-                        logger.error(
-                            "Invite link created without subscription expiry owner=%s user=%s chat=%s",
-                            owner_id, user_id, chat_id,
-                        )
-                except Exception:
-                    logger.exception("Could not record subscription invite expiry owner=%s user=%s chat=%s", owner_id, user_id, chat_id)
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
-            except TelegramError as exc:
+            except Exception as exc:
+                if invite is not None:
+                    try:
+                        await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite.invite_link)
+                    except Exception:
+                        logger.exception("Could not revoke unsaved timed invite owner=%s user=%s chat=%s", owner_id, user_id, chat_id)
                 failed += 1
                 failed_names.append(title)
-                logger.warning("Invite creation failed owner=%s chat=%s user=%s: %s",owner_id,chat_id,user_id,exc)
+                logger.exception("Timed invite creation/recording failed owner=%s chat=%s user=%s: %s", owner_id, chat_id, user_id, exc)
 
         if links or failed_names:
             try:
