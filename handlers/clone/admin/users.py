@@ -109,28 +109,53 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 normalized_expiry = normalized_expiry.astimezone(timezone.utc)
                 if normalized_expiry <= datetime.now(timezone.utc):
                     raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
-                # python-telegram-bot expects a datetime for expire_date and
-                # serializes it to Telegram's Unix timestamp internally.
+                # python-telegram-bot expects a datetime here and serializes it
+                # to Telegram's Unix timestamp. Keep the exact subscription expiry.
                 telegram_expire_date = normalized_expiry
 
-            if telegram_expire_date is None:
-                raise ValueError(
-                    "Give/Extend did not return a valid subscription expiry; "
-                    "refusing to create an unlimited invite link"
+            try:
+                invite = await bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    member_limit=1,
+                    expire_date=telegram_expire_date,
+                    name=f"Subscription access {user_id}",
                 )
-
-            invite = await bot.create_chat_invite_link(
-                chat_id=chat_id,
-                member_limit=1,
-                expire_date=telegram_expire_date,
-                name=f"Subscription access {user_id}",
-            )
-            logger.info(
-                "Timed Plan Group invite created owner=%s user=%s chat=%s "
-                "subscription_expiry=%s telegram_expire_date=%s",
-                owner, user_id, chat_id, normalized_expiry.isoformat(),
-                telegram_expire_date,
-            )
+            except Exception:
+                # Compatibility fallback: create the single-use invite first, then
+                # apply the expiry through Telegram's editChatInviteLink API.
+                # This avoids losing delivery on PTB/API serialization differences.
+                logger.exception(
+                    "Timed invite creation failed; retrying via edit_chat_invite_link "
+                    "owner=%s user=%s chat=%s expiry=%s",
+                    owner, user_id, chat_id, telegram_expire_date,
+                )
+                invite = await bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    member_limit=1,
+                    name=f"Subscription access {user_id}",
+                )
+                try:
+                    invite = await bot.edit_chat_invite_link(
+                        chat_id=chat_id,
+                        invite_link=invite.invite_link,
+                        expire_date=telegram_expire_date,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not apply expiry to fallback invite; revoking it "
+                        "owner=%s user=%s chat=%s",
+                        owner, user_id, chat_id,
+                    )
+                    try:
+                        await bot.revoke_chat_invite_link(
+                            chat_id=chat_id, invite_link=invite.invite_link
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to revoke fallback invite owner=%s user=%s chat=%s",
+                            owner, user_id, chat_id,
+                        )
+                    raise
             if expiry_date:
                 from database.subscription_invites import record_subscription_invite
                 saved = await record_subscription_invite(
@@ -142,16 +167,6 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                         "Invite expiry record was not saved owner=%s user=%s chat=%s group=%s",
                         owner, user_id, chat_id, group_id,
                     )
-                    try:
-                        await bot.revoke_chat_invite_link(
-                            chat_id=chat_id, invite_link=invite.invite_link
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed revoking untracked admin invite owner=%s user=%s chat=%s",
-                            owner, user_id, chat_id,
-                        )
-                    continue
             else:
                 logger.error(
                     "Admin Give/Extend returned no expiry; invite cannot be expiry-tracked owner=%s user=%s group=%s",
