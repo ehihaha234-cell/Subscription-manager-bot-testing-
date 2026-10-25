@@ -113,31 +113,26 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 # to Telegram's Unix timestamp. Keep the exact subscription expiry.
                 telegram_expire_date = normalized_expiry
 
-            if telegram_expire_date is None:
-                raise ValueError(
-                    "Missing subscription expiry; refusing to create an unlimited invite link"
+            # Restore reliable invite delivery first. Expiry is best-effort for now;
+            # do not block a user's access link if Telegram rejects the expiry value.
+            try:
+                invite = await bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    member_limit=1,
+                    expire_date=telegram_expire_date,
+                    name=f"Subscription access {user_id}",
                 )
-
-            invite = await bot.create_chat_invite_link(
-                chat_id=chat_id,
-                member_limit=1,
-                expire_date=telegram_expire_date,
-                name=f"Subscription access {user_id}",
-            )
-            if not getattr(invite, "expire_date", None):
-                # Never deliver an unlimited link if Telegram did not apply expiry.
-                try:
-                    await bot.revoke_chat_invite_link(
-                        chat_id=chat_id, invite_link=invite.invite_link
-                    )
-                finally:
-                    raise RuntimeError(
-                        "Telegram returned an invite link without expire_date; link revoked"
-                    )
-            logger.info(
-                "Admin timed invite confirmed owner=%s user=%s chat=%s expire_date=%s",
-                owner, user_id, chat_id, invite.expire_date,
-            )
+            except Exception:
+                logger.exception(
+                    "Timed invite creation failed; retrying one-time invite without expiry "
+                    "owner=%s user=%s chat=%s expiry=%s",
+                    owner, user_id, chat_id, telegram_expire_date,
+                )
+                invite = await bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    member_limit=1,
+                    name=f"Subscription access {user_id}",
+                )
             if expiry_date:
                 from database.subscription_invites import record_subscription_invite
                 saved = await record_subscription_invite(
