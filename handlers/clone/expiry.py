@@ -120,41 +120,10 @@ class CloneExpiryMixin:
         for sub in await expired_subscriptions(owner):
             uid=sub["user_id"]
 
-            # A legacy/global subscription can expire while a Plan Group subscription
-            # is still active. Never revoke that Plan Group's fresh timed invite just
-            # because the user's legacy subscription row appears in expired_subscriptions.
-            # Timed invites are already revoked by the due-only lifecycle pass above.
-            now_utc = datetime.now(timezone.utc)
             for invite_doc in await active_invites_for_user(owner, uid):
-                chat_id = int(invite_doc.get("chat_id") or 0)
-                if not chat_id:
-                    continue
-
-                invite_expiry = invite_doc.get("expiry_date")
-                if invite_expiry is not None:
-                    if getattr(invite_expiry, "tzinfo", None) is None:
-                        invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
-                    else:
-                        invite_expiry = invite_expiry.astimezone(timezone.utc)
-                    # Future-dated links must remain valid until their own expiry.
-                    if invite_expiry > now_utc:
-                        continue
-                else:
-                    # Legacy records without an expiry must not invalidate access
-                    # belonging to a currently active Plan Group on this chat.
-                    try:
-                        if await active_plan_group_subscriptions_for_chat(owner, uid, chat_id):
-                            continue
-                    except Exception:
-                        logger.exception(
-                            "Could not verify active Plan Group before legacy invite revoke owner=%s user=%s chat=%s",
-                            owner, uid, chat_id,
-                        )
-                        continue
-
                 try:
                     await context.bot.revoke_chat_invite_link(
-                        chat_id=chat_id, invite_link=invite_doc["invite_link"]
+                        int(invite_doc["chat_id"]), invite_doc["invite_link"]
                     )
                 except Exception:
                     pass
