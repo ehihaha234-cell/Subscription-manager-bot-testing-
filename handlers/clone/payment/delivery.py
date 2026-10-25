@@ -613,25 +613,6 @@ class ClonePaymentDeliveryMixin:
                 # saved subscription. Do not issue an unlimited fallback link.
                 expiry = (success_details or {}).get("expiry_date")
                 if not expiry:
-                    # Plan Group purchases are stored separately from clone-wide
-                    # subscriptions. Resolve the expiry from the exact purchased
-                    # group first, so a missing success_details value does not
-                    # block a valid timed invite or accidentally use another plan.
-                    group_id = (success_details or {}).get("group_id")
-                    if group_id:
-                        try:
-                            from database.seller_data import get_plan_group_subscription
-                            current_sub = await get_plan_group_subscription(
-                                owner_id, user_id, group_id
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Could not load Plan Group subscription expiry owner=%s user=%s group=%s",
-                                owner_id, user_id, group_id,
-                            )
-                            current_sub = None
-                        expiry = (current_sub or {}).get("expiry_date")
-                if not expiry:
                     current_sub = await get_subscription(owner_id, user_id)
                     expiry = (current_sub or {}).get("expiry_date")
                 if isinstance(expiry, str):
@@ -665,10 +646,7 @@ class ClonePaymentDeliveryMixin:
                 )
                 if saved is False:
                     raise ValueError("Could not save invite expiry record")
-                # Do not also save this timed subscription invite through the
-                # legacy Subscription Guard save_invite() helper imported by
-                # clone_context. That creates a second, expiry-less record which
-                # can be processed by a different revocation lifecycle.
+                await save_invite(owner_id, user_id, chat_id, invite.invite_link)
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
             except Exception as exc:
                 if invite is not None:
