@@ -665,7 +665,10 @@ class ClonePaymentDeliveryMixin:
                 )
                 if saved is False:
                     raise ValueError("Could not save invite expiry record")
-                await save_invite(owner_id, user_id, chat_id, invite.invite_link)
+                # Do not also save this timed subscription invite through the
+                # legacy Subscription Guard save_invite() helper imported by
+                # clone_context. That creates a second, expiry-less record which
+                # can be processed by a different revocation lifecycle.
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
             except Exception as exc:
                 if invite is not None:
