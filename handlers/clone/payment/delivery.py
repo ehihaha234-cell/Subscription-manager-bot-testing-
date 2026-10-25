@@ -665,9 +665,9 @@ class ClonePaymentDeliveryMixin:
                 )
                 if saved is False:
                     raise ValueError("Could not save invite expiry record")
-                # Do not also register this timed payment invite in the legacy
-                # Subscription Guard collection. That collection has no expiry
-                # field and its cleanup can revoke a valid timed payment link.
+                # Do not write a second legacy invite record without expiry_date.
+                # That upsert overwrote the timed lifecycle record and allowed the
+                # legacy expiry handler to treat this link as an unexpired/legacy link.
                 links.append(f"📢 {ch.get('title','Premium Channel/Group')}\n{invite.invite_link}")
             except Exception as exc:
                 if invite is not None:
