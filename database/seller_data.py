@@ -21,7 +21,21 @@ async def initialize_seller_data_indexes():
     await c(SETTINGS).create_index("owner_id", unique=True)
     await c(PLANS).create_index([("owner_id",1),("plan_id",1)], unique=True)
     await c(PLAN_GROUPS).create_index([("owner_id",1),("group_id",1)], unique=True)
-    await c(PLAN_GROUPS).create_index([("owner_id",1),("plan_list_id",1)], unique=True, sparse=True)
+    # Compound sparse indexes still index documents where owner_id exists but
+    # plan_list_id is null. Older records contain null plan_list_id, causing
+    # DuplicateKeyError during startup. Replace the legacy index with a partial
+    # unique index that only covers real plan_list_id values.
+    try:
+        await c(PLAN_GROUPS).drop_index("owner_id_plan_list_id_1")
+    except Exception as exc:
+        if "index not found" not in str(exc).lower() and "not found" not in str(exc).lower():
+            logger.warning("Could not drop legacy seller_plan_groups index: %s", exc)
+    await c(PLAN_GROUPS).create_index(
+        [("owner_id", 1), ("plan_list_id", 1)],
+        name="owner_id_plan_list_id_nonnull_unique",
+        unique=True,
+        partialFilterExpression={"plan_list_id": {"$type": ["int", "long", "string"]}},
+    )
     await c(PLANS).create_index([("owner_id",1),("group_id",1),("active",1)])
     await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("user_id",1),("group_id",1)], unique=True)
     await c(PLAN_GROUP_SUBS).create_index([("owner_id",1),("expiry_date",1),("active",1)])
