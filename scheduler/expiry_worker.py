@@ -267,9 +267,28 @@ async def check_expired_plan_group_subscriptions():
                     invite_link = str(invite_row.get("invite_link") or "")
                     if not chat_id or not invite_link:
                         continue
-                    # For links tagged to this group, revoke directly. For links tagged
-                    # to another group or legacy untagged links, preserve them if another
-                    # active Plan Group covers the same target chat.
+                    # A subscription row can be stale/duplicated while a fresh purchase
+                    # has already extended the invite's own expiry. Never revoke a link
+                    # before the Telegram-side expiry recorded for that exact link.
+                    invite_expiry = invite_row.get("expiry_date")
+                    if invite_expiry is not None:
+                        if getattr(invite_expiry, "tzinfo", None) is None:
+                            # Lifecycle records with naive datetimes are normalized as UTC
+                            # by the payment delivery path before they are stored.
+                            invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
+                        else:
+                            invite_expiry = invite_expiry.astimezone(timezone.utc)
+                        if invite_expiry > datetime.now(timezone.utc):
+                            logger.info(
+                                "Skipping premature Plan Group invite revoke owner=%s user=%s group=%s invite_group=%s chat=%s expiry_utc=%s",
+                                owner_id, user_id, group_id,
+                                invite_row.get("group_id"), chat_id, invite_expiry.isoformat(),
+                            )
+                            continue
+                    # For links tagged to this group, revoke directly only after the
+                    # individual link's own expiry. For links tagged to another group or
+                    # legacy untagged links, preserve them if another active Plan Group
+                    # covers the same target chat.
                     row_group = str(invite_row.get("group_id") or "")
                     if row_group != group_id and await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
                         continue
@@ -307,6 +326,18 @@ async def check_expired_plan_group_subscriptions():
             for invite_row in legacy_rows:
                 try:
                     chat_id = int(invite_row.get("chat_id"))
+                    invite_expiry = invite_row.get("expiry_date")
+                    if invite_expiry is not None:
+                        if getattr(invite_expiry, "tzinfo", None) is None:
+                            invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
+                        else:
+                            invite_expiry = invite_expiry.astimezone(timezone.utc)
+                        if invite_expiry > datetime.now(timezone.utc):
+                            logger.info(
+                                "Skipping premature legacy invite revoke owner=%s user=%s group=%s chat=%s expiry_utc=%s",
+                                owner_id, user_id, group_id, chat_id, invite_expiry.isoformat(),
+                            )
+                            continue
                     if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
                         continue
                     legacy_checked += 1
