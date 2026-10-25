@@ -109,10 +109,9 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 normalized_expiry = normalized_expiry.astimezone(timezone.utc)
                 if normalized_expiry <= datetime.now(timezone.utc):
                     raise ValueError("Subscription expiry is not in the future; refusing to create an unbounded invite link")
-                # Pass Telegram's documented Unix timestamp explicitly. This avoids
-                # datetime serialization/version differences and makes the expiry visible
-                # in Telegram's Invite Links screen (e.g. "6 days left").
-                telegram_expire_date = int(normalized_expiry.timestamp())
+                # python-telegram-bot expects a datetime for expire_date and
+                # serializes it to Telegram's Unix timestamp internally.
+                telegram_expire_date = normalized_expiry
 
             if telegram_expire_date is None:
                 raise ValueError(
