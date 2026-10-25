@@ -113,37 +113,42 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
                 # to Telegram's Unix timestamp. Keep the exact subscription expiry.
                 telegram_expire_date = normalized_expiry
 
-            # Restore reliable invite delivery first. Expiry is best-effort for now;
-            # do not block a user's access link if Telegram rejects the expiry value.
-            try:
-                invite = await bot.create_chat_invite_link(
-                    chat_id=chat_id,
-                    member_limit=1,
-                    expire_date=telegram_expire_date,
-                    name=f"Subscription access {user_id}",
+            # Create ONLY a time-limited invite. Never retry without expire_date,
+            # because that would silently send an unlimited link.
+            if telegram_expire_date is None:
+                raise ValueError(
+                    "Subscription expiry is missing; refusing to create an unlimited invite"
                 )
-            except Exception:
-                logger.exception(
-                    "Timed invite creation failed; retrying one-time invite without expiry "
-                    "owner=%s user=%s chat=%s expiry=%s",
-                    owner, user_id, chat_id, telegram_expire_date,
-                )
-                invite = await bot.create_chat_invite_link(
-                    chat_id=chat_id,
-                    member_limit=1,
-                    name=f"Subscription access {user_id}",
-                )
+            invite = await bot.create_chat_invite_link(
+                chat_id=chat_id,
+                member_limit=1,
+                expire_date=telegram_expire_date,
+                name=f"Subscription access {user_id}",
+            )
             if expiry_date:
                 from database.subscription_invites import record_subscription_invite
+                # Pass the normalized timezone-aware UTC expiry. The database
+                # helper interprets naive values as India time, while the
+                # subscription fulfillment result is a naive UTC datetime.
                 saved = await record_subscription_invite(
                     owner, user_id, chat_id, invite.invite_link,
-                    expiry_date, group_id=group_id,
+                    normalized_expiry, group_id=group_id,
                 )
                 if not saved:
                     logger.error(
                         "Invite expiry record was not saved owner=%s user=%s chat=%s group=%s",
                         owner, user_id, chat_id, group_id,
                     )
+                    try:
+                        await bot.revoke_chat_invite_link(
+                            chat_id=chat_id, invite_link=invite.invite_link
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to revoke untracked timed invite owner=%s user=%s chat=%s",
+                            owner, user_id, chat_id,
+                        )
+                    continue
             else:
                 logger.error(
                     "Admin Give/Extend returned no expiry; invite cannot be expiry-tracked owner=%s user=%s group=%s",
