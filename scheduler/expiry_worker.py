@@ -424,7 +424,13 @@ async def check_expired_plan_group_subscriptions():
             continue
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
-            continue
+            # Another expiry path may have already marked this row inactive after
+            # access was removed. Do not suppress the user's expiry notice solely
+            # because this worker lost the state-update race.
+            logger.info(
+                "Plan Group expiry state already updated; continuing notification check owner=%s user=%s group=%s expiry=%s",
+                owner_id, user_id, group_id, row.get("expiry_date"),
+            )
         try:
             group = await get_plan_group(owner_id, group_id) or {}
             # Only show chats from this expired Plan Group that were actually removed.
