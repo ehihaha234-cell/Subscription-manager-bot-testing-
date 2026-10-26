@@ -321,18 +321,56 @@ async def handle(self, update, context, q, owner, staff, a, role):
             channels_for_payment = await get_channels(owner)
             if target_ids:
                 channels_for_payment = [ch for ch in channels_for_payment if int(ch.get("chat_id", 0)) in target_ids]
+            # Normalize the exact subscription expiry once; Telegram requires a future datetime.
+            invite_expiry = expiry
+            if isinstance(invite_expiry, str):
+                invite_expiry = datetime.fromisoformat(invite_expiry.replace("Z", "+00:00"))
+            if isinstance(invite_expiry, datetime):
+                if invite_expiry.tzinfo is None:
+                    # Subscription timestamps stored as naive values are UTC in this codebase.
+                    invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
+                else:
+                    invite_expiry = invite_expiry.astimezone(timezone.utc)
+            else:
+                invite_expiry = None
+
             for ch in channels_for_payment:
+                inv = None
                 try:
-                    inv = await context.bot.create_chat_invite_link(ch['chat_id'], member_limit=1)
-                    await save_invite(owner, p['user_id'], ch['chat_id'], inv.invite_link)
-                    # Normal subscription lifecycle record (independent of Subscription Guard).
+                    if not invite_expiry or invite_expiry <= datetime.now(timezone.utc):
+                        raise ValueError("Subscription expiry is missing or already expired")
+                    inv = await context.bot.create_chat_invite_link(
+                        chat_id=int(ch['chat_id']),
+                        member_limit=1,
+                        expire_date=invite_expiry,
+                        name=f"Subscription access {p['user_id']}",
+                    )
+                    if not getattr(inv, "expire_date", None):
+                        raise ValueError("Telegram did not return a time-limited invite")
+                    # Save only the timed lifecycle record. The legacy save_invite()
+                    # has no expiry field and can cause an independent revoke path.
                     from database.subscription_invites import record_subscription_invite
                     await record_subscription_invite(
-                        owner, p['user_id'], ch['chat_id'], inv.invite_link, expiry,
+                        owner, p['user_id'], ch['chat_id'], inv.invite_link, invite_expiry,
                         group_id=str(group_id) if group_id else None,
                     )
                     links.append(f"{ch.get('title')}: {inv.invite_link}")
                 except Exception as exc:
+                    # Do not silently leave a partially-created, untracked link active.
+                    if inv is not None:
+                        try:
+                            await context.bot.revoke_chat_invite_link(
+                                chat_id=int(ch['chat_id']), invite_link=inv.invite_link
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not revoke untracked manual-payment invite owner=%s user=%s chat=%s link_suffix=%s",
+                                owner, p.get('user_id'), ch.get('chat_id'), str(inv.invite_link)[-12:],
+                            )
+                    logger.exception(
+                        "Timed manual-payment invite failed owner=%s user=%s chat=%s expiry=%s error=%s",
+                        owner, p.get('user_id'), ch.get('chat_id'), invite_expiry, exc,
+                    )
                     links.append(f"{ch.get('title')}: invite failed ({exc})")
             finalized = await finalize_processed_payment(owner, pid, 'approved', owner)
             if not finalized:
