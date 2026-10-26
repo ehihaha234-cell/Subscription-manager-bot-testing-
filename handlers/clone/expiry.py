@@ -140,17 +140,16 @@ class CloneExpiryMixin:
                     if invite_expiry > now_utc:
                         continue
                 else:
-                    # Legacy records without an expiry must not invalidate access
-                    # belonging to a currently active Plan Group on this chat.
-                    try:
-                        if await active_plan_group_subscriptions_for_chat(owner, uid, chat_id):
-                            continue
-                    except Exception:
-                        logger.exception(
-                            "Could not verify active Plan Group before legacy invite revoke owner=%s user=%s chat=%s",
-                            owner, uid, chat_id,
-                        )
-                        continue
+                    # Fail closed: an invite without its own saved expiry cannot be
+                    # safely revoked by this legacy/global subscription-expiry loop.
+                    # Normal payment and Plan Group timed links must remain valid until
+                    # their own Telegram expiry. The due-only invite lifecycle above
+                    # handles records that have a confirmed expiry.
+                    logger.warning(
+                        "Skipping legacy invite revoke: invite expiry missing owner=%s user=%s chat=%s link_suffix=%s",
+                        owner, uid, chat_id, str(invite_doc.get("invite_link") or "")[-12:],
+                    )
+                    continue
 
                 try:
                     await context.bot.revoke_chat_invite_link(
