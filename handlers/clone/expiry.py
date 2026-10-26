@@ -190,16 +190,42 @@ class CloneExpiryMixin:
                 ],
             ])
 
+            expiry_notice = (
+                "⏰ Your subscription has expired.\n\n"
+                "Access to premium channel/group has been removed.\n\n"
+                "Use 🔄 Renew Plan to continue."
+            )
             try:
                 await context.bot.send_message(
-                    uid,
-                    "⏰ Your subscription has expired.\n\n"
-                    "Access to premium channel/group has been removed.\n\n"
-                    "Use 🔄 Renew Plan to continue.",
+                    chat_id=int(uid),
+                    text=expiry_notice,
                     reply_markup=keyboard,
                 )
-            except Exception:
-                pass
+                logger.info(
+                    "Subscription expiry notification sent owner=%s user=%s",
+                    owner, uid,
+                )
+            except Exception as exc:
+                # Retry once without the keyboard so a callback-markup issue does
+                # not silently suppress the expiry notification.
+                logger.exception(
+                    "Subscription expiry notification failed owner=%s user=%s; retrying plain text: %s",
+                    owner, uid, exc,
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(uid),
+                        text=expiry_notice,
+                    )
+                    logger.info(
+                        "Subscription expiry plain-text fallback sent owner=%s user=%s",
+                        owner, uid,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Subscription expiry plain-text fallback failed owner=%s user=%s",
+                        owner, uid,
+                    )
 
         # Expired subscriptions can free capacity without an admin action.
         # Recheck pending selections on each existing expiry cycle (60 seconds);
