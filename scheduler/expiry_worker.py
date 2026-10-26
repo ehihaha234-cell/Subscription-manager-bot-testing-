@@ -267,43 +267,30 @@ async def check_expired_plan_group_subscriptions():
                     invite_link = str(invite_row.get("invite_link") or "")
                     if not chat_id or not invite_link:
                         continue
-                    # Never revoke a timed invite merely because the subscription row
-                    # is being processed. The invite's own expiry is authoritative.
-                    # MongoDB commonly returns UTC BSON datetimes as naive Python values.
+                    # The subscription row can be stale or mismatched. Never revoke
+                    # a Telegram invite before the expiry saved on that exact invite.
                     invite_expiry = invite_row.get("expiry_date")
-                    if invite_expiry is None:
-                        logger.warning(
-                            "Skipping Plan Group invite revoke: saved expiry missing owner=%s user=%s group=%s chat=%s link_suffix=%s",
-                            owner_id, user_id, group_id, chat_id, invite_link[-12:],
-                        )
-                        continue
-                    if isinstance(invite_expiry, str):
-                        try:
-                            invite_expiry = datetime.fromisoformat(invite_expiry.replace("Z", "+00:00"))
-                        except ValueError:
-                            logger.warning(
-                                "Skipping Plan Group invite revoke: invalid saved expiry owner=%s user=%s group=%s chat=%s link_suffix=%s",
-                                owner_id, user_id, group_id, chat_id, invite_link[-12:],
+                    if invite_expiry is not None:
+                        if getattr(invite_expiry, "tzinfo", None) is None:
+                            # Legacy Mongo dates are stored as UTC-naive in this worker.
+                            invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
+                        else:
+                            invite_expiry = invite_expiry.astimezone(timezone.utc)
+                        if invite_expiry > datetime.now(timezone.utc):
+                            logger.info(
+                                "Skipping premature Plan Group invite revoke owner=%s user=%s group=%s chat=%s link_suffix=%s invite_expiry=%s",
+                                owner_id, user_id, group_id, chat_id, invite_link[-12:], invite_expiry.isoformat(),
                             )
                             continue
-                    if not isinstance(invite_expiry, datetime):
+                    else:
+                        # Missing expiry must not cause a fresh timed link to be revoked.
                         logger.warning(
-                            "Skipping Plan Group invite revoke: unsupported saved expiry owner=%s user=%s group=%s chat=%s link_suffix=%s",
+                            "Skipping Plan Group invite revoke because saved expiry is missing owner=%s user=%s group=%s chat=%s link_suffix=%s",
                             owner_id, user_id, group_id, chat_id, invite_link[-12:],
                         )
                         continue
-                    if invite_expiry.tzinfo is None:
-                        invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
-                    else:
-                        invite_expiry = invite_expiry.astimezone(timezone.utc)
-                    now_utc = datetime.now(timezone.utc)
-                    if invite_expiry > now_utc:
-                        logger.warning(
-                            "Skipping premature Plan Group invite revoke owner=%s user=%s group=%s chat=%s expiry_utc=%s now_utc=%s link_suffix=%s",
-                            owner_id, user_id, group_id, chat_id, invite_expiry.isoformat(), now_utc.isoformat(), invite_link[-12:],
-                        )
-                        continue
-                    # For links tagged to another group or legacy untagged links, preserve them if another
+                    # For links tagged to this group, revoke directly. For links tagged
+                    # to another group or legacy untagged links, preserve them if another
                     # active Plan Group covers the same target chat.
                     row_group = str(invite_row.get("group_id") or "")
                     if row_group != group_id and await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
@@ -342,31 +329,24 @@ async def check_expired_plan_group_subscriptions():
             for invite_row in legacy_rows:
                 try:
                     chat_id = int(invite_row.get("chat_id"))
-                    invite_link = str(invite_row.get("invite_link") or "")
                     invite_expiry = invite_row.get("expiry_date")
-                    if invite_expiry is None:
-                        logger.warning(
-                            "Skipping legacy invite revoke: saved expiry missing owner=%s user=%s group=%s chat=%s link_suffix=%s",
-                            owner_id, user_id, group_id, chat_id, invite_link[-12:],
-                        )
-                        continue
-                    if isinstance(invite_expiry, str):
-                        try:
-                            invite_expiry = datetime.fromisoformat(invite_expiry.replace("Z", "+00:00"))
-                        except ValueError:
-                            logger.warning("Skipping legacy invite revoke: invalid expiry owner=%s user=%s chat=%s link_suffix=%s", owner_id, user_id, chat_id, invite_link[-12:])
+                    if invite_expiry is not None:
+                        if getattr(invite_expiry, "tzinfo", None) is None:
+                            invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
+                        else:
+                            invite_expiry = invite_expiry.astimezone(timezone.utc)
+                        if invite_expiry > datetime.now(timezone.utc):
+                            logger.info(
+                                "Skipping premature legacy invite revoke owner=%s user=%s group=%s chat=%s link_suffix=%s invite_expiry=%s",
+                                owner_id, user_id, group_id, chat_id,
+                                str(invite_row.get("invite_link", ""))[-12:], invite_expiry.isoformat(),
+                            )
                             continue
-                    if not isinstance(invite_expiry, datetime):
-                        continue
-                    if invite_expiry.tzinfo is None:
-                        invite_expiry = invite_expiry.replace(tzinfo=timezone.utc)
                     else:
-                        invite_expiry = invite_expiry.astimezone(timezone.utc)
-                    now_utc = datetime.now(timezone.utc)
-                    if invite_expiry > now_utc:
                         logger.warning(
-                            "Skipping premature legacy invite revoke owner=%s user=%s group=%s chat=%s expiry_utc=%s now_utc=%s link_suffix=%s",
-                            owner_id, user_id, group_id, chat_id, invite_expiry.isoformat(), now_utc.isoformat(), invite_link[-12:],
+                            "Skipping legacy invite revoke because saved expiry is missing owner=%s user=%s group=%s chat=%s link_suffix=%s",
+                            owner_id, user_id, group_id, chat_id,
+                            str(invite_row.get("invite_link", ""))[-12:],
                         )
                         continue
                     if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
