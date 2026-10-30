@@ -421,17 +421,20 @@ async def check_expired_plan_group_subscriptions():
             try:
                 member = await bot.get_chat_member(chat_id, user_id)
                 member_status = getattr(member, "status", "")
-                # A previous attempt may have banned the user but missed the unban.
-                # Recover that state now; do not leave a renewed subscriber blocked.
+                # A stale `kicked` status means a previous attempt banned the
+                # subscriber but did not complete the unban. Clear it immediately.
                 if member_status == "kicked":
                     await bot.unban_chat_member(
                         chat_id=chat_id,
                         user_id=user_id,
                         only_if_banned=True,
                     )
+                    logger.info(
+                        "Cleared stale Plan Group expiry ban owner=%s user=%s group=%s chat=%s",
+                        owner_id, user_id, group_id, chat_id,
+                    )
                     continue
-                # Telegram reports `left` after a completed kick (ban + unban).
-                # Do not repeat removal for a user who is already outside the chat.
+                # `left` means the user is already removed and is not banned.
                 if member_status in {"left", "creator", "administrator"} or await is_whitelisted(owner_id, chat_id, user_id):
                     continue
                 await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
