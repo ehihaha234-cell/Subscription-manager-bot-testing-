@@ -599,9 +599,32 @@ class ClonePaymentDeliveryMixin:
                     already_member+=1
                 if status=="kicked":
                     try:
-                        await bot.unban_chat_member(chat_id,int(user_id),only_if_banned=True)
-                    except TelegramError:
-                        pass
+                        await bot.unban_chat_member(
+                            chat_id=chat_id,
+                            user_id=int(user_id),
+                            only_if_banned=True,
+                        )
+                        # Confirm Telegram now reports the user as no longer banned
+                        # before creating/sending a fresh invite link.
+                        refreshed_member = await bot.get_chat_member(chat_id, int(user_id))
+                        if getattr(refreshed_member, "status", "") == "kicked":
+                            raise RuntimeError("Telegram still reports the subscriber as banned after unban")
+                    except TelegramError as unban_error:
+                        failed += 1
+                        failed_names.append(title)
+                        logger.warning(
+                            "Renewal invite blocked: could not unban previously banned user owner=%s chat=%s user=%s: %s",
+                            owner_id, chat_id, user_id, unban_error,
+                        )
+                        continue
+                    except Exception as unban_error:
+                        failed += 1
+                        failed_names.append(title)
+                        logger.warning(
+                            "Renewal invite blocked: unban verification failed owner=%s chat=%s user=%s: %s",
+                            owner_id, chat_id, user_id, unban_error,
+                        )
+                        continue
             except BadRequest:
                 pass
             except TelegramError as exc:
