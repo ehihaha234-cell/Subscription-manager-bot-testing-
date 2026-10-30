@@ -110,6 +110,7 @@ async def revoke_channel_access(
     channels = await get_all_channels()
     removed = 0
     failed = []
+    failed_details = []
 
     for channel in channels:
         chat_id = channel.get("chat_id")
@@ -127,6 +128,7 @@ async def revoke_channel_access(
 
         except TelegramError as exc:
             failed.append(chat_id)
+            failed_details.append({"chat_id": chat_id, "error": str(exc)})
             logger.exception(
                 "Failed removing user_id=%s from chat_id=%s: %s",
                 user_id,
@@ -162,6 +164,7 @@ async def revoke_channel_access(
     return {
         "removed": removed,
         "failed_chat_ids": failed,
+        "failed_details": failed_details,
         "total_channels": len(channels),
     }
 
@@ -170,19 +173,14 @@ async def send_expiry_notification(
     user_id: int,
     *,
     removed: int = 0,
-    removal_pending: bool = False,
 ):
     try:
         await bot.send_message(
             chat_id=user_id,
             text=(
                 "⏰ Your subscription has expired.\n\n"
-                + (
-                    "Your access removal is being retried because one or more channels could not be reached.\n"
-                    if removal_pending
-                    else "Access to premium channel/group has been removed.\n"
-                )
-                + "Use 🔄 Renew Plan to continue."
+                "Your access period has ended.\n"
+                "Use 🔄 Renew Plan to restore your access."
             ),
             reply_markup=InlineKeyboardMarkup([
                 [
