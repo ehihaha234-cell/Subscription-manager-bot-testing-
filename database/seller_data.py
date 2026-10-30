@@ -1653,6 +1653,71 @@ async def expire_plan_group_subscription(owner_id, user_id, group_id, expected_e
     return result.modified_count > 0
 
 
+async def claim_plan_group_expiry_notification(owner_id, user_id, group_id, expected_expiry=None, stale_after_seconds=900):
+    """Atomically claim the one-time expiry notice without blocking removal retries."""
+    now = datetime.now(timezone.utc)
+    query = {
+        "owner_id": int(owner_id),
+        "user_id": int(user_id),
+        "group_id": str(group_id),
+        "expiry_notification_sent_for": {"$ne": expected_expiry},
+        "$or": [
+            {"expiry_notification_claimed_at": {"$exists": False}},
+            {"expiry_notification_claimed_at": None},
+            {"expiry_notification_claimed_at": {"$lte": now - timedelta(seconds=stale_after_seconds)}},
+        ],
+    }
+    if expected_expiry is not None:
+        query["expiry_date"] = expected_expiry
+    token = str(uuid4())
+    result = await c(PLAN_GROUP_SUBS).update_one(
+        query,
+        {"$set": {
+            "expiry_notification_claim_token": token,
+            "expiry_notification_claimed_at": now,
+            "updated_at": now,
+        }},
+    )
+    return token if result.modified_count else None
+
+
+async def complete_plan_group_expiry_notification(owner_id, user_id, group_id, expected_expiry, token):
+    query = {
+        "owner_id": int(owner_id), "user_id": int(user_id),
+        "group_id": str(group_id), "expiry_notification_claim_token": str(token),
+    }
+    if expected_expiry is not None:
+        query["expiry_date"] = expected_expiry
+    result = await c(PLAN_GROUP_SUBS).update_one(
+        query,
+        {"$set": {
+            "expiry_notification_sent_for": expected_expiry,
+            "expiry_notification_sent_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }, "$unset": {
+            "expiry_notification_claim_token": "",
+            "expiry_notification_claimed_at": "",
+        }},
+    )
+    return result.modified_count > 0
+
+
+async def release_plan_group_expiry_notification(owner_id, user_id, group_id, expected_expiry, token, error=None):
+    query = {
+        "owner_id": int(owner_id), "user_id": int(user_id),
+        "group_id": str(group_id), "expiry_notification_claim_token": str(token),
+    }
+    if expected_expiry is not None:
+        query["expiry_date"] = expected_expiry
+    update = {"$unset": {
+        "expiry_notification_claim_token": "",
+        "expiry_notification_claimed_at": "",
+    }, "$set": {"updated_at": datetime.now(timezone.utc)}}
+    if error:
+        update["$set"]["expiry_notification_last_error"] = str(error)[:500]
+    await c(PLAN_GROUP_SUBS).update_one(query, update)
+
+
 async def active_subscriptions(owner_id, limit=5000):
     now=datetime.now(timezone.utc)
     return await c(SUBS).find({
