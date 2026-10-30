@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from handlers.common.clone_context import *
 from database.business_delivery import list_business_contact_routes, log_business_payment_delivery
 from database.seller_subscriptions import save_pending_limit_selection
+from services.membership_access import unban_and_verify
 from database.payment_gateways import (
     create_gateway_transaction,
     get_transaction_by_gateway_payment,
@@ -599,14 +600,7 @@ class ClonePaymentDeliveryMixin:
                     already_member+=1
                 if status == "kicked":
                     try:
-                        await bot.unban_chat_member(
-                            chat_id=chat_id,
-                            user_id=int(user_id),
-                            only_if_banned=True,
-                        )
-                        refreshed = await bot.get_chat_member(chat_id, int(user_id))
-                        if getattr(refreshed, "status", "") == "kicked":
-                            raise RuntimeError("Telegram still reports this user as banned after unban")
+                        await unban_and_verify(bot, chat_id, int(user_id))
                     except Exception as unban_error:
                         failed += 1
                         failed_names.append(title)
