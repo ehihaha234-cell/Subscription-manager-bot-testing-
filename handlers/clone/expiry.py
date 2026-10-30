@@ -1,6 +1,7 @@
 """Focused clone-bot expiry worker; existing expiry/removal flow stays unchanged."""
 
 from handlers.common.clone_context import *
+from services.membership_access import kick_then_unban
 
 
 class CloneExpiryMixin:
@@ -161,30 +162,19 @@ class CloneExpiryMixin:
 
             for ch in await get_channels(owner):
                 try:
-                    # If a previous expiry run left the user banned, clear
-                    # that ban. A completed ban+unban leaves status `left`.
-                    member = await context.bot.get_chat_member(ch["chat_id"], uid)
-                    member_status = getattr(member, "status", "")
-                    if member_status == "kicked":
-                        await context.bot.unban_chat_member(
-                            chat_id=ch["chat_id"],
-                            user_id=uid,
-                            only_if_banned=True,
+                    removal_state = await kick_then_unban(
+                        context.bot, ch["chat_id"], uid
+                    )
+                    if removal_state == "unbanned_existing":
+                        logger.info(
+                            "Recovered previously banned clone subscriber owner=%s user=%s chat=%s",
+                            owner, uid, ch["chat_id"],
                         )
-                        continue
-                    if member_status == "left":
-                        continue
-                    await context.bot.ban_chat_member(
-                        ch["chat_id"],
-                        uid,
+                except Exception as exc:
+                    logger.warning(
+                        "Clone subscription expiry kick/unban failed owner=%s user=%s chat=%s: %s",
+                        owner, uid, ch.get("chat_id"), exc,
                     )
-                    await context.bot.unban_chat_member(
-                        ch["chat_id"],
-                        uid,
-                        only_if_banned=True,
-                    )
-                except Exception:
-                    pass
 
             await mark_expired(owner,uid)
 
