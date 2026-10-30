@@ -457,11 +457,12 @@ async def check_expired_plan_group_subscriptions():
             )
         try:
             group = await get_plan_group(owner_id, group_id) or {}
-            # Only show chats from this expired Plan Group that were actually removed.
-            if removed_names:
-                display_names = removed_names
-            else:
-                display_names = [channels.get(int(x), str(x)) for x in target_ids if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, int(x))]
+            # Always show every configured group/channel in this Plan Group,
+            # regardless of whether access removal succeeded or failed.
+            display_names = [
+                channels.get(int(chat_id), str(chat_id))
+                for chat_id in target_ids
+            ]
             settings = await get_seller_settings(owner_id)
             timezone_name = str(settings.get("timezone") or "Asia/Kolkata")
             try:
