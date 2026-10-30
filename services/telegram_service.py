@@ -4,6 +4,7 @@ from telegram import Bot
 
 from config import BOT_TOKEN
 from database.channels import get_all_channels
+from services.membership_access import kick_then_unban
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +20,7 @@ async def remove_user_from_channels(user_id: int):
 
     for channel in channels:
         try:
-            await bot.ban_chat_member(
-                chat_id=channel["chat_id"],
-                user_id=user_id,
-            )
-
-            await bot.unban_chat_member(
-                chat_id=channel["chat_id"],
-                user_id=user_id,
-            )
+            await kick_then_unban(bot, channel["chat_id"], user_id)
 
         except Exception:
             logger.exception(

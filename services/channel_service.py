@@ -6,6 +6,7 @@ from database.channels import get_all_channels
 from database.seller_data import get_channels as get_seller_channels
 from database.payments import mark_payment_channel_delivered
 from database.subscription_guard import get_active_invite, save_invite, active_invites_for_user, deactivate_invite
+from services.membership_access import kick_then_unban
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -115,34 +116,14 @@ async def revoke_channel_access(
     for channel in channels:
         chat_id = channel.get("chat_id")
         try:
-            # `left` means the user is already outside the chat. `kicked`
-            # means a previous expiry attempt left an active ban in place;
-            # clear it so the user can join again after renewing.
-            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-            member_status = getattr(member, "status", "")
-            if member_status == "kicked":
-                await bot.unban_chat_member(
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    only_if_banned=True,
-                )
+            removal_state = await kick_then_unban(bot, chat_id, user_id)
+            if removal_state == "removed":
+                removed += 1
+            elif removal_state == "unbanned_existing":
                 logger.info(
-                    "Cleared stale expiry ban user_id=%s chat_id=%s",
+                    "Recovered stale expiry ban user_id=%s chat_id=%s",
                     user_id, chat_id,
                 )
-                continue
-            if member_status == "left":
-                continue
-            await bot.ban_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-            )
-            await bot.unban_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-                only_if_banned=True,
-            )
-            removed += 1
 
         except TelegramError as exc:
             failed.append(chat_id)
