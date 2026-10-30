@@ -40,6 +40,30 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 
+async def _notify_plan_group_seller(bot, owner_id: int, message: str) -> bool:
+    """Try the clone bot first, then the main bot if seller delivery fails."""
+    try:
+        await bot.send_message(chat_id=owner_id, text=message)
+        logger.info("Plan Group removal warning delivered through clone bot owner=%s", owner_id)
+        return True
+    except Exception as clone_error:
+        logger.warning(
+            "Clone bot could not deliver Plan Group removal warning owner=%s: %s; trying main bot",
+            owner_id, clone_error,
+        )
+    try:
+        from services.channel_service import bot as main_bot
+        await main_bot.send_message(chat_id=owner_id, text=message)
+        logger.info("Plan Group removal warning delivered through main bot owner=%s", owner_id)
+        return True
+    except Exception:
+        logger.exception(
+            "Could not deliver Plan Group removal warning through clone or main bot owner=%s",
+            owner_id,
+        )
+        return False
+
+
 async def check_expired_users():
     now = datetime.now(timezone.utc)
     try:
@@ -439,10 +463,11 @@ async def check_expired_plan_group_subscriptions():
                     f"  Problem: {error_text}",
                 ])
             failed_lines.extend(["", "Please ensure the bot is a member/admin and has Ban Users permission in the listed group/channel."])
-            try:
-                await bot.send_message(owner_id, "\n".join(failed_lines))
-            except Exception:
-                logger.exception("Could not send Plan Group removal warning owner=%s user=%s group=%s", owner_id, user_id, group_id)
+            await _notify_plan_group_seller(
+                bot,
+                owner_id,
+                "\n".join(failed_lines),
+            )
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
             # Another expiry path may have already marked this row inactive after
@@ -454,11 +479,12 @@ async def check_expired_plan_group_subscriptions():
             )
         try:
             group = await get_plan_group(owner_id, group_id) or {}
-            # Only show chats from this expired Plan Group that were actually removed.
-            if removed_names:
-                display_names = removed_names
-            else:
-                display_names = [channels.get(int(x), str(x)) for x in target_ids if not await active_plan_group_subscriptions_for_chat(owner_id, user_id, int(x))]
+            # Always list every configured chat in this Plan Group, regardless
+            # of whether removal succeeded, failed, or another plan still covers it.
+            display_names = [
+                channels.get(int(chat_id), str(chat_id))
+                for chat_id in target_ids
+            ]
             settings = await get_seller_settings(owner_id)
             timezone_name = str(settings.get("timezone") or "Asia/Kolkata")
             try:
