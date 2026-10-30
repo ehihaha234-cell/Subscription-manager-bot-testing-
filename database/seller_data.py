@@ -1646,11 +1646,29 @@ async def expire_plan_group_subscription(owner_id, user_id, group_id, expected_e
     }
     if expected_expiry is not None:
         query["expiry_date"] = expected_expiry
+    now = datetime.now(timezone.utc)
     result = await c(PLAN_GROUP_SUBS).update_one(
         query,
-        {"$set": {"active": False, "expired_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}}
+        {"$set": {"active": False, "expired_at": now, "updated_at": now}}
     )
-    return result.modified_count > 0
+    if result.modified_count > 0:
+        return True
+
+    # Some legacy Mongo rows may have a normalized/different datetime value.
+    # Fall back to the same owner/user/group only when its stored expiry is due.
+    # This prevents the expired row staying active and triggering ban/unban on
+    # every 60-second worker scan.
+    fallback = await c(PLAN_GROUP_SUBS).update_one(
+        {
+            "owner_id": int(owner_id),
+            "user_id": int(user_id),
+            "group_id": str(group_id),
+            "active": True,
+            "expiry_date": {"$lte": now},
+        },
+        {"$set": {"active": False, "expired_at": now, "updated_at": now}},
+    )
+    return fallback.modified_count > 0
 
 
 async def claim_plan_group_expiry_notification(owner_id, user_id, group_id, expected_expiry=None, stale_after_seconds=900):
