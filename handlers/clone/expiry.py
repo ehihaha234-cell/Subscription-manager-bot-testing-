@@ -161,14 +161,14 @@ class CloneExpiryMixin:
 
             for ch in await get_channels(owner):
                 try:
-                    # Do not re-ban users who are already outside the chat.
+                    # If a previous expiry run left the user banned, clear
+                    # that ban. A completed ban+unban leaves status `left`.
                     member = await context.bot.get_chat_member(ch["chat_id"], uid)
                     member_status = getattr(member, "status", "")
                     if member_status == "kicked":
-                        # Repair a previous expiry attempt that banned but did not unban.
                         await context.bot.unban_chat_member(
-                            ch["chat_id"],
-                            uid,
+                            chat_id=ch["chat_id"],
+                            user_id=uid,
                             only_if_banned=True,
                         )
                         continue
