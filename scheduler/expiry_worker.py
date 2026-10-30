@@ -18,6 +18,9 @@ from services.channel_service import (
 from database.seller_data import (
     active_plan_group_subscriptions_for_chat,
     expire_plan_group_subscription,
+    claim_plan_group_expiry_notification,
+    complete_plan_group_expiry_notification,
+    release_plan_group_expiry_notification,
     expired_plan_group_subscriptions,
     get_subscription as get_seller_subscription,
     active_expiry_reminder_plan_group_subscriptions,
@@ -67,15 +70,28 @@ async def check_expired_users():
             # Do not mark the subscription expired while any configured
             # channel removal failed. The claim is released for a later retry.
             if result["failed_chat_ids"]:
+                # Expiry notification is independent of channel-removal success.
+                # Keep the expiry claim retryable, but notify the user now.
+                notification_token = await claim_expiry_notification(user_id)
+                if notification_token:
+                    sent = await send_expiry_notification(
+                        user_id,
+                        removed=result.get("removed", 0),
+                        removal_pending=True,
+                    )
+                    if sent:
+                        await complete_expiry_notification(user_id, notification_token)
+                    else:
+                        await release_expiry_notification(
+                            user_id, notification_token,
+                            error="Telegram notification failed",
+                        )
                 await release_expiry_claim(
                     user_id,
                     claim_token,
                     error=(
                         "Failed channel removals: "
-                        + ",".join(
-                            str(chat_id)
-                            for chat_id in result["failed_chat_ids"]
-                        )
+                        + ",".join(str(chat_id) for chat_id in result["failed_chat_ids"])
                     ),
                 )
                 logger.warning(
@@ -405,6 +421,7 @@ async def check_expired_plan_group_subscriptions():
 
         channels = {int(x.get("chat_id")): str(x.get("title") or "Group/Channel") for x in await get_seller_channels(owner_id)}
         removed_names = []
+        failed_chat_ids = []
         failed = False
         for chat_id in target_ids:
             # Keep access when the same target is covered by another active Plan Group.
@@ -419,8 +436,54 @@ async def check_expired_plan_group_subscriptions():
                 removed_names.append(channels.get(chat_id, str(chat_id)))
             except Exception as exc:
                 failed = True
+                failed_chat_ids.append(chat_id)
                 logger.warning("Plan Group expiry removal failed owner=%s user=%s group=%s chat=%s: %s", owner_id, user_id, group_id, chat_id, exc)
         if failed:
+            # Notify once even when one or more chat removals fail. The row
+            # remains active so the worker can retry access removal next cycle.
+            notification_claim = await claim_plan_group_expiry_notification(
+                owner_id, user_id, group_id, row.get("expiry_date")
+            )
+            if notification_claim:
+                try:
+                    settings = await get_seller_settings(owner_id)
+                    timezone_name = str(settings.get("timezone") or "Asia/Kolkata")
+                    try:
+                        display_tz = ZoneInfo(timezone_name)
+                    except (ZoneInfoNotFoundError, ValueError):
+                        display_tz = ZoneInfo("Asia/Kolkata")
+                    expiry = row.get("expiry_date")
+                    if expiry and expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    expiry_text = expiry.astimezone(display_tz).strftime('%d-%m-%Y %I:%M:%S %p') + f" {timezone_name}" if expiry else "-"
+                    failed_names = [
+                        channels.get(int(x), str(x)) for x in target_ids
+                        if int(x) in failed_chat_ids and not await active_plan_group_subscriptions_for_chat(owner_id, user_id, int(x))
+                    ]
+                    lines = [
+                        "⏰ Your subscription has expired.", "",
+                        "🔊 Group/Channel:",
+                    ]
+                    lines.extend(f"• {name}" for name in (removed_names + failed_names))
+                    lines.extend([
+                        "", f"📅 Expired On: {expiry_text}", "",
+                        "⚠️ Some access removals are still being retried by the bot.",
+                        "", "Use 🔄 Renew Plan to continue.",
+                    ])
+                    await bot.send_message(
+                        user_id, "\n".join(lines),
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{group_id}"), InlineKeyboardButton("👤 Profile", callback_data="c_profile")],
+                        ]),
+                    )
+                    await complete_plan_group_expiry_notification(
+                        owner_id, user_id, group_id, row.get("expiry_date"), notification_claim
+                    )
+                except Exception as exc:
+                    await release_plan_group_expiry_notification(
+                        owner_id, user_id, group_id, row.get("expiry_date"), notification_claim, str(exc)
+                    )
+                    logger.exception("Plan Group expiry notification failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
             continue
         expired = await expire_plan_group_subscription(owner_id, user_id, group_id, row.get("expiry_date"))
         if not expired:
@@ -431,6 +494,12 @@ async def check_expired_plan_group_subscriptions():
                 "Plan Group expiry state already updated; continuing notification check owner=%s user=%s group=%s expiry=%s",
                 owner_id, user_id, group_id, row.get("expiry_date"),
             )
+        notification_claim = await claim_plan_group_expiry_notification(
+            owner_id, user_id, group_id, row.get("expiry_date")
+        )
+        if not notification_claim:
+            logger.info("Plan Group expiry notification already claimed/sent owner=%s user=%s group=%s", owner_id, user_id, group_id)
+            continue
         try:
             group = await get_plan_group(owner_id, group_id) or {}
             # Only show chats from this expired Plan Group that were actually removed.
@@ -458,7 +527,13 @@ async def check_expired_plan_group_subscriptions():
                     [InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{group_id}"), InlineKeyboardButton("👤 Profile", callback_data="c_profile")],
                 ]),
             )
-        except Exception:
+            await complete_plan_group_expiry_notification(
+                owner_id, user_id, group_id, row.get("expiry_date"), notification_claim
+            )
+        except Exception as exc:
+            await release_plan_group_expiry_notification(
+                owner_id, user_id, group_id, row.get("expiry_date"), notification_claim, str(exc)
+            )
             logger.exception("Plan Group expiry notification failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
         logger.info("Plan Group subscription expired owner=%s user=%s group=%s expiry=%s removed=%s", owner_id, user_id, group_id, row.get("expiry_date"), removed_names)
 
