@@ -115,6 +115,11 @@ async def revoke_channel_access(
     for channel in channels:
         chat_id = channel.get("chat_id")
         try:
+            # A successful ban+unban leaves the user with status `left`.
+            # Skip already-removed users so repeated expiry scans are idempotent.
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+            if getattr(member, "status", "") in {"left", "kicked"}:
+                continue
             await bot.ban_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
