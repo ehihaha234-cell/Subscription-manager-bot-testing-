@@ -170,14 +170,19 @@ async def send_expiry_notification(
     user_id: int,
     *,
     removed: int = 0,
+    removal_pending: bool = False,
 ):
     try:
         await bot.send_message(
             chat_id=user_id,
             text=(
                 "⏰ Your subscription has expired.\n\n"
-                "Access to premium channel/group has been removed.\n"
-                "Use 🔄 Renew Plan to continue."
+                + (
+                    "Your access removal is being retried because one or more channels could not be reached.\n"
+                    if removal_pending
+                    else "Access to premium channel/group has been removed.\n"
+                )
+                + "Use 🔄 Renew Plan to continue."
             ),
             reply_markup=InlineKeyboardMarkup([
                 [
