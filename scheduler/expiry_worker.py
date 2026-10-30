@@ -11,6 +11,7 @@ from database.subscriptions import (
     release_expiry_claim,
     release_expiry_notification,
 )
+from services.membership_access import kick_then_unban
 from services.channel_service import (
     revoke_channel_access,
     send_expiry_notification,
@@ -419,27 +420,16 @@ async def check_expired_plan_group_subscriptions():
             if await active_plan_group_subscriptions_for_chat(owner_id, user_id, chat_id):
                 continue
             try:
-                member = await bot.get_chat_member(chat_id, user_id)
-                member_status = getattr(member, "status", "")
-                # A stale `kicked` status means a previous attempt banned the
-                # subscriber but did not complete the unban. Clear it immediately.
-                if member_status == "kicked":
-                    await bot.unban_chat_member(
-                        chat_id=chat_id,
-                        user_id=user_id,
-                        only_if_banned=True,
-                    )
+                if await is_whitelisted(owner_id, chat_id, user_id):
+                    continue
+                removal_state = await kick_then_unban(bot, chat_id, user_id)
+                if removal_state == "removed":
+                    removed_names.append(channels.get(chat_id, str(chat_id)))
+                elif removal_state == "unbanned_existing":
                     logger.info(
-                        "Cleared stale Plan Group expiry ban owner=%s user=%s group=%s chat=%s",
+                        "Recovered previously banned Plan Group subscriber owner=%s user=%s group=%s chat=%s",
                         owner_id, user_id, group_id, chat_id,
                     )
-                    continue
-                # `left` means the user is already removed and is not banned.
-                if member_status in {"left", "creator", "administrator"} or await is_whitelisted(owner_id, chat_id, user_id):
-                    continue
-                await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-                await bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
-                removed_names.append(channels.get(chat_id, str(chat_id)))
             except Exception as exc:
                 failed.append((chat_id, str(exc)))
                 logger.warning("Plan Group expiry removal failed owner=%s user=%s group=%s chat=%s: %s", owner_id, user_id, group_id, chat_id, exc)
