@@ -161,6 +161,10 @@ class CloneExpiryMixin:
 
             for ch in await get_channels(owner):
                 try:
+                    # Do not re-ban users who are already outside the chat.
+                    member = await context.bot.get_chat_member(ch["chat_id"], uid)
+                    if getattr(member, "status", "") in {"left", "kicked"}:
+                        continue
                     await context.bot.ban_chat_member(
                         ch["chat_id"],
                         uid,
