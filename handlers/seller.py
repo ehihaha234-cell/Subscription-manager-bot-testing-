@@ -2,7 +2,7 @@ import asyncio
 import logging
 from html import escape
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update, LabeledPrice
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from datetime import datetime, timezone, timedelta
@@ -1426,6 +1426,32 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(text, reply_markup=markup)
         return
 
+    if action.startswith("seller_stars_"):
+        _, _, request_type, plan_id = action.split("_", 3)
+        cfg = await get_config()
+        plan = next((p for p in cfg.get("paid_plans", []) if str(p.get("plan_id")) == str(plan_id)), None)
+        gateway_cfg = await get_gateway_config("owner", 0, decrypt=True)
+        stars_price = int((plan or {}).get("stars_price", 0) or 0)
+        if not gateway_cfg.get("stars_enabled") or not plan or stars_price <= 0:
+            await q.answer("Telegram Stars is unavailable for this plan.", show_alert=True)
+            return
+        await create_plan_request(owner_id, plan_id, request_type)
+        try:
+            await context.bot.send_invoice(
+                chat_id=owner_id,
+                title=f"{plan.get('name', 'Seller')} Plan",
+                description=f"Purchase {plan.get('name', 'Seller')} seller subscription plan.",
+                payload=f"stars:{owner_id}:{owner_id}:{plan_id}",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(str(plan.get("name", "Seller Plan")), stars_price)],
+            )
+            await q.answer("Telegram Stars invoice sent.")
+        except Exception:
+            logger.exception("Could not send seller-plan Telegram Stars invoice seller_id=%s plan_id=%s", owner_id, plan_id)
+            await q.answer("Could not create Telegram Stars invoice. Please try again.", show_alert=True)
+        return
+
     if action.startswith("seller_buy_"):
         _, _, request_type, plan_id = action.split("_", 3)
         cfg = await get_config()
@@ -1445,6 +1471,8 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             enabled_gateways.remove(default_gateway)
             enabled_gateways.insert(0, default_gateway)
         manual_enabled = bool(gateway_cfg.get("manual_enabled", True))
+        stars_enabled = bool(gateway_cfg.get("stars_enabled", False))
+        stars_price = int(plan.get("stars_price", 0) or 0)
 
         rows = []
         text = ""
@@ -1468,6 +1496,12 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except GatewayError as exc:
                 text = f"❌ Gateway error: {exc}"
 
+        if stars_enabled and stars_price > 0:
+            rows.append([InlineKeyboardButton(
+                f"⭐ Pay {stars_price} Stars",
+                callback_data=f"seller_stars_{request_type}_{plan_id}",
+            )])
+
         if manual_enabled:
             manual_text = (
                 f"Plan: {plan.get('name')}\nAmount: ₹{plan.get('price',0):g}\n"
@@ -1478,7 +1512,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"{text}\n\n{manual_text}" if text else f"💳 Payment\n\n{manual_text}"
             rows.append([InlineKeyboardButton("📤 Upload Payment Screenshot", callback_data=f"seller_manual_{request_type}_{plan_id}")])
 
-        if not enabled_gateways and not manual_enabled:
+        if not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
             text = "⚠️ No payment method is currently available. Please contact support."
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="seller_upgrade_plan")])
         kb = InlineKeyboardMarkup(rows)
