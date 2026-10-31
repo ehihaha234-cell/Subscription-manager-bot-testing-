@@ -1514,9 +1514,9 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not enabled_gateways and not manual_enabled and stars_enabled and stars_price > 0:
             text = (
-                "⭐ Telegram Stars Payment\\n\\n"
-                f"Plan: {plan.get('name')}\\n"
-                f"Price: ⭐ {stars_price} Stars\\n\\n"
+                "⭐ Telegram Stars Payment\n\n"
+                f"Plan: {plan.get('name')}\n"
+                f"Price: ⭐ {stars_price} Stars\n\n"
                 "Tap the button below to pay securely with Telegram Stars."
             )
         elif not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
@@ -1526,7 +1526,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # defensive fallback for any future payment-method combination.
         if not str(text or "").strip():
             text = (
-                f"💳 Payment Options\\n\\nPlan: {plan.get('name')}\\n"
+                f"💳 Payment Options\n\nPlan: {plan.get('name')}\n"
                 "Choose an available payment method below."
             )
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="seller_upgrade_plan")])
