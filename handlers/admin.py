@@ -343,7 +343,7 @@ async def admin_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 plan_name=plan["name"],
                 duration_minutes=plan["duration_minutes"],
             )
-        await grant_channel_access(user_id)
+        await grant_channel_access(user_id, expiry_date=expiry)
         context.user_data.clear()
         user = await get_user(user_id)
         await show_user_details(query, user)
@@ -1315,7 +1315,7 @@ async def receive_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 action_text = "given"
 
-            await grant_channel_access(user_id)
+            await grant_channel_access(user_id, expiry_date=expiry)
             context.user_data.clear()
             await update.message.reply_text(
                 f"✅ Subscription {action_text} successfully!\n\n"

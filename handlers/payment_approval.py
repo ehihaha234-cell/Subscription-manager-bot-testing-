@@ -140,6 +140,7 @@ async def fulfill_approved_payment(
             user_id,
             payment_id=payment_id,
             already_delivered_chat_ids=claimed.get("fulfilled_channel_ids", []),
+            expiry_date=expiry,
         )
         if access_result["failed"]:
             raise RuntimeError(
