@@ -1512,8 +1512,23 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"{text}\n\n{manual_text}" if text else f"💳 Payment\n\n{manual_text}"
             rows.append([InlineKeyboardButton("📤 Upload Payment Screenshot", callback_data=f"seller_manual_{request_type}_{plan_id}")])
 
-        if not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
+        if not enabled_gateways and not manual_enabled and stars_enabled and stars_price > 0:
+            text = (
+                "⭐ Telegram Stars Payment\\n\\n"
+                f"Plan: {plan.get('name')}\\n"
+                f"Price: ⭐ {stars_price} Stars\\n\\n"
+                "Tap the button below to pay securely with Telegram Stars."
+            )
+        elif not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
             text = "⚠️ No payment method is currently available. Please contact support."
+
+        # Telegram rejects edit_message_text when the text is empty. Keep a
+        # defensive fallback for any future payment-method combination.
+        if not str(text or "").strip():
+            text = (
+                f"💳 Payment Options\\n\\nPlan: {plan.get('name')}\\n"
+                "Choose an available payment method below."
+            )
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="seller_upgrade_plan")])
         kb = InlineKeyboardMarkup(rows)
 
