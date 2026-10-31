@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
@@ -5,7 +6,8 @@ from config import BOT_TOKEN
 from database.channels import get_all_channels
 from database.seller_data import get_channels as get_seller_channels
 from database.payments import mark_payment_channel_delivered
-from database.subscription_guard import get_active_invite, save_invite, active_invites_for_user, deactivate_invite
+from database.subscription_guard import active_invites_for_user, deactivate_invite
+from database.subscription_invites import record_subscription_invite, revoke_subscription_invites
 from services.membership_access import kick_then_unban
 from logging_config import get_logger
 
@@ -20,6 +22,7 @@ async def grant_channel_access(
     payment_id=None,
     already_delivered_chat_ids=None,
     owner_id: int = 0,
+    expiry_date=None,
 ):
     """
     Grant access and return structured delivery results.
@@ -48,16 +51,42 @@ async def grant_channel_access(
             continue
 
         try:
-            invite_doc = await get_active_invite(owner_id, user_id, chat_id)
-            invite_link = (invite_doc or {}).get("invite_link")
-
-            if not invite_link:
-                invite = await bot.create_chat_invite_link(
-                    chat_id=chat_id,
-                    member_limit=1,
+            # Normal/main-bot payment access must expire at the exact
+            # subscription expiry, just like the clone-bot payment flow.
+            normalized_expiry = expiry_date
+            if isinstance(normalized_expiry, str):
+                normalized_expiry = datetime.fromisoformat(
+                    normalized_expiry.replace("Z", "+00:00")
                 )
-                invite_link = invite.invite_link
-                await save_invite(owner_id, user_id, chat_id, invite_link)
+            if isinstance(normalized_expiry, datetime):
+                if normalized_expiry.tzinfo is None:
+                    normalized_expiry = normalized_expiry.replace(tzinfo=timezone.utc)
+                else:
+                    normalized_expiry = normalized_expiry.astimezone(timezone.utc)
+            else:
+                normalized_expiry = None
+
+            if not normalized_expiry or normalized_expiry <= datetime.now(timezone.utc):
+                raise ValueError(
+                    "Subscription expiry is missing or already expired; "
+                    "refusing to create an unlimited invite link"
+                )
+
+            invite = await bot.create_chat_invite_link(
+                chat_id=chat_id,
+                member_limit=1,
+                expire_date=normalized_expiry,
+                name=f"Subscription access {user_id}",
+            )
+            invite_link = invite.invite_link
+            if not getattr(invite, "expire_date", None):
+                raise ValueError("Telegram did not return a time-limited invite")
+
+            saved = await record_subscription_invite(
+                owner_id, user_id, chat_id, invite_link, normalized_expiry
+            )
+            if saved is False:
+                raise ValueError("Could not save invite expiry record")
 
             await bot.send_message(
                 chat_id=user_id,
@@ -80,6 +109,19 @@ async def grant_channel_access(
                     )
 
         except Exception as exc:
+            if "invite" in locals() and invite is not None:
+                try:
+                    await bot.revoke_chat_invite_link(
+                        chat_id=chat_id, invite_link=invite.invite_link
+                    )
+                    await deactivate_invite(owner_id, invite.invite_link)
+                except Exception:
+                    logger.exception(
+                        "Could not revoke failed timed invite user_id=%s chat_id=%s",
+                        user_id, chat_id,
+                    )
+                finally:
+                    invite = None
             failed.append({
                 "chat_id": chat_id,
                 "error": str(exc),
@@ -135,7 +177,13 @@ async def revoke_channel_access(
                 exc,
             )
 
-    # Revoke recorded invite links only when the subscription-expiry worker
+    # Revoke timed lifecycle links created by the normal payment flow.
+    try:
+        await revoke_subscription_invites(bot, 0, user_id=user_id)
+    except Exception:
+        logger.exception("Timed subscription invite revocation failed user_id=%s", user_id)
+
+    # Revoke recorded legacy guard invite links only when the subscription-expiry worker
     # reaches this expiry flow, never when the user joins.
     for invite_doc in await active_invites_for_user(0, user_id):
         try:
