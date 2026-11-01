@@ -1514,9 +1514,9 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not enabled_gateways and not manual_enabled and stars_enabled and stars_price > 0:
             text = (
-                "⭐ Telegram Stars Payment\n\n"
-                f"Plan: {plan.get('name')}\n"
-                f"Price: ⭐ {stars_price} Stars\n\n"
+                "⭐ Telegram Stars Payment\\n\\n"
+                f"Plan: {plan.get('name')}\\n"
+                f"Price: ⭐ {stars_price} Stars\\n\\n"
                 "Tap the button below to pay securely with Telegram Stars."
             )
         elif not enabled_gateways and not manual_enabled and not (stars_enabled and stars_price > 0):
@@ -1526,7 +1526,7 @@ async def seller_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # defensive fallback for any future payment-method combination.
         if not str(text or "").strip():
             text = (
-                f"💳 Payment Options\n\nPlan: {plan.get('name')}\n"
+                f"💳 Payment Options\\n\\nPlan: {plan.get('name')}\\n"
                 "Choose an available payment method below."
             )
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="seller_upgrade_plan")])
@@ -2650,7 +2650,7 @@ def _decision_result_text(purchase: dict) -> str:
 
 def seller_handlers():
     return [
-        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
+        CallbackQueryHandler(seller_callback, pattern=r"^seller_(bots_list|select_\d+|connect|replace(?:_\d+)?|pause(?:_\d+)?|resume(?:_\d+)?|remove(?:_\d+)?|my_bot(?:_\d+)?|open_admin_\d+|help_\d+_.+|upgrade_plan(?:_home|_profile|_selected_\d+)?|current_plan|pending_plan|plan_decide_.*|plan_history|buy_.*|stars_.*|manual_.*|selected_.*|set_.*|channel_.*|business(?:_.*)?)$"),
         MessageHandler(filters.PHOTO | filters.VIDEO, receive_seller_qr),
         MessageHandler(filters.TEXT & ~filters.COMMAND, receive_seller_token),
     ]
