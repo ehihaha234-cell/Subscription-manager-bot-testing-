@@ -116,9 +116,24 @@ class CloneMediaHandlersMixin:
             if not plan: await update.effective_message.reply_text("Select a plan first"); return
             photo=update.effective_message.photo[-1]
             unique=getattr(photo,"file_unique_id","")
+
+            async def _close_child_payment_page():
+                chat_id = context.user_data.pop("child_payment_page_chat_id", None)
+                message_id = context.user_data.pop("child_payment_page_message_id", None)
+                if chat_id and message_id:
+                    try:
+                        await context.bot.delete_message(chat_id=int(chat_id), message_id=int(message_id))
+                    except TelegramError:
+                        logger.debug("Could not delete submitted child payment page chat_id=%s message_id=%s", chat_id, message_id)
+
             if not await reserve_payment_fingerprint("child",owner,unique,update.effective_user.id):
-                context.user_data.clear(); await update.effective_message.reply_text("⚠️ This payment screenshot was already submitted. Send a new genuine payment proof."); return
-            p=await create_payment(owner,update.effective_user.id,plan,photo.file_id); context.user_data.clear()
+                await _close_child_payment_page()
+                context.user_data.clear()
+                await update.effective_message.reply_text("⚠️ This payment screenshot was already submitted. Send a new genuine payment proof.")
+                return
+            p=await create_payment(owner,update.effective_user.id,plan,photo.file_id)
+            await _close_child_payment_page()
+            context.user_data.clear()
             await audit("child_payment_submitted",update.effective_user.id,owner,{"payment_id":p.get("payment_id")})
             kb=InlineKeyboardMarkup([
                 [
