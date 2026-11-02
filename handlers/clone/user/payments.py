@@ -252,13 +252,22 @@ async def handle(self, update, context, q, owner, action):
             except TelegramError:
                 pass
             try:
-                await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+                payment_page_message = await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+                if manual_enabled:
+                    context.user_data['child_payment_page_chat_id'] = int(payment_page_message.chat_id)
+                    context.user_data['child_payment_page_message_id'] = int(payment_page_message.message_id)
             except TelegramError:
                 # Keep the callback usable even if an old/invalid QR file_id exists.
                 logger.exception('Stored manual payment QR could not be sent; falling back to text')
-                await self.safe_query_message(q, text, kb)
+                payment_page_message = await self.safe_query_message(q, text, kb)
+                if manual_enabled and payment_page_message is not None:
+                    context.user_data['child_payment_page_chat_id'] = int(payment_page_message.chat_id)
+                    context.user_data['child_payment_page_message_id'] = int(payment_page_message.message_id)
         else:
             payment_page_message = await self.safe_query_message(q, text, kb)
+            if manual_enabled and payment_page_message is not None:
+                context.user_data['child_payment_page_chat_id'] = int(payment_page_message.chat_id)
+                context.user_data['child_payment_page_message_id'] = int(payment_page_message.message_id)
             # Persist the exact message containing the Payment Link so the paid
             # webhook can replace this same clone-bot message with the limit
             # notice when capacity is full. Prefer the message returned by the
