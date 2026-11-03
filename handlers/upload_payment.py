@@ -40,7 +40,17 @@ async def handle_payment_screenshot(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    if not update.message or not update.message.photo:
+    message = update.message
+    if not message:
+        return
+
+    # Accept Telegram photos and image files sent as documents.
+    photo_file_id = None
+    if message.photo:
+        photo_file_id = message.photo[-1].file_id
+    elif message.document and (message.document.mime_type or "").lower().startswith("image/"):
+        photo_file_id = message.document.file_id
+    else:
         return
 
     if await is_admin(update.effective_user.id):
@@ -67,8 +77,6 @@ async def handle_payment_screenshot(
         context.application.bot_data[lock_key] = lock
 
     async with lock:
-        photo = update.message.photo[-1].file_id
-
         duration_minutes = int(plan.get("duration_minutes", 1440))
         duration_text = plan.get("duration_text", "1d")
         plan_name = plan.get("name", "Premium").replace("_", "-")
@@ -78,7 +86,7 @@ async def handle_payment_screenshot(
                 user_id=user.id,
                 plan=plan_name,
                 amount=plan["price"],
-                screenshot_file_id=photo,
+                screenshot_file_id=photo_file_id,
                 duration_minutes=duration_minutes,
                 duration_text=duration_text,
             )
@@ -118,14 +126,23 @@ async def handle_payment_screenshot(
             f"🧾 Payment ID: {payment_id}"
         )
 
-        admins = await get_all_admins()
+        try:
+            admins = await get_all_admins()
+        except Exception:
+            logger.exception("Could not load admins for payment_id=%s", payment_id)
+            await update.message.reply_text(
+                "Your screenshot was saved, but admin notification is delayed. "
+                "Please do not submit it again; your request is pending."
+            )
+            return
+
         notified_admins = 0
 
         for admin in admins:
             try:
-                await context.bot.send_photo(
+                await context.bot.send_document(
                     chat_id=admin["admin_id"],
-                    photo=photo,
+                    document=photo_file_id,
                     caption=caption,
                     reply_markup=keyboard,
                 )
@@ -167,7 +184,7 @@ def payment_upload_handlers():
             pattern=r"^upload_payment$",
         ),
         MessageHandler(
-            filters.PHOTO,
+            filters.PHOTO | filters.Document.IMAGE,
             handle_payment_screenshot,
         ),
     ]
