@@ -580,8 +580,15 @@ class BusinessAutomationRuntime:
             return False
 
     async def _handle_incoming(self, owner_id: int, account_user_id: int, client: TelegramClient, event) -> None:
+        peer_for_log = getattr(event, "sender_id", None)
+        logger.info(
+            "Business Automation incoming event owner=%s account=%s peer=%s private=%s outgoing=%s message_id=%s",
+            owner_id, account_user_id, peer_for_log, getattr(event, "is_private", None),
+            getattr(event, "out", None), getattr(event, "id", None),
+        )
         try:
             if not event.is_private or event.out:
+                logger.debug("Business Automation event ignored: not private or outgoing owner=%s peer=%s", owner_id, peer_for_log)
                 return
             sender = await event.get_sender()
             peer_id = int(event.sender_id or 0)
@@ -603,8 +610,10 @@ class BusinessAutomationRuntime:
             welcome = await get_business_welcome(owner_id)
             auto_replies = await list_business_auto_replies(owner_id)
             if not settings.get("business_automation_enabled"):
+                logger.info("Business Automation skipped: disabled owner=%s peer=%s", owner_id, peer_id)
                 return
             if not self._inside_working_hours(settings):
+                logger.info("Business Automation skipped: outside working hours owner=%s peer=%s", owner_id, peer_id)
                 return
 
             first_contact = await claim_business_welcome(
@@ -621,6 +630,10 @@ class BusinessAutomationRuntime:
                 await asyncio.sleep(delay)
 
             welcome_sent = False
+            logger.info(
+                "Business Automation evaluated owner=%s peer=%s first_contact=%s welcome_enabled=%s auto_reply_count=%s",
+                owner_id, peer_id, first_contact, welcome.get("enabled", True), len(auto_replies),
+            )
             if welcome.get("enabled", True) and first_contact:
                 text = await append_seller_branding(str(welcome.get("text") or "").strip(), owner_id)
                 media_file_id = str(welcome.get("media_file_id") or "")
@@ -642,6 +655,9 @@ class BusinessAutomationRuntime:
                     )
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
+                    logger.info("Business Automation welcome sent owner=%s peer=%s message_ids=%s", owner_id, peer_id, sent_message_ids)
+                else:
+                    logger.info("Business Automation welcome configured but empty owner=%s peer=%s", owner_id, peer_id)
 
             # Keyword replies run after the first welcome. Exact matching avoids
             # accidental replies when a keyword appears inside an unrelated sentence.
@@ -649,6 +665,7 @@ class BusinessAutomationRuntime:
                 incoming_text = " ".join(str(getattr(event, "raw_text", "") or "").strip().lower().split())
                 match = next((x for x in auto_replies if x.get("enabled", True) and _keyword_in_message(str(x.get("keyword") or ""), incoming_text)), None)
                 if match:
+                    logger.info("Business Automation auto-reply matched owner=%s peer=%s keyword=%r", owner_id, peer_id, match.get("keyword"))
                     text = str(match.get("text") or "").strip()
                     media_file_id = str(match.get("media_file_id") or "")
                     media_items = list(match.get("media") or [])
@@ -663,6 +680,11 @@ class BusinessAutomationRuntime:
                             user=sender,
                         )
                         await increment_business_account_stat(owner_id, account_user_id, "auto_replies_sent")
+                        logger.info("Business Automation auto-reply sent owner=%s peer=%s", owner_id, peer_id)
+                    else:
+                        logger.warning("Business Automation matched auto-reply has no text/media owner=%s peer=%s keyword=%r", owner_id, peer_id, match.get("keyword"))
+                else:
+                    logger.info("Business Automation no auto-reply match owner=%s peer=%s text_length=%s", owner_id, peer_id, len(incoming_text))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -691,6 +713,7 @@ class BusinessAutomationRuntime:
                 None,
             )
             if not item:
+                logger.debug("Business Automation template shortcut unmatched owner=%s shortcut=%r", owner_id, raw)
                 return
             peer_id = int(event.chat_id or 0)
             if not peer_id:
@@ -711,6 +734,7 @@ class BusinessAutomationRuntime:
                 user=recipient,
             )
             await increment_business_account_stat(owner_id, account_user_id, "templates_used")
+            logger.info("Business Automation template sent owner=%s peer=%s shortcut=%r", owner_id, peer_id, raw)
         except asyncio.CancelledError:
             raise
         except Exception:
