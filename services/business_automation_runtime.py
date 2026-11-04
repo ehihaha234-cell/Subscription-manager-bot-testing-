@@ -596,11 +596,6 @@ class BusinessAutomationRuntime:
                 owner_id, account_user_id, peer_id, client, current_message_id
             )
 
-            await record_business_contact(
-                owner_id, peer_id, mode="normal",
-                account_user_id=account_user_id, chat_id=peer_id,
-            )
-
             settings = await get_seller_settings(owner_id)
             welcome = await get_business_welcome(owner_id)
             auto_replies = await list_business_auto_replies(owner_id)
@@ -619,6 +614,14 @@ class BusinessAutomationRuntime:
                 welcome_once=True,
                 force_new_conversation=history_was_cleared,
                 current_message_id=current_message_id,
+            )
+
+            # Claim/create the welcome conversation record before writing the
+            # generic contact record. The latter used to create the document first,
+            # causing the atomic first-contact claim to return False every time.
+            await record_business_contact(
+                owner_id, peer_id, mode="normal",
+                account_user_id=account_user_id, chat_id=peer_id,
             )
 
             delay = max(0, min(int(settings.get("business_reply_delay_seconds", 0) or 0), 300))
