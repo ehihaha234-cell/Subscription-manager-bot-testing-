@@ -78,6 +78,7 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
         "business_automation_enabled":False,
         "business_welcome_enabled":True,
         "business_welcome_once":True,
+        "business_welcome_reset_seconds":0,
         "business_reply_delay_seconds":0,
         "business_welcome_message":f"👋 Welcome to {bot_name}!",
         "business_welcome_media_type":"",
@@ -110,7 +111,7 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
 
 async def get_seller_settings(owner_id:int): return await c(SETTINGS).find_one({"owner_id":owner_id}) or {}
 async def set_seller_setting(owner_id:int,key:str,value):
-    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_auto_reply_message","business_auto_reply_media_type","business_auto_reply_media_file_id","business_auto_reply_buttons","business_templates_enabled","business_reply_templates","business_ignore_outgoing","business_anti_loop","business_flood_protection","business_working_hours_enabled","business_working_hours_start","business_working_hours_end","business_working_hours_timezone","business_action_button_mode"}
+    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_welcome_reset_seconds","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_auto_reply_message","business_auto_reply_media_type","business_auto_reply_media_file_id","business_auto_reply_buttons","business_templates_enabled","business_reply_templates","business_ignore_outgoing","business_anti_loop","business_flood_protection","business_working_hours_enabled","business_working_hours_start","business_working_hours_end","business_working_hours_timezone","business_action_button_mode"}
     if key not in allowed: raise ValueError("Unsupported setting")
     now=datetime.now(timezone.utc)
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
@@ -313,40 +314,74 @@ async def claim_business_welcome(
     current_message_id:int=0,
     reset_seconds:int=0,
 ):
-    """Return True when this peer is due to receive a welcome message.
+    """Claim a welcome only when one has not been delivered, or its reset interval elapsed.
 
-    The interval is measured from the last *successfully sent* welcome, not
-    from the first contact record. This also repairs old contact records that
-    were created before welcome delivery was tracked.
+    Existing contact records without ``welcome_sent_at`` are treated as never
+    welcomed. This repairs legacy records created before welcome delivery was
+    tracked and allows retries after a failed send.
     """
     now=datetime.now(timezone.utc)
-    query={"owner_id":int(owner_id),"account_user_id":int(account_user_id),"peer_user_id":int(peer_user_id)}
+    query={
+        "owner_id":int(owner_id),
+        "account_user_id":int(account_user_id),
+        "peer_user_id":int(peer_user_id),
+    }
+
     if force_new_conversation:
         await c(BUSINESS_CONTACTS).delete_one(query)
-    existing=await c(BUSINESS_CONTACTS).find_one(query, {"welcome_sent_at":1})
-    last_sent=(existing or {}).get("welcome_sent_at")
-    interval=max(0, int(reset_seconds or 0))
-    due = last_sent is None or (interval > 0 and (now-last_sent).total_seconds() >= interval)
+
+    if not welcome_once:
+        await c(BUSINESS_CONTACTS).update_one(
+            query,
+            {
+                "$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},
+                "$setOnInsert":{"first_message_at":now,"message_count":0},
+                "$inc":{"message_count":1},
+            },
+            upsert=True,
+        )
+        return True
+
+    existing = await c(BUSINESS_CONTACTS).find_one(query, {"_id": 0, "welcome_sent_at": 1})
+    if not existing:
+        try:
+            await c(BUSINESS_CONTACTS).insert_one({
+                **query,
+                "first_message_at":now,
+                "last_message_at":now,
+                "last_message_id":int(current_message_id or 0),
+                "message_count":1,
+            })
+            await increment_business_account_stat(owner_id,account_user_id,"conversations")
+            return True
+        except Exception:
+            # A simultaneous first message may have inserted the record.
+            existing = await c(BUSINESS_CONTACTS).find_one(query, {"_id": 0, "welcome_sent_at": 1})
+
+    last_sent = (existing or {}).get("welcome_sent_at")
+    eligible = last_sent is None
+    if last_sent is not None and int(reset_seconds or 0) > 0:
+        try:
+            eligible = last_sent <= now - timedelta(seconds=max(0, int(reset_seconds)))
+        except Exception:
+            eligible = False
+
+    if eligible:
+        claim_filter = {**query, "welcome_sent_at": last_sent} if last_sent is not None else {
+            **query, "$or": [{"welcome_sent_at": {"$exists": False}}, {"welcome_sent_at": None}]
+        }
+        result = await c(BUSINESS_CONTACTS).update_one(
+            claim_filter,
+            {"$set":{"welcome_claimed_at":now,"last_message_at":now,"last_message_id":int(current_message_id or 0)}, "$inc":{"message_count":1}},
+        )
+        if result.modified_count:
+            return True
+
     await c(BUSINESS_CONTACTS).update_one(
         query,
-        {
-            "$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},
-            "$setOnInsert":{"first_message_at":now,"message_count":0},
-            "$inc":{"message_count":1},
-        },
-        upsert=True,
+        {"$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)}, "$inc":{"message_count":1}},
     )
-    return bool(due)
-
-
-async def mark_business_welcome_sent(owner_id:int, account_user_id:int, peer_user_id:int):
-    """Persist the timestamp only after Telegram accepted the welcome send."""
-    now=datetime.now(timezone.utc)
-    return await c(BUSINESS_CONTACTS).update_one(
-        {"owner_id":int(owner_id),"account_user_id":int(account_user_id),"peer_user_id":int(peer_user_id)},
-        {"$set":{"welcome_sent_at":now}},
-        upsert=True,
-    )
+    return False
 
 
 async def set_business_welcome_message_ids(
