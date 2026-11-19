@@ -41,7 +41,6 @@ from database.seller_data import (
     get_business_contact,
     reset_business_welcome,
     set_business_welcome_message_ids,
-    mark_business_welcome_sent,
 )
 from utils.crypto import decrypt_secret
 
@@ -651,7 +650,6 @@ class BusinessAutomationRuntime:
                     await set_business_welcome_message_ids(
                         owner_id, account_user_id, peer_id, sent_message_ids
                     )
-                    await mark_business_welcome_sent(owner_id, account_user_id, peer_id)
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
                     logger.info("Business Automation welcome sent owner=%s account=%s peer=%s message_ids=%s", owner_id, account_user_id, peer_id, sent_message_ids)
