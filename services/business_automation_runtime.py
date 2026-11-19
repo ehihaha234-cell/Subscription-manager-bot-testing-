@@ -33,7 +33,6 @@ from database.business_automation import (
 )
 from database.seller_data import (
     claim_business_welcome,
-    release_business_welcome_claim,
     active_subscriptions,
     get_user as get_seller_user,
     get_business_accounts,
@@ -42,6 +41,7 @@ from database.seller_data import (
     get_business_contact,
     reset_business_welcome,
     set_business_welcome_message_ids,
+    mark_business_welcome_sent,
 )
 from utils.crypto import decrypt_secret
 
@@ -612,10 +612,10 @@ class BusinessAutomationRuntime:
                 owner_id,
                 account_user_id,
                 peer_id,
-                welcome_once=bool(settings.get("business_welcome_once", True)),
+                welcome_once=True,
                 force_new_conversation=history_was_cleared,
                 current_message_id=current_message_id,
-                reset_after_seconds=int(settings.get("business_welcome_reset_seconds", 0) or 0),
+                reset_seconds=int(settings.get("business_welcome_reset_seconds", 0) or 0),
             )
 
             # Claim/create the welcome conversation record before writing the
@@ -631,31 +631,27 @@ class BusinessAutomationRuntime:
                 await asyncio.sleep(delay)
 
             welcome_sent = False
-            logger.info("Business Automation welcome decision owner=%s account=%s peer=%s send_due=%s reset_after_seconds=%s enabled=%s", owner_id, account_user_id, peer_id, first_contact, int(settings.get("business_welcome_reset_seconds", 0) or 0), welcome.get("enabled", True))
+            logger.info("Business Automation welcome decision owner=%s account=%s peer=%s first_contact=%s enabled=%s", owner_id, account_user_id, peer_id, first_contact, welcome.get("enabled", True))
             if welcome.get("enabled", True) and first_contact:
                 text = await append_seller_branding(str(welcome.get("text") or "").strip(), owner_id)
                 media_file_id = str(welcome.get("media_file_id") or "")
                 media_items = list(welcome.get("media") or [])
                 if text or media_file_id or media_items:
-                    try:
-                        sent_message_ids = await self._send_configured_message(
-                            client,
-                            peer_id,
-                            owner_id,
-                            text=text,
-                            media_type=str(welcome.get("media_type") or ""),
-                            media_file_id=media_file_id,
-                            button_rows=welcome.get("buttons") or [],
-                            media_items=welcome.get("media") or [],
-                            user=sender,
-                        )
-                    except Exception:
-                        await release_business_welcome_claim(owner_id, account_user_id, peer_id)
-                        logger.exception("Business Automation welcome delivery failed; claim released owner=%s account=%s peer=%s", owner_id, account_user_id, peer_id)
-                        raise
+                    sent_message_ids = await self._send_configured_message(
+                        client,
+                        peer_id,
+                        owner_id,
+                        text=text,
+                        media_type=str(welcome.get("media_type") or ""),
+                        media_file_id=media_file_id,
+                        button_rows=welcome.get("buttons") or [],
+                        media_items=welcome.get("media") or [],
+                        user=sender,
+                    )
                     await set_business_welcome_message_ids(
                         owner_id, account_user_id, peer_id, sent_message_ids
                     )
+                    await mark_business_welcome_sent(owner_id, account_user_id, peer_id)
                     await increment_business_account_stat(owner_id, account_user_id, "welcome_sent")
                     welcome_sent = True
                     logger.info("Business Automation welcome sent owner=%s account=%s peer=%s message_ids=%s", owner_id, account_user_id, peer_id, sent_message_ids)
