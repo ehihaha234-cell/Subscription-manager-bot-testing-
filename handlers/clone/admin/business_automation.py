@@ -899,7 +899,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
     if action == "ba_settings": await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
     if action == "ba_welcome_reset":
         await q.edit_message_text(
-            "🔄 Welcome Message Reset Time\\n\\nFirst message always receives the welcome. Choose when the same user should receive it again:",
+            "🔄 Welcome Message Reset Time\n\nFirst message always receives the welcome. Choose when the same user should receive it again:",
             reply_markup=_kb([
                 [InlineKeyboardButton("Only first time", callback_data="ba_welcome_reset_0")],
                 [InlineKeyboardButton("1 Hour", callback_data="ba_welcome_reset_3600"), InlineKeyboardButton("6 Hours", callback_data="ba_welcome_reset_21600")],
@@ -914,7 +914,7 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
         await set_seller_setting(owner, "business_welcome_reset_seconds", seconds)
         s = await get_seller_settings(owner)
         await q.edit_message_text(
-            "✅ Welcome reset time updated.\\n\\n" + _settings_text(s),
+            "✅ Welcome reset time updated.\n\n" + _settings_text(s),
             reply_markup=_settings_keyboard(s),
         )
         return True
