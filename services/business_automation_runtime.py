@@ -33,6 +33,7 @@ from database.business_automation import (
 )
 from database.seller_data import (
     claim_business_welcome,
+    release_business_welcome_claim,
     active_subscriptions,
     get_user as get_seller_user,
     get_business_accounts,
@@ -636,17 +637,22 @@ class BusinessAutomationRuntime:
                 media_file_id = str(welcome.get("media_file_id") or "")
                 media_items = list(welcome.get("media") or [])
                 if text or media_file_id or media_items:
-                    sent_message_ids = await self._send_configured_message(
-                        client,
-                        peer_id,
-                        owner_id,
-                        text=text,
-                        media_type=str(welcome.get("media_type") or ""),
-                        media_file_id=media_file_id,
-                        button_rows=welcome.get("buttons") or [],
-                        media_items=welcome.get("media") or [],
-                        user=sender,
-                    )
+                    try:
+                        sent_message_ids = await self._send_configured_message(
+                            client,
+                            peer_id,
+                            owner_id,
+                            text=text,
+                            media_type=str(welcome.get("media_type") or ""),
+                            media_file_id=media_file_id,
+                            button_rows=welcome.get("buttons") or [],
+                            media_items=welcome.get("media") or [],
+                            user=sender,
+                        )
+                    except Exception:
+                        await release_business_welcome_claim(owner_id, account_user_id, peer_id)
+                        logger.exception("Business Automation welcome delivery failed; claim released owner=%s account=%s peer=%s", owner_id, account_user_id, peer_id)
+                        raise
                     await set_business_welcome_message_ids(
                         owner_id, account_user_id, peer_id, sent_message_ids
                     )
