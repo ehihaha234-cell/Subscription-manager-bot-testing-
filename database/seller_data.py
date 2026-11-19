@@ -78,6 +78,7 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
         "business_automation_enabled":False,
         "business_welcome_enabled":True,
         "business_welcome_once":True,
+        "business_welcome_reset_seconds":0,
         "business_reply_delay_seconds":0,
         "business_welcome_message":f"👋 Welcome to {bot_name}!",
         "business_welcome_media_type":"",
@@ -110,7 +111,7 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
 
 async def get_seller_settings(owner_id:int): return await c(SETTINGS).find_one({"owner_id":owner_id}) or {}
 async def set_seller_setting(owner_id:int,key:str,value):
-    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_auto_reply_message","business_auto_reply_media_type","business_auto_reply_media_file_id","business_auto_reply_buttons","business_templates_enabled","business_reply_templates","business_ignore_outgoing","business_anti_loop","business_flood_protection","business_working_hours_enabled","business_working_hours_start","business_working_hours_end","business_working_hours_timezone","business_action_button_mode"}
+    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_welcome_reset_seconds","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_auto_reply_message","business_auto_reply_media_type","business_auto_reply_media_file_id","business_auto_reply_buttons","business_templates_enabled","business_reply_templates","business_ignore_outgoing","business_anti_loop","business_flood_protection","business_working_hours_enabled","business_working_hours_start","business_working_hours_end","business_working_hours_timezone","business_action_button_mode"}
     if key not in allowed: raise ValueError("Unsupported setting")
     now=datetime.now(timezone.utc)
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
@@ -394,6 +395,14 @@ async def claim_business_welcome(
         {"$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},"$inc":{"message_count":1}},
     )
     return False
+
+
+async def release_business_welcome_claim(owner_id:int, account_user_id:int, peer_user_id:int):
+    """Allow retry when Telegram rejected or failed to send the welcome."""
+    return await c(BUSINESS_CONTACTS).update_one(
+        {"owner_id":int(owner_id), "account_user_id":int(account_user_id), "peer_user_id":int(peer_user_id)},
+        {"$unset":{"last_welcome_sent_at":""}},
+    )
 
 
 async def set_business_welcome_message_ids(
