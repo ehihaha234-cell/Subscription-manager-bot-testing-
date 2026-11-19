@@ -611,9 +611,10 @@ class BusinessAutomationRuntime:
                 owner_id,
                 account_user_id,
                 peer_id,
-                welcome_once=True,
+                welcome_once=bool(settings.get("business_welcome_once", True)),
                 force_new_conversation=history_was_cleared,
                 current_message_id=current_message_id,
+                reset_after_seconds=int(settings.get("business_welcome_reset_seconds", 0) or 0),
             )
 
             # Claim/create the welcome conversation record before writing the
@@ -629,7 +630,7 @@ class BusinessAutomationRuntime:
                 await asyncio.sleep(delay)
 
             welcome_sent = False
-            logger.info("Business Automation welcome decision owner=%s account=%s peer=%s first_contact=%s enabled=%s", owner_id, account_user_id, peer_id, first_contact, welcome.get("enabled", True))
+            logger.info("Business Automation welcome decision owner=%s account=%s peer=%s send_due=%s reset_after_seconds=%s enabled=%s", owner_id, account_user_id, peer_id, first_contact, int(settings.get("business_welcome_reset_seconds", 0) or 0), welcome.get("enabled", True))
             if welcome.get("enabled", True) and first_contact:
                 text = await append_seller_branding(str(welcome.get("text") or "").strip(), owner_id)
                 media_file_id = str(welcome.get("media_file_id") or "")
