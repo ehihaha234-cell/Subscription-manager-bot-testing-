@@ -78,7 +78,6 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
         "business_automation_enabled":False,
         "business_welcome_enabled":True,
         "business_welcome_once":True,
-        "business_welcome_reset_seconds":0,
         "business_reply_delay_seconds":0,
         "business_welcome_message":f"👋 Welcome to {bot_name}!",
         "business_welcome_media_type":"",
@@ -111,7 +110,7 @@ async def ensure_seller_defaults(owner_id:int, bot_name="Subscription Bot"):
 
 async def get_seller_settings(owner_id:int): return await c(SETTINGS).find_one({"owner_id":owner_id}) or {}
 async def set_seller_setting(owner_id:int,key:str,value):
-    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_welcome_reset_seconds","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_auto_reply_message","business_auto_reply_media_type","business_auto_reply_media_file_id","business_auto_reply_buttons","business_templates_enabled","business_reply_templates","business_ignore_outgoing","business_anti_loop","business_flood_protection","business_working_hours_enabled","business_working_hours_start","business_working_hours_end","business_working_hours_timezone","business_action_button_mode"}
+    allowed={"bot_name","welcome_message","support_username","currency","timezone","reminder_days","upi_id","upi_name","upi_qr_file_id","welcome_media_type","welcome_media_file_id","welcome_buttons","referral_reward_days","referral_unlock_enabled","referral_unlock_required","referral_unlock_duration_days","referral_unlock_target_chat_id","referral_unlock_target_title","referral_unlock_count_mode","business_automation_enabled","business_welcome_enabled","business_welcome_once","business_reply_delay_seconds","business_welcome_message","business_welcome_media_type","business_welcome_media_file_id","business_welcome_buttons","business_auto_reply_enabled","business_auto_reply_message","business_auto_reply_media_type","business_auto_reply_media_file_id","business_auto_reply_buttons","business_templates_enabled","business_reply_templates","business_ignore_outgoing","business_anti_loop","business_flood_protection","business_working_hours_enabled","business_working_hours_start","business_working_hours_end","business_working_hours_timezone","business_action_button_mode"}
     if key not in allowed: raise ValueError("Unsupported setting")
     now=datetime.now(timezone.utc)
     await c(SETTINGS).update_one({"owner_id":owner_id},{"$set":{key:value,"updated_at":now},"$setOnInsert":{"owner_id":owner_id,"created_at":now}},upsert=True)
@@ -312,96 +311,41 @@ async def claim_business_welcome(
     welcome_once:bool=True,
     force_new_conversation:bool=False,
     current_message_id:int=0,
-    reset_after_seconds:int=0,
+    reset_seconds:int=0,
 ):
-    """Atomically claim a welcome on first contact and after configured interval."""
-    from datetime import timedelta
+    """Return True when this peer is due to receive a welcome message.
+
+    The interval is measured from the last *successfully sent* welcome, not
+    from the first contact record. This also repairs old contact records that
+    were created before welcome delivery was tracked.
+    """
     now=datetime.now(timezone.utc)
-    query={
-        "owner_id":int(owner_id),
-        "account_user_id":int(account_user_id),
-        "peer_user_id":int(peer_user_id),
-    }
-    reset_after_seconds=max(0, int(reset_after_seconds or 0))
+    query={"owner_id":int(owner_id),"account_user_id":int(account_user_id),"peer_user_id":int(peer_user_id)}
     if force_new_conversation:
-        await c(BUSINESS_CONTACTS).update_one(
-            query,
-            {"$unset":{"last_welcome_sent_at":""}},
-        )
-
-    if not welcome_once:
-        await c(BUSINESS_CONTACTS).update_one(
-            query,
-            {"$setOnInsert":{**query, "first_message_at":now},
-             "$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},
-             "$inc":{"message_count":1}},
-            upsert=True,
-        )
-        return True
-
-    existing=await c(BUSINESS_CONTACTS).find_one(query)
-    if not existing:
-        try:
-            result=await c(BUSINESS_CONTACTS).update_one(
-                query,
-                {"$setOnInsert":{
-                    **query,
-                    "first_message_at":now,
-                    "last_message_at":now,
-                    "last_message_id":int(current_message_id or 0),
-                    "message_count":1,
-                    "last_welcome_sent_at":now,
-                }},
-                upsert=True,
-            )
-            if result.upserted_id is not None:
-                await increment_business_account_stat(owner_id,account_user_id,"conversations")
-                return True
-        except Exception:
-            pass
-        existing=await c(BUSINESS_CONTACTS).find_one(query) or {}
-
-    last_sent=existing.get("last_welcome_sent_at")
-    if last_sent is None:
-        # Existing contacts created by older versions get their first welcome
-        # after this upgrade rather than being permanently suppressed.
-        allowed=True
-    elif reset_after_seconds > 0:
-        if getattr(last_sent,"tzinfo",None) is None:
-            last_sent=last_sent.replace(tzinfo=timezone.utc)
-        allowed=(now-last_sent).total_seconds() >= reset_after_seconds
-    else:
-        allowed=False
-
-    if allowed:
-        filter_query=dict(query)
-        if last_sent is None:
-            filter_query["last_welcome_sent_at"]={"$exists":False}
-        else:
-            filter_query["last_welcome_sent_at"]=existing.get("last_welcome_sent_at")
-        result=await c(BUSINESS_CONTACTS).update_one(
-            filter_query,
-            {"$set":{
-                "last_welcome_sent_at":now,
-                "last_message_at":now,
-                "last_message_id":int(current_message_id or 0),
-            },"$inc":{"message_count":1}},
-        )
-        if result.modified_count:
-            return True
-
+        await c(BUSINESS_CONTACTS).delete_one(query)
+    existing=await c(BUSINESS_CONTACTS).find_one(query, {"welcome_sent_at":1})
+    last_sent=(existing or {}).get("welcome_sent_at")
+    interval=max(0, int(reset_seconds or 0))
+    due = last_sent is None or (interval > 0 and (now-last_sent).total_seconds() >= interval)
     await c(BUSINESS_CONTACTS).update_one(
         query,
-        {"$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},"$inc":{"message_count":1}},
+        {
+            "$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},
+            "$setOnInsert":{"first_message_at":now,"message_count":0},
+            "$inc":{"message_count":1},
+        },
+        upsert=True,
     )
-    return False
+    return bool(due)
 
 
-async def release_business_welcome_claim(owner_id:int, account_user_id:int, peer_user_id:int):
-    """Allow retry when Telegram rejected or failed to send the welcome."""
+async def mark_business_welcome_sent(owner_id:int, account_user_id:int, peer_user_id:int):
+    """Persist the timestamp only after Telegram accepted the welcome send."""
+    now=datetime.now(timezone.utc)
     return await c(BUSINESS_CONTACTS).update_one(
-        {"owner_id":int(owner_id), "account_user_id":int(account_user_id), "peer_user_id":int(peer_user_id)},
-        {"$unset":{"last_welcome_sent_at":""}},
+        {"owner_id":int(owner_id),"account_user_id":int(account_user_id),"peer_user_id":int(peer_user_id)},
+        {"$set":{"welcome_sent_at":now}},
+        upsert=True,
     )
 
 
