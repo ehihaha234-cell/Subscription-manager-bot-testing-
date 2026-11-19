@@ -311,55 +311,83 @@ async def claim_business_welcome(
     welcome_once:bool=True,
     force_new_conversation:bool=False,
     current_message_id:int=0,
+    reset_after_seconds:int=0,
 ):
-    """Atomically claim a welcome for one private peer.
-
-    ``force_new_conversation`` is used when Telegram history/deletion signals show
-    that the previous chat was cleared.  The record is reset atomically before
-    claiming, so a stale contact document can never suppress the next welcome.
-    """
+    """Atomically claim a welcome on first contact and after configured interval."""
+    from datetime import timedelta
     now=datetime.now(timezone.utc)
     query={
         "owner_id":int(owner_id),
         "account_user_id":int(account_user_id),
         "peer_user_id":int(peer_user_id),
     }
-
+    reset_after_seconds=max(0, int(reset_after_seconds or 0))
     if force_new_conversation:
-        await c(BUSINESS_CONTACTS).delete_one(query)
+        await c(BUSINESS_CONTACTS).update_one(
+            query,
+            {"$unset":{"last_welcome_sent_at":""}},
+        )
 
     if not welcome_once:
         await c(BUSINESS_CONTACTS).update_one(
             query,
-            {
-                "$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},
-                "$setOnInsert":{"first_message_at":now,"message_count":0},
-                "$inc":{"message_count":1},
-            },
+            {"$setOnInsert":{**query, "first_message_at":now},
+             "$set":{"last_message_at":now,"last_message_id":int(current_message_id or 0)},
+             "$inc":{"message_count":1}},
             upsert=True,
         )
         return True
 
-    try:
-        result=await c(BUSINESS_CONTACTS).update_one(
-            query,
-            {
-                "$setOnInsert":{
+    existing=await c(BUSINESS_CONTACTS).find_one(query)
+    if not existing:
+        try:
+            result=await c(BUSINESS_CONTACTS).update_one(
+                query,
+                {"$setOnInsert":{
                     **query,
                     "first_message_at":now,
                     "last_message_at":now,
                     "last_message_id":int(current_message_id or 0),
                     "message_count":1,
-                }
-            },
-            upsert=True,
+                    "last_welcome_sent_at":now,
+                }},
+                upsert=True,
+            )
+            if result.upserted_id is not None:
+                await increment_business_account_stat(owner_id,account_user_id,"conversations")
+                return True
+        except Exception:
+            pass
+        existing=await c(BUSINESS_CONTACTS).find_one(query) or {}
+
+    last_sent=existing.get("last_welcome_sent_at")
+    if last_sent is None:
+        # Existing contacts created by older versions get their first welcome
+        # after this upgrade rather than being permanently suppressed.
+        allowed=True
+    elif reset_after_seconds > 0:
+        if getattr(last_sent,"tzinfo",None) is None:
+            last_sent=last_sent.replace(tzinfo=timezone.utc)
+        allowed=(now-last_sent).total_seconds() >= reset_after_seconds
+    else:
+        allowed=False
+
+    if allowed:
+        filter_query=dict(query)
+        if last_sent is None:
+            filter_query["last_welcome_sent_at"]={"$exists":False}
+        else:
+            filter_query["last_welcome_sent_at"]=existing.get("last_welcome_sent_at")
+        result=await c(BUSINESS_CONTACTS).update_one(
+            filter_query,
+            {"$set":{
+                "last_welcome_sent_at":now,
+                "last_message_at":now,
+                "last_message_id":int(current_message_id or 0),
+            },"$inc":{"message_count":1}},
         )
-        if result.upserted_id is not None:
-            await increment_business_account_stat(owner_id,account_user_id,"conversations")
+        if result.modified_count:
             return True
-    except Exception:
-        # Concurrent claims are expected; only the first insert may send welcome.
-        pass
 
     await c(BUSINESS_CONTACTS).update_one(
         query,
