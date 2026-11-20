@@ -14,6 +14,13 @@ import time
 import qrcode
 
 
+def _business_send_kwargs(query):
+    """Attach Business connection only when payment was opened from a Business chat."""
+    message = getattr(query, "message", None)
+    connection_id = getattr(message, "business_connection_id", None)
+    return {"business_connection_id": str(connection_id)} if connection_id else {}
+
+
 def _razorpay_qr_photo(checkout: dict):
     """Build the QR locally from Razorpay's returned UPI URI; no image download."""
     content = str(checkout.get("qr_image_content") or "").strip()
@@ -197,6 +204,7 @@ async def handle(self, update, context, q, owner, action):
                         photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                         caption=text,
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
+                        **_business_send_kwargs(q),
                     )
                     if not cached_file_id and getattr(sent, 'photo', None):
                         try:
@@ -252,7 +260,10 @@ async def handle(self, update, context, q, owner, action):
             except TelegramError:
                 pass
             try:
-                payment_page_message = await context.bot.send_photo(q.message.chat_id, qr_file_id, caption=text, reply_markup=kb)
+                payment_page_message = await context.bot.send_photo(
+                    chat_id=q.message.chat_id, photo=qr_file_id, caption=text, reply_markup=kb,
+                    **_business_send_kwargs(q),
+                )
                 if manual_enabled:
                     context.user_data['child_payment_page_chat_id'] = int(payment_page_message.chat_id)
                     context.user_data['child_payment_page_message_id'] = int(payment_page_message.message_id)
@@ -410,6 +421,7 @@ async def handle(self, update, context, q, owner, action):
                     photo=cached_file_id if cached_file_id else (image if image is not None else image_url),
                     caption=text,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data='c_payment_back')]]),
+                    **_business_send_kwargs(q),
                 )
                 if not cached_file_id and getattr(sent, 'photo', None):
                     try:
