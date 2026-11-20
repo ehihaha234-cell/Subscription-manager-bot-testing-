@@ -1,4 +1,5 @@
 import time
+import re
 """Focused clone-bot feature mixin; behavior preserved from services.bot_manager."""
 
 from handlers.common.clone_context import *
@@ -69,7 +70,11 @@ class CloneStartMixin:
             "referral_unlock": "c_referral_unlock",
             "support": "c_support",
         }
-        action = actions.get(str(payload or "").strip().lower())
+        normalized = str(payload or "").strip().lower()
+        plan_match = re.fullmatch(r"plans_(\d{4})", normalized)
+        action = actions.get(normalized)
+        if plan_match:
+            action = f"c_plans_list_{plan_match.group(1)}"
         if not action:
             return False
 
