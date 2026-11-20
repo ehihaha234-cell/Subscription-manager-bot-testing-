@@ -552,6 +552,7 @@ def _settings_text(s):
         "⚙️ Business Automation Settings\n\nControl how automation works for every connected account. These settings are shared across all accounts.\n\n"
         f"Automation: {'Enabled' if s.get('business_automation_enabled') else 'Disabled'}\n"
         f"Welcome Once: {'Enabled' if s.get('business_welcome_once', True) else 'Disabled'}\n"
+        f"Welcome Reset: {('First time only' if not int(s.get('business_welcome_reset_seconds', 0) or 0) else str(int(s.get('business_welcome_reset_seconds', 0)) // 3600) + ' hours' if int(s.get('business_welcome_reset_seconds', 0)) % 3600 == 0 else str(int(s.get('business_welcome_reset_seconds', 0)) // 86400) + ' days')}\n"
         f"Ignore Own Messages: {'Enabled' if s.get('business_ignore_outgoing', True) else 'Disabled'}\n"
         f"Anti-loop: {'Enabled' if s.get('business_anti_loop', True) else 'Disabled'}\n"
         f"Flood Protection: {'Enabled' if s.get('business_flood_protection', True) else 'Disabled'}\n"
@@ -569,6 +570,7 @@ def _settings_keyboard(s):
         [InlineKeyboardButton("Disable Flood Protection" if s.get("business_flood_protection", True) else "Enable Flood Protection", callback_data="ba_setting_flood")],
         [InlineKeyboardButton("Disable Working Hours" if s.get("business_working_hours_enabled") else "Enable Working Hours", callback_data="ba_setting_hours_toggle")],
         [InlineKeyboardButton("🕒 Set Working Hours", callback_data="ba_setting_hours")],
+        [InlineKeyboardButton("🔄 Set Welcome Reset Time", callback_data="ba_setting_welcome_reset")],
         [InlineKeyboardButton("⏱ Set Reply Delay", callback_data="ba_setting_delay")],
         [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
     ])
@@ -923,6 +925,29 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
 
     if action == "ba_settings": await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
+    if action == "ba_setting_welcome_reset":
+        rows = [
+            [InlineKeyboardButton("Only first time", callback_data="ba_welcome_reset_0")],
+            [InlineKeyboardButton("1 Hour", callback_data="ba_welcome_reset_3600"), InlineKeyboardButton("6 Hours", callback_data="ba_welcome_reset_21600")],
+            [InlineKeyboardButton("12 Hours", callback_data="ba_welcome_reset_43200"), InlineKeyboardButton("24 Hours", callback_data="ba_welcome_reset_86400")],
+            [InlineKeyboardButton("3 Days", callback_data="ba_welcome_reset_259200"), InlineKeyboardButton("7 Days", callback_data="ba_welcome_reset_604800")],
+            [InlineKeyboardButton("⬅ Back", callback_data="ba_settings")],
+        ]
+        await q.edit_message_text(
+            "🔄 Welcome Message Reset Time\\n\\nFirst message always receives the welcome. Choose when the same user should receive it again:",
+            reply_markup=_kb(rows),
+        )
+        return True
+    if action.startswith("ba_welcome_reset_"):
+        try:
+            reset_seconds = max(0, int(action.rsplit("_", 1)[1]))
+        except Exception:
+            await q.answer("Invalid reset time.", show_alert=True)
+            return True
+        await set_seller_setting(owner, "business_welcome_reset_seconds", reset_seconds)
+        s = await get_seller_settings(owner)
+        await q.edit_message_text(_settings_text(s), reply_markup=_settings_keyboard(s))
+        return True
     toggle_map={"ba_setting_automation":("business_automation_enabled",False),"ba_setting_once":("business_welcome_once",True),"ba_setting_outgoing":("business_ignore_outgoing",True),"ba_setting_loop":("business_anti_loop",True),"ba_setting_flood":("business_flood_protection",True),"ba_setting_hours_toggle":("business_working_hours_enabled",False)}
     if action in toggle_map:
         key,default=toggle_map[action]; await set_seller_setting(owner,key,not s.get(key,default)); s=await get_seller_settings(owner); await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
