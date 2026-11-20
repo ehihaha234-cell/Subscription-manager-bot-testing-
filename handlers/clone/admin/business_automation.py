@@ -101,17 +101,18 @@ Button title - feature: feature_name
 • Open a feature directly on clone bot:
 Button title - clone: feature_name
 
-📦 Separate Plan Group button:
-Button title - feature: plans_1001
-
-Where to get PLAN ID:
-Go to 📦 Manage Plans → Plan Groups.
-Each separate plan group has its own 4-digit PLAN ID.
-Example: PLAN ID 👉 1001
-Use that ID as feature: plans_1001.
-
 Features:
-buy, profile, renew, referral, referral_unlock, support, home"""
+profile, referral, referral_unlock, support, home
+
+• HOW TO ADD PLAN BUTTONS SEPERATE GROUPS:
+Button title - feature: plans_(PLAN_ID)
+Example: Premium Channel - feature: plans_1001
+
+• Where you get PLAN ID:
+Go to 📦 manage plan.
+Each separate plan group will have its own 4-digit PLAN ID.
+Example: PLAN ID 👉 1001
+Use that ID as feature: plans_1001."""
 
 
 def _parse_business_buttons(text: str) -> list[list[dict[str, str]]]:
@@ -158,18 +159,17 @@ def _parse_business_buttons(text: str) -> list[list[dict[str, str]]]:
                     plan_list_id = feature.split("_", 1)[1].strip()
                     if len(plan_list_id) != 4 or not plan_list_id.isdigit():
                         raise ValueError(
-                            f"Line {line_no}, button {button_no}: PLAN ID must be exactly 4 digits. "
-                            "Example: feature: plans_1001"
+                            f"Line {line_no}, button {button_no}: PLAN ID must be exactly 4 digits, e.g. feature: plans_1001."
                         )
-                    callback = f"c_plans_list_{plan_list_id}"
+                    row.append({"text": title, "type": "callback", "value": f"c_plans_list_{plan_list_id}"})
                 else:
                     callback = features.get(feature)
                     if not callback:
                         raise ValueError(
                             f"Line {line_no}, button {button_no}: unknown feature '{feature}'. "
-                            "Available: buy, profile, renew, referral, referral_unlock, support, home, or plans_(PLAN_ID)."
+                            "Available: profile, referral, referral_unlock, support, home, or plans_(PLAN_ID)."
                         )
-                row.append({"text": title, "type": "callback", "value": callback})
+                    row.append({"text": title, "type": "callback", "value": callback})
             elif target.startswith("clone:"):
                 feature = target.split(":", 1)[1].strip().lower()
                 if feature not in features:
