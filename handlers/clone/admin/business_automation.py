@@ -102,11 +102,16 @@ Button title - feature: feature_name
 Button title - clone: feature_name
 
 📦 Separate Plan Group button:
-Button title - plan_group:1234
-Use the 4-digit PLAN ID shown in Admin → Plans → Plan Groups.
+Button title - feature: plans_1001
+
+Where to get PLAN ID:
+Go to 📦 Manage Plans → Plan Groups.
+Each separate plan group has its own 4-digit PLAN ID.
+Example: PLAN ID 👉 1001
+Use that ID as feature: plans_1001.
 
 Features:
-plans, buy, profile, renew, referral, referral_unlock, support, home"""
+buy, profile, renew, referral, referral_unlock, support, home"""
 
 
 def _parse_business_buttons(text: str) -> list[list[dict[str, str]]]:
@@ -149,12 +154,21 @@ def _parse_business_buttons(text: str) -> list[list[dict[str, str]]]:
                 row.append({"text": title, "type": "share", "value": value})
             elif target.startswith("feature:"):
                 feature = target.split(":", 1)[1].strip().lower()
-                callback = features.get(feature)
-                if not callback:
-                    raise ValueError(
-                        f"Line {line_no}, button {button_no}: unknown feature '{feature}'. "
-                        "Available: " + ", ".join(features)
-                    )
+                if feature.startswith("plans_"):
+                    plan_list_id = feature.split("_", 1)[1].strip()
+                    if len(plan_list_id) != 4 or not plan_list_id.isdigit():
+                        raise ValueError(
+                            f"Line {line_no}, button {button_no}: PLAN ID must be exactly 4 digits. "
+                            "Example: feature: plans_1001"
+                        )
+                    callback = f"c_plans_list_{plan_list_id}"
+                else:
+                    callback = features.get(feature)
+                    if not callback:
+                        raise ValueError(
+                            f"Line {line_no}, button {button_no}: unknown feature '{feature}'. "
+                            "Available: buy, profile, renew, referral, referral_unlock, support, home, or plans_(PLAN_ID)."
+                        )
                 row.append({"text": title, "type": "callback", "value": callback})
             elif target.startswith("clone:"):
                 feature = target.split(":", 1)[1].strip().lower()
@@ -293,7 +307,7 @@ def _buttons_input_text(rows) -> str:
             elif kind == "share":
                 target = f"share: {value}"
             elif kind == "callback" and value.startswith("c_plans_list_"):
-                target = f"plan_group: {value.rsplit('_', 1)[-1]}"
+                target = f"feature: plans_{value.rsplit('_', 1)[-1]}"
             elif kind == "callback":
                 reverse = {
                     "c_plans": "plans", "c_buy": "buy", "c_profile": "profile",
