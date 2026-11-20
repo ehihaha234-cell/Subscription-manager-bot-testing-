@@ -96,6 +96,21 @@ class CloneCommonUtilsMixin:
         required instead of replying with another message.
         """
         message = q.message
+        # Telegram Business-origin messages are not reliably editable through
+        # CallbackQuery.edit_message_text/caption. Send the destination screen
+        # as a new message in the same Business connection instead. This keeps
+        # feature: plans_1234 usable from Business Automation welcome buttons.
+        business_connection_id = getattr(message, "business_connection_id", None)
+        if business_connection_id:
+            bot = message.get_bot()
+            return await bot.send_message(
+                chat_id=message.chat_id,
+                business_connection_id=str(business_connection_id),
+                text=text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+
         has_media = bool(
             getattr(message, "photo", None)
             or getattr(message, "video", None)
