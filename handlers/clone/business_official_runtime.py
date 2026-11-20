@@ -324,7 +324,6 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             business_user_id or owner_id,
             sender_id,
             welcome_once=True,
-            reset_seconds=int(settings.get("business_welcome_reset_seconds", 0) or 0),
         )
 
         delay = max(0, min(int(settings.get("business_reply_delay_seconds", 0) or 0), 300))
@@ -337,7 +336,7 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             media_file_id = str(welcome.get("media_file_id") or "")
             media_items = list(welcome.get("media") or [])
             if text or media_file_id or media_items:
-                text = await append_seller_branding(text, owner)
+                text = await append_seller_branding(text, owner_id)
                 welcome_message_ids = await _send_configured_message(
                     context,
                     chat_id=message.chat_id,
