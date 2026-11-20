@@ -50,10 +50,12 @@ class CloneExpiryMixin:
 
             try:
                 await context.bot.send_message(
-                    int(uid),
-                    text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
+                    int(uid), text, reply_markup=keyboard, parse_mode="HTML",
+                )
+                from handlers.clone.business_notifications import send_business_notification
+                await send_business_notification(
+                    context.bot, int(owner), int(uid), text,
+                    reply_markup=keyboard, parse_mode="HTML",
                 )
             except Exception:
                 try:
@@ -229,6 +231,17 @@ class CloneExpiryMixin:
                         "Subscription expiry plain-text fallback failed owner=%s user=%s",
                         owner, uid,
                     )
+            try:
+                from handlers.clone.business_notifications import send_business_notification
+                await send_business_notification(
+                    context.bot, int(owner), int(uid), expiry_notice,
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                logger.exception(
+                    "Business subscription expiry notification failed owner=%s user=%s",
+                    owner, uid,
+                )
 
         # Expired subscriptions can free capacity without an admin action.
         # Recheck pending selections on each existing expiry cycle (60 seconds);
