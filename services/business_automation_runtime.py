@@ -592,13 +592,19 @@ class BusinessAutomationRuntime:
             current_message_id = int(getattr(event, "id", 0) or 0)
             logger.info("Business Automation incoming received owner=%s account=%s peer=%s message_id=%s", owner_id, account_user_id, peer_id, current_message_id)
             self._remember_message_peer(owner_id, account_user_id, current_message_id, peer_id)
-            history_was_cleared = await self._history_was_cleared(
-                owner_id, account_user_id, peer_id, client, current_message_id
-            )
+            # Chat-clear updates are already handled by _handle_raw_update and
+            # _handle_deleted. Avoid querying Telegram history on every incoming
+            # message: those extra get_messages calls (plus a settling sleep) add
+            # noticeable latency to welcome delivery. Explicit delete events reset
+            # the persisted welcome claim immediately.
+            history_was_cleared = False
 
-            settings = await get_seller_settings(owner_id)
-            welcome = await get_business_welcome(owner_id)
-            auto_replies = await list_business_auto_replies(owner_id)
+            # These independent database reads can run concurrently.
+            settings, welcome, auto_replies = await asyncio.gather(
+                get_seller_settings(owner_id),
+                get_business_welcome(owner_id),
+                list_business_auto_replies(owner_id),
+            )
             if not settings.get("business_automation_enabled"):
                 logger.info("Business Automation skipped: disabled owner=%s account=%s", owner_id, account_user_id)
                 return
@@ -614,7 +620,6 @@ class BusinessAutomationRuntime:
                 welcome_once=True,
                 force_new_conversation=history_was_cleared,
                 current_message_id=current_message_id,
-                reset_seconds=int(settings.get("business_welcome_reset_seconds", 0) or 0),
             )
 
             # Claim/create the welcome conversation record before writing the
