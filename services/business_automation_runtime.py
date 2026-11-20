@@ -244,6 +244,9 @@ class BusinessAutomationRuntime:
                         bot_record = await get_bot_by_data_owner_id(int(owner_id))
                     username = str((bot_record or {}).get("bot_username") or "").lstrip("@")
                     feature = value.removeprefix("c_")
+                    plan_match = re.fullmatch(r"plans_list_(\d{4})", feature)
+                    if plan_match:
+                        feature = f"plans_{plan_match.group(1)}"
                     if username:
                         value = f"https://t.me/{username}?start={feature}"
                         item_type = "url"
