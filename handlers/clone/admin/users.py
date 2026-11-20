@@ -174,13 +174,16 @@ async def _restore_plan_group_access_after_admin_extend(bot, owner, user_id, gro
 
     if links:
         try:
-            await bot.send_message(
-                int(user_id),
+            access_text = (
                 "🎉 Your subscription has been updated.\n\n"
                 "🔗 Fresh private invite link(s):\n\n"
-                + "\n\n".join(links),
-                disable_web_page_preview=True,
+                + "\n\n".join(links)
             )
+            await bot.send_message(
+                int(user_id), access_text, disable_web_page_preview=True,
+            )
+            from handlers.clone.business_notifications import send_business_notification
+            await send_business_notification(bot, int(owner), int(user_id), access_text)
         except Exception:
             logger.exception(
                 "Failed sending Plan Group access links owner=%s user=%s",

@@ -393,7 +393,10 @@ async def handle(self, update, context, q, owner, staff, a, role):
                     '🎯 Target Group/Channel:\n' + '\n'.join(f'• {name}' for name in target_names) + '\n\n'
                     if target_names else f'🎯 Target Group/Channel: {group_id}\n\n'
                 )
-            await context.bot.send_message(p['user_id'], f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{target_lines}{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links), disable_web_page_preview=True)
+            approval_text = (f"✅ Payment approved manually\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Purchased Plan: {p['plan']}\n💰 Amount: ₹{float(p.get('amount') or 0):g}\n🧾 Payment ID: {pid}\n⌛ Added Duration: {p.get('duration_text') or '-'}\n🧾 Receipt/Invoice: {invoice['invoice_no']}\n━━━━━━━━━━━━━━━━━━━━━━\n\n{target_lines}{status_text}\n\nJoin using your private invite link(s):\n\n" + '\n\n'.join(links))
+            await context.bot.send_message(p['user_id'], approval_text, disable_web_page_preview=True)
+            from handlers.clone.business_notifications import send_business_notification
+            await send_business_notification(context.bot, owner, int(p['user_id']), approval_text)
             approved_caption = await self.payment_details_caption(owner, p, status='approved', processed_by=owner)
             await _update_payment_notification_messages(
                 context, owner, p.get('payment_id'), approved_caption, current_message=q.message
