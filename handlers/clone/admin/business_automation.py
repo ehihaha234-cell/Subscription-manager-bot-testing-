@@ -101,6 +101,10 @@ Button title - feature: feature_name
 • Open a feature directly on clone bot:
 Button title - clone: feature_name
 
+📦 Separate Plan Group button:
+Button title - plan_group:1234
+Use the 4-digit PLAN ID shown in Admin → Plans → Plan Groups.
+
 Features:
 plans, buy, profile, renew, referral, referral_unlock, support, home"""
 
@@ -160,9 +164,16 @@ def _parse_business_buttons(text: str) -> list[list[dict[str, str]]]:
                         "Available: " + ", ".join(features)
                     )
                 row.append({"text": title, "type": "clone", "value": feature})
+            elif target.startswith("plan_group:"):
+                plan_list_id = target.split(":", 1)[1].strip()
+                if len(plan_list_id) != 4 or not plan_list_id.isdigit():
+                    raise ValueError(
+                        f"Line {line_no}, button {button_no}: plan_group requires the 4-digit PLAN ID, e.g. plan_group:1234."
+                    )
+                row.append({"text": title, "type": "callback", "value": f"c_plans_list_{plan_list_id}"})
             else:
                 raise ValueError(
-                    f"Line {line_no}, button {button_no}: only t.me URL, @username, share:, feature:, or clone: are supported."
+                    f"Line {line_no}, button {button_no}: supported targets are t.me URL, @username, share:, feature:, clone:, or plan_group:1234."
                 )
         rows.append(row)
     if not rows:
@@ -281,6 +292,8 @@ def _buttons_input_text(rows) -> str:
                     target = value
             elif kind == "share":
                 target = f"share: {value}"
+            elif kind == "callback" and value.startswith("c_plans_list_"):
+                target = f"plan_group: {value.rsplit('_', 1)[-1]}"
             elif kind == "callback":
                 reverse = {
                     "c_plans": "plans", "c_buy": "buy", "c_profile": "profile",
@@ -524,7 +537,6 @@ def _settings_text(s):
         "⚙️ Business Automation Settings\n\nControl how automation works for every connected account. These settings are shared across all accounts.\n\n"
         f"Automation: {'Enabled' if s.get('business_automation_enabled') else 'Disabled'}\n"
         f"Welcome Once: {'Enabled' if s.get('business_welcome_once', True) else 'Disabled'}\n"
-        f"Welcome Reset: {('First time only' if not int(s.get('business_welcome_reset_seconds', 0) or 0) else str(int(s.get('business_welcome_reset_seconds', 0)) // 3600) + ' hours' if int(s.get('business_welcome_reset_seconds', 0)) % 3600 == 0 else str(int(s.get('business_welcome_reset_seconds', 0)) // 60) + ' minutes')}\n"
         f"Ignore Own Messages: {'Enabled' if s.get('business_ignore_outgoing', True) else 'Disabled'}\n"
         f"Anti-loop: {'Enabled' if s.get('business_anti_loop', True) else 'Disabled'}\n"
         f"Flood Protection: {'Enabled' if s.get('business_flood_protection', True) else 'Disabled'}\n"
@@ -542,7 +554,6 @@ def _settings_keyboard(s):
         [InlineKeyboardButton("Disable Flood Protection" if s.get("business_flood_protection", True) else "Enable Flood Protection", callback_data="ba_setting_flood")],
         [InlineKeyboardButton("Disable Working Hours" if s.get("business_working_hours_enabled") else "Enable Working Hours", callback_data="ba_setting_hours_toggle")],
         [InlineKeyboardButton("🕒 Set Working Hours", callback_data="ba_setting_hours")],
-        [InlineKeyboardButton("🔄 Set Welcome Reset Time", callback_data="ba_welcome_reset")],
         [InlineKeyboardButton("⏱ Set Reply Delay", callback_data="ba_setting_delay")],
         [InlineKeyboardButton("⬅ Business Automation", callback_data="ba_home")],
     ])
@@ -897,27 +908,6 @@ async def handle(self, update, context, q, owner, staff_record, action, role):
             await q.edit_message_text(_template_text(item), reply_markup=_template_keyboard(item)); return True
 
     if action == "ba_settings": await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
-    if action == "ba_welcome_reset":
-        await q.edit_message_text(
-            "🔄 Welcome Message Reset Time\n\nFirst message always receives the welcome. Choose when the same user should receive it again:",
-            reply_markup=_kb([
-                [InlineKeyboardButton("Only first time", callback_data="ba_welcome_reset_0")],
-                [InlineKeyboardButton("1 Hour", callback_data="ba_welcome_reset_3600"), InlineKeyboardButton("6 Hours", callback_data="ba_welcome_reset_21600")],
-                [InlineKeyboardButton("12 Hours", callback_data="ba_welcome_reset_43200"), InlineKeyboardButton("24 Hours", callback_data="ba_welcome_reset_86400")],
-                [InlineKeyboardButton("3 Days", callback_data="ba_welcome_reset_259200"), InlineKeyboardButton("7 Days", callback_data="ba_welcome_reset_604800")],
-                [InlineKeyboardButton("⬅ Back", callback_data="ba_settings")],
-            ]),
-        )
-        return True
-    if action.startswith("ba_welcome_reset_"):
-        seconds = max(0, min(int(action.rsplit("_", 1)[1]), 604800))
-        await set_seller_setting(owner, "business_welcome_reset_seconds", seconds)
-        s = await get_seller_settings(owner)
-        await q.edit_message_text(
-            "✅ Welcome reset time updated.\n\n" + _settings_text(s),
-            reply_markup=_settings_keyboard(s),
-        )
-        return True
     toggle_map={"ba_setting_automation":("business_automation_enabled",False),"ba_setting_once":("business_welcome_once",True),"ba_setting_outgoing":("business_ignore_outgoing",True),"ba_setting_loop":("business_anti_loop",True),"ba_setting_flood":("business_flood_protection",True),"ba_setting_hours_toggle":("business_working_hours_enabled",False)}
     if action in toggle_map:
         key,default=toggle_map[action]; await set_seller_setting(owner,key,not s.get(key,default)); s=await get_seller_settings(owner); await q.edit_message_text(_settings_text(s),reply_markup=_settings_keyboard(s)); return True
