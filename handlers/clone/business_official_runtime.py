@@ -324,6 +324,8 @@ async def handle_business_message(update: Update, context: ContextTypes.DEFAULT_
             business_user_id or owner_id,
             sender_id,
             welcome_once=True,
+            reset_seconds=max(0, int(settings.get("business_welcome_reset_seconds", 0) or 0)),
+            current_message_id=int(getattr(message, "message_id", 0) or 0),
         )
 
         delay = max(0, min(int(settings.get("business_reply_delay_seconds", 0) or 0), 300))
