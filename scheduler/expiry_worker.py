@@ -213,16 +213,47 @@ async def check_expired_plan_group_subscriptions():
                             "",
                             "🔄 Please renew your plan before it expires to continue accessing the premium channel/group.",
                         ])
+                        reminder_text = "\n".join(lines)
+                        reminder_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{gid}")]])
+                        regular_sent = False
                         try:
                             await running.application.bot.send_message(
                                 uid,
-                                "\n".join(lines),
-                                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{gid}")]]),
+                                reminder_text,
+                                reply_markup=reminder_keyboard,
                             )
+                            regular_sent = True
+                        except Exception:
+                            logger.exception(
+                                "Plan Group expiry reminder bot delivery failed owner=%s user=%s group=%s",
+                                owner_id, uid, gid,
+                            )
+
+                        business_sent = False
+                        try:
+                            from handlers.clone.business_notifications import send_business_notification
+                            result = await send_business_notification(
+                                running.application.bot, owner_id, uid, reminder_text,
+                                reply_markup=reminder_keyboard,
+                            )
+                            business_sent = bool(result.get("sent", 0))
+                        except Exception:
+                            logger.exception(
+                                "Plan Group expiry reminder Business delivery failed owner=%s user=%s group=%s",
+                                owner_id, uid, gid,
+                            )
+
+                        if regular_sent or business_sent:
                             await complete_plan_group_expiry_reminder(owner_id, uid, gid, token, expiry)
-                        except Exception as exc:
-                            await release_plan_group_expiry_reminder(owner_id, uid, gid, token, str(exc))
-                            logger.exception("Plan Group expiry reminder delivery failed owner=%s user=%s group=%s", owner_id, uid, gid)
+                        else:
+                            await release_plan_group_expiry_reminder(
+                                owner_id, uid, gid, token,
+                                "Both bot and Business chat reminder deliveries failed",
+                            )
+                            logger.warning(
+                                "Plan Group expiry reminder had no successful delivery owner=%s user=%s group=%s",
+                                owner_id, uid, gid,
+                            )
         except Exception:
             logger.exception("Plan Group reminder worker failed owner=%s", owner_id)
 
@@ -478,14 +509,33 @@ async def check_expired_plan_group_subscriptions():
             lines = ["⏰ Your subscription has expired.", "", "🔊 Group/Channel:"]
             lines.extend(f"• {name}" for name in display_names)
             lines.extend(["", f"📅 Expired On: {expiry_text}", "", "Use 🔄 Renew Plan to restore your access."])
-            await bot.send_message(
-                user_id,
-                "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{group_id}"), InlineKeyboardButton("👤 Profile", callback_data="c_profile")],
-                ]),
-            )
+            expiry_notice = "\n".join(lines)
+            expiry_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Renew Plan", callback_data=f"c_pg_renew_{group_id}"), InlineKeyboardButton("👤 Profile", callback_data="c_profile")],
+            ])
+            try:
+                await bot.send_message(
+                    user_id,
+                    expiry_notice,
+                    reply_markup=expiry_keyboard,
+                )
+            except Exception:
+                logger.exception(
+                    "Plan Group expiry bot notification failed owner=%s user=%s group=%s",
+                    owner_id, user_id, group_id,
+                )
+            try:
+                from handlers.clone.business_notifications import send_business_notification
+                await send_business_notification(
+                    bot, owner_id, user_id, expiry_notice,
+                    reply_markup=expiry_keyboard,
+                )
+            except Exception:
+                logger.exception(
+                    "Plan Group expiry Business notification failed owner=%s user=%s group=%s",
+                    owner_id, user_id, group_id,
+                )
         except Exception:
-            logger.exception("Plan Group expiry notification failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
+            logger.exception("Plan Group expiry notification preparation failed owner=%s user=%s group=%s", owner_id, user_id, group_id)
         logger.info("Plan Group subscription expired owner=%s user=%s group=%s expiry=%s removed=%s", owner_id, user_id, group_id, row.get("expiry_date"), removed_names)
 
