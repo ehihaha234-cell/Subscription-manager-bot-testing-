@@ -324,6 +324,51 @@ async def handle(self, update, context, q, owner, action):
                 reply_markup=back_keyboard,
             )
             return True
+        business_connection_id = getattr(q.message, 'business_connection_id', None)
+        if business_connection_id:
+            # Business-chat purchases must stay in the connected account chat.
+            # A normal send_invoice to q.from_user.id fails when the buyer has
+            # never opened /start with this clone bot. Telegram supports Stars
+            # invoice links created on behalf of a Business connection.
+            payload = f"stars:clone:{owner}:{q.from_user.id}:{plan_id}"
+            try:
+                invoice_url = await context.bot.create_invoice_link(
+                    title=f"{plan['name']} Subscription"[:32],
+                    description=f"{plan['duration_text']} access subscription"[:255],
+                    payload=payload,
+                    currency='XTR',
+                    prices=[LabeledPrice(plan['name'][:32], stars)],
+                    business_connection_id=str(business_connection_id),
+                )
+                await context.bot.send_message(
+                    chat_id=int(q.message.chat_id),
+                    text=(
+                        f"⭐ {plan['name']} Subscription\n\n"
+                        f"Duration: {plan['duration_text']}\n"
+                        f"Price: ⭐ {stars} Stars\n\n"
+                        "Tap the button below to complete your payment."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(f"⭐ Pay {stars} Stars", url=invoice_url)
+                    ]]),
+                    business_connection_id=str(business_connection_id),
+                    disable_web_page_preview=True,
+                )
+                logger.info(
+                    'Business Stars invoice link sent owner=%s user=%s plan=%s chat=%s',
+                    owner, q.from_user.id, plan_id, q.message.chat_id,
+                )
+            except Exception:
+                logger.exception(
+                    'Business Stars invoice link failed owner=%s user=%s plan=%s connection=%s',
+                    owner, q.from_user.id, plan_id, business_connection_id,
+                )
+                await q.message.reply_text(
+                    '⚠️ Telegram Stars payment could not be opened in this chat. Please try again.'
+                )
+            return True
+
+        # Preserve the original clone-bot invoice flow for normal bot chats.
         await context.bot.send_invoice(
             chat_id=q.from_user.id,
             title=f"{plan['name']} Subscription",
