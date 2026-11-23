@@ -156,10 +156,10 @@ def _scheduled_settings_text(item):
         "7m = Every 7 Minutes\n"
         "8h = Every 8 Hours\n"
         "9d = Every 9 Days\n\n"
-        f"Schedule: {item.get('schedule_at') or 'Not Set'}\n"
-        f"Schedule Status: {'🟢 Enabled' if item.get('schedule_enabled', bool(item.get('schedule_at'))) else '🔴 Disabled'}\n"
-        f"Repeat Broadcast: {item.get('repeat_interval') or 'Not Set'}\n"
-        f"Repeat Status: {'🟢 Enabled' if item.get('repeat_enabled', bool(item.get('repeat_interval'))) else '🔴 Disabled'}"
+        f"Schedule: {item.get('schedule_at') or 'Not Set'}    "
+        f"{'🟢 Enabled' if item.get('schedule_enabled', bool(item.get('schedule_at'))) else '🔴 Disabled'}\n"
+        f"Repeat Broadcast: {item.get('repeat_interval') or 'Not Set'}    "
+        f"{'🟢 Enabled' if item.get('repeat_enabled', bool(item.get('repeat_interval'))) else '🔴 Disabled'}"
     )
 
 
@@ -168,16 +168,14 @@ def _scheduled_settings_keyboard(item):
     schedule_on = bool(item.get("schedule_enabled", bool(item.get("schedule_at"))))
     repeat_on = bool(item.get("repeat_enabled", bool(item.get("repeat_interval"))))
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 Set Schedule Time", callback_data=f"a_sb_schedule_{job_id}")],
-        [InlineKeyboardButton(
-            "🟢 Schedule: Enabled" if schedule_on else "🔴 Schedule: Disabled",
-            callback_data=f"a_sb_schedule_toggle_{job_id}",
-        )],
-        [InlineKeyboardButton("🔁 Set Repeat Interval", callback_data=f"a_sb_repeat_{job_id}")],
-        [InlineKeyboardButton(
-            "🟢 Repeat: Enabled" if repeat_on else "🔴 Repeat: Disabled",
-            callback_data=f"a_sb_repeat_toggle_{job_id}",
-        )],
+        [
+            InlineKeyboardButton("📆 Set Schedule Time", callback_data=f"a_sb_schedule_{job_id}"),
+            InlineKeyboardButton("🟢 Enabled" if schedule_on else "🔴 Disabled", callback_data=f"a_sb_schedule_toggle_{job_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔁 Set Repeat Interval", callback_data=f"a_sb_repeat_{job_id}"),
+            InlineKeyboardButton("🟢 Enabled" if repeat_on else "🔴 Disabled", callback_data=f"a_sb_repeat_toggle_{job_id}"),
+        ],
         [InlineKeyboardButton("⬅ Back", callback_data=f"a_sb_open_{job_id}")],
     ])
 
