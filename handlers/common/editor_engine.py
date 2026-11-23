@@ -125,6 +125,34 @@ def parse_editor_buttons(text: str) -> list[list[dict[str, str]]]:
     return rows
 
 
+
+def parse_broadcast_editor_buttons(text: str) -> list[list[dict[str, str]]]:
+    """Parse broadcast buttons with the restricted broadcast feature set.
+
+    Broadcast and scheduled-broadcast messages may open a specific Plan Group,
+    but must not expose the legacy plans/buy/renew navigation shortcuts.
+    Other editors continue using parse_editor_buttons unchanged.
+    """
+    rows = parse_editor_buttons(text)
+    allowed = {
+        "c_profile", "c_referral", "c_referral_unlock", "c_support", "c_home",
+    }
+    for line_no, row in enumerate(rows, 1):
+        for button_no, button in enumerate(row, 1):
+            if button.get("type") not in {"callback", "feature"}:
+                continue
+            value = str(button.get("value") or "")
+            if value in allowed or (value.startswith("c_plans_list_") and value.removeprefix("c_plans_list_").isdigit() and len(value.removeprefix("c_plans_list_")) == 4):
+                continue
+            if value in {"c_plans", "c_buy", "c_renew"}:
+                raise ValueError(
+                    f"Line {line_no}, button {button_no}: feature '{value.removeprefix('c_')}' is not available in Broadcast. Use feature: plans_(PLAN_ID) for a separate Plan Group."
+                )
+            raise ValueError(
+                f"Line {line_no}, button {button_no}: unsupported Broadcast feature. Available: profile, referral, referral_unlock, support, home, plans_(PLAN_ID)."
+            )
+    return rows
+
 def _legacy_feature_callback(value: str) -> str | None:
     raw = str(value or "").strip().lower()
     if raw.startswith("feature:"):
