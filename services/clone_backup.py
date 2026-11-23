@@ -3,11 +3,13 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import io
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from database.mongo import get_database
-from pymongo.errors import DuplicateKeyError
+from pymongo import UpdateOne
+from pymongo.errors import DuplicateKeyError, BulkWriteError
 
 CLONE_BACKUP_FORMAT = "telegram-saas-clone-backup"
 CLONE_BACKUP_VERSION = 1
@@ -94,15 +96,47 @@ async def create_clone_backup(
     return raw, manifest
 
 
-def validate_clone_backup(raw: bytes) -> dict[str, Any]:
-    if len(raw) > 20 * 1024 * 1024:
+MAX_CLONE_BACKUP_BYTES = 20 * 1024 * 1024
+MAX_CLONE_BACKUP_DECOMPRESSED_BYTES = 100 * 1024 * 1024
+RESTORE_BATCH_SIZE = 250
+
+
+def _safe_gzip_decompress(raw: bytes) -> bytes:
+    """Decompress a clone backup without allowing unbounded gzip expansion."""
+    if len(raw) > MAX_CLONE_BACKUP_BYTES:
         raise ValueError("Backup file exceeds the 20 MB safety limit")
+    if not raw.startswith(b"\x1f\x8b"):
+        raise ValueError("Invalid or damaged clone backup file")
+    output = io.BytesIO()
+    total = 0
     try:
-        envelope = json.loads(gzip.decompress(raw).decode("utf-8"))
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_CLONE_BACKUP_DECOMPRESSED_BYTES:
+                    raise ValueError("Decompressed backup exceeds the 100 MB safety limit")
+                output.write(chunk)
+    except (OSError, EOFError) as exc:
+        raise ValueError("Invalid or damaged clone backup file") from exc
+    return output.getvalue()
+
+
+def _load_clone_backup(raw: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        envelope = json.loads(_safe_gzip_decompress(raw).decode("utf-8"))
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError("Invalid or damaged clone backup file") from exc
+    if not isinstance(envelope, dict):
+        raise ValueError("Invalid clone backup structure")
     manifest = envelope.get("manifest") or {}
     payload = envelope.get("payload") or {}
+    if not isinstance(manifest, dict) or not isinstance(payload, dict):
+        raise ValueError("Invalid clone backup manifest or payload")
     if payload.get("format") != CLONE_BACKUP_FORMAT or manifest.get("format") != CLONE_BACKUP_FORMAT:
         raise ValueError("This is not a supported Clone Bot backup")
     if payload.get("version") != CLONE_BACKUP_VERSION or manifest.get("version") != CLONE_BACKUP_VERSION:
@@ -115,6 +149,16 @@ def validate_clone_backup(raw: bytes) -> dict[str, Any]:
         raise ValueError("Backup contains missing or unsupported collections")
     if any(not isinstance(collections.get(name, []), list) for name in CLONE_COLLECTIONS):
         raise ValueError("Backup contains invalid collection records")
+    actual_records = sum(len(collections.get(name, [])) for name in CLONE_COLLECTIONS)
+    if int(manifest.get("records", -1)) != actual_records:
+        raise ValueError("Backup record count does not match manifest")
+    if actual_records > 100_000:
+        raise ValueError("Backup exceeds the 100,000 record safety limit")
+    return manifest, payload
+
+
+def validate_clone_backup(raw: bytes) -> dict[str, Any]:
+    manifest, _payload = _load_clone_backup(raw)
     return manifest
 
 
@@ -158,38 +202,19 @@ async def restore_clone_backup(
     mode: str,
     progress_callback: Callable[[int, int, str], Awaitable[None]] | None = None,
 ) -> dict[str, int]:
-    """Restore a verified clone backup into this clone's data scope only."""
+    """Restore a verified clone backup using bounded MongoDB bulk batches."""
     if mode not in {"merge", "replace"}:
         raise ValueError("Choose Merge or Replace")
-    validate_clone_backup(raw)
-    try:
-        envelope = json.loads(gzip.decompress(raw).decode("utf-8"))
-    except Exception as exc:
-        raise ValueError("Invalid or damaged clone backup file") from exc
-    manifest = envelope.get("manifest") or {}
-    payload = envelope.get("payload") or {}
-    if payload.get("format") != CLONE_BACKUP_FORMAT or manifest.get("format") != CLONE_BACKUP_FORMAT:
-        raise ValueError("This is not a supported Clone Bot backup")
-    if payload.get("version") != CLONE_BACKUP_VERSION or manifest.get("version") != CLONE_BACKUP_VERSION:
-        raise ValueError("Unsupported Clone Bot backup version")
-    canonical = json.dumps(payload, default=_json_default, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    digest = hashlib.sha256(canonical).hexdigest()
-    if digest != manifest.get("sha256"):
-        raise ValueError("Backup checksum verification failed")
-    source_collections = payload.get("collections")
-    if not isinstance(source_collections, dict):
-        raise ValueError("Backup collections are missing")
-    unknown = set(source_collections) - set(CLONE_COLLECTIONS)
-    if unknown:
-        raise ValueError("Backup contains unsupported collections")
-    docs_by_collection = {}
-    total = sum(len(v) for v in source_collections.values() if isinstance(v, list))
-    done = 0
+    _manifest, payload = _load_clone_backup(raw)
+    source_collections = payload["collections"]
+
+    docs_by_collection: dict[str, list[dict[str, Any]]] = {}
+    total = sum(len(source_collections.get(name, [])) for name in CLONE_COLLECTIONS)
     for name in CLONE_COLLECTIONS:
         rows = source_collections.get(name, [])
         if not isinstance(rows, list):
             raise ValueError(f"Invalid records for {name}")
-        decoded = []
+        decoded: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 raise ValueError(f"Invalid record in {name}")
@@ -205,33 +230,59 @@ async def restore_clone_backup(
     db = get_database()
     restored = 0
     skipped = 0
-    # Replace deletes only the target clone's scoped rows, never source clone or seller records.
+    done = 0
     if mode == "replace":
+        # Delete only target-clone records, preserving the source clone and seller records.
         for name in CLONE_COLLECTIONS:
             await db[name].delete_many({"owner_id": int(target_owner_id)})
+
     for name in CLONE_COLLECTIONS:
-        for doc in docs_by_collection[name]:
-            if mode == "merge":
-                key = _natural_key(name, doc)
-                if key:
-                    existing = await db[name].find_one(key, {"_id": 1})
-                    if existing:
-                        skipped += 1
-                        done += 1
-                        if progress_callback:
-                            await progress_callback(done, max(total, 1), name)
-                        continue
-            try:
-                await db[name].insert_one(doc)
-                restored += 1
-            except DuplicateKeyError:
-                # Existing target data can collide with a MongoDB unique index
-                # even when the natural-key lookup above did not find it.
-                # During Merge, preserve the target record and continue safely.
-                if mode != "merge":
-                    raise
-                skipped += 1
-            done += 1
+        docs = docs_by_collection[name]
+        for offset in range(0, len(docs), RESTORE_BATCH_SIZE):
+            batch = docs[offset:offset + RESTORE_BATCH_SIZE]
+            if mode == "replace":
+                if batch:
+                    result = await db[name].insert_many(batch, ordered=True)
+                    restored += len(result.inserted_ids)
+            else:
+                operations = []
+                direct_inserts = []
+                for doc in batch:
+                    key = _natural_key(name, doc)
+                    if key:
+                        operations.append(UpdateOne(key, {"$setOnInsert": doc}, upsert=True))
+                    else:
+                        direct_inserts.append(doc)
+                if operations:
+                    try:
+                        result = await db[name].bulk_write(operations, ordered=False)
+                        inserted = int(result.upserted_count or 0)
+                        restored += inserted
+                        skipped += len(operations) - inserted
+                    except BulkWriteError as exc:
+                        details = exc.details or {}
+                        errors = details.get("writeErrors", [])
+                        if any(int(item.get("code", 0)) != 11000 for item in errors):
+                            raise
+                        inserted = int(details.get("nUpserted", 0) or 0)
+                        restored += inserted
+                        skipped += max(0, len(operations) - inserted)
+                if direct_inserts:
+                    try:
+                        result = await db[name].insert_many(direct_inserts, ordered=False)
+                        restored += len(result.inserted_ids)
+                    except BulkWriteError as exc:
+                        details = exc.details or {}
+                        errors = details.get("writeErrors", [])
+                        if any(int(item.get("code", 0)) != 11000 for item in errors):
+                            raise
+                        inserted = int(details.get("nInserted", 0) or 0)
+                        restored += inserted
+                        skipped += max(0, len(direct_inserts) - inserted)
+            done += len(batch)
             if progress_callback:
                 await progress_callback(done, max(total, 1), name)
+    if progress_callback and total == 0:
+        await progress_callback(0, 0, "Backup contains no records")
     return {"restored": restored, "skipped": skipped, "records": total}
+
