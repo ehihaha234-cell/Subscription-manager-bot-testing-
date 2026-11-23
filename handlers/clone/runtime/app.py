@@ -9,6 +9,8 @@ from handlers.clone.business_official_runtime import handle_business_connection,
 from telegram.ext import BusinessConnectionHandler, BusinessMessagesDeletedHandler, ChatJoinRequestHandler, ChatMemberHandler
 from telegram.request import HTTPXRequest
 from uuid import uuid4
+import os
+import tempfile
 
 
 class CloneRuntimeAppMixin:
@@ -41,17 +43,36 @@ class CloneRuntimeAppMixin:
         if int(document.file_size or 0) > 20 * 1024 * 1024:
             await message.reply_text("❌ Backup file exceeds the 20 MB safety limit.")
             return
+        temp_path = None
         try:
+            # Download to disk instead of building a bytearray + bytes copy in RAM.
+            handle = tempfile.NamedTemporaryFile(prefix="clone-backup-", suffix=".json.gz", delete=False)
+            temp_path = handle.name
+            handle.close()
             file_obj = await context.bot.get_file(document.file_id)
-            raw = bytes(await file_obj.download_as_bytearray())
-            # Validate format/checksum before offering a destructive Replace option.
+            await file_obj.download_to_drive(custom_path=temp_path)
+            with open(temp_path, "rb") as backup_file:
+                raw = backup_file.read()
+            # Validate checksum and decompression limits before offering Replace.
             from services.clone_backup import validate_clone_backup
             manifest = validate_clone_backup(raw)
+            del raw
         except Exception as exc:
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
             logger.exception("Clone backup upload validation failed owner=%s", self.owner(context))
             await message.reply_text(f"❌ Backup rejected: {str(exc)[:300]}")
             return
-        context.user_data["clone_backup_bytes"] = raw
+        old_path = context.user_data.get("clone_backup_path")
+        if old_path:
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+        context.user_data["clone_backup_path"] = temp_path
         context.user_data.pop("awaiting_clone_backup_upload", None)
         await message.reply_text(
             "✅ <b>Backup verified</b>\n\n"
