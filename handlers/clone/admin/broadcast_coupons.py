@@ -239,18 +239,55 @@ async def _send_editor_media_see(bot, chat_id, item, title):
         await bot.send_media_group(chat_id=chat_id, media=album)
 
 
+def _broadcast_button_source(button):
+    """Rebuild the editor syntax so See shows exactly what the seller configured."""
+    label = str(button.get("text") or button.get("label") or "Button").strip()
+    kind = str(button.get("type") or "")
+    value = str(button.get("value") or "")
+
+    if kind == "url":
+        target = value
+        if target.startswith("https://"):
+            target = target.removeprefix("https://")
+        elif target.startswith("http://"):
+            target = target.removeprefix("http://")
+    elif kind in {"callback", "feature"}:
+        feature = value.removeprefix("c_")
+        if feature.startswith("plans_list_"):
+            feature = "plans_" + feature.removeprefix("plans_list_")
+        target = f"feature: {feature}"
+    elif kind == "share":
+        target = f"share: {value}"
+    elif kind == "copy":
+        target = f"copy: {value}"
+    elif kind in {"popup", "alert"}:
+        target = f"{kind}: {value}"
+    elif kind == "rules":
+        target = "rules"
+    else:
+        target = value or kind or "unknown"
+
+    return f"{label} - {target}"
+
+
 async def _send_editor_buttons_see(bot, chat_id, item, title):
     buttons = item.get("buttons") or []
     if not buttons:
         await bot.send_message(chat_id, f"{title}\n\n❌ Not added")
         return
-    lines = [title, "", "Current Buttons"]
+
+    # Preserve row structure and && syntax from the editor input.
+    source_rows = []
     for row in buttons:
         if isinstance(row, list):
-            for button in row:
-                if isinstance(button, dict):
-                    lines.append(f"• {button.get('text') or button.get('label') or 'Button'}")
-    await bot.send_message(chat_id, "\n".join(lines), reply_markup=build_editor_keyboard(buttons))
+            source_rows.append(" && ".join(
+                _broadcast_button_source(button)
+                for button in row if isinstance(button, dict)
+            ))
+    source_rows = [row for row in source_rows if row]
+    body = "\n".join(source_rows)
+    text = f"{title}\n\nCurrent Buttons\n{body}"
+    await bot.send_message(chat_id, text, reply_markup=build_editor_keyboard(buttons))
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
