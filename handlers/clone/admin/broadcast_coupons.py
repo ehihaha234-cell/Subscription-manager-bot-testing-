@@ -156,16 +156,28 @@ def _scheduled_settings_text(item):
         "7m = Every 7 Minutes\n"
         "8h = Every 8 Hours\n"
         "9d = Every 9 Days\n\n"
-        f"Current Schedule: {item.get('schedule_at') or 'Not Set'}\n"
-        f"Repeat Broadcast: {item.get('repeat_interval') or 'Not Set'}"
+        f"Schedule: {item.get('schedule_at') or 'Not Set'}\n"
+        f"Schedule Status: {'🟢 Enabled' if item.get('schedule_enabled', bool(item.get('schedule_at'))) else '🔴 Disabled'}\n"
+        f"Repeat Broadcast: {item.get('repeat_interval') or 'Not Set'}\n"
+        f"Repeat Status: {'🟢 Enabled' if item.get('repeat_enabled', bool(item.get('repeat_interval'))) else '🔴 Disabled'}"
     )
 
 
 def _scheduled_settings_keyboard(item):
     job_id = item["job_id"]
+    schedule_on = bool(item.get("schedule_enabled", bool(item.get("schedule_at"))))
+    repeat_on = bool(item.get("repeat_enabled", bool(item.get("repeat_interval"))))
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 Schedule", callback_data=f"a_sb_schedule_{job_id}")],
-        [InlineKeyboardButton("🔁 Repeat Broadcast", callback_data=f"a_sb_repeat_{job_id}")],
+        [InlineKeyboardButton("📅 Set Schedule Time", callback_data=f"a_sb_schedule_{job_id}")],
+        [InlineKeyboardButton(
+            "🟢 Schedule: Enabled" if schedule_on else "🔴 Schedule: Disabled",
+            callback_data=f"a_sb_schedule_toggle_{job_id}",
+        )],
+        [InlineKeyboardButton("🔁 Set Repeat Interval", callback_data=f"a_sb_repeat_{job_id}")],
+        [InlineKeyboardButton(
+            "🟢 Repeat: Enabled" if repeat_on else "🔴 Repeat: Disabled",
+            callback_data=f"a_sb_repeat_toggle_{job_id}",
+        )],
         [InlineKeyboardButton("⬅ Back", callback_data=f"a_sb_open_{job_id}")],
     ])
 
@@ -376,6 +388,40 @@ async def handle(self, update, context, q, owner, staff, a, role):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_settings_{job_id}')]]),
         )
         return True
+    if a.startswith('a_sb_schedule_toggle_') or a.startswith('a_sb_repeat_toggle_'):
+        is_schedule = a.startswith('a_sb_schedule_toggle_')
+        job_id = a.removeprefix('a_sb_schedule_toggle_' if is_schedule else 'a_sb_repeat_toggle_')
+        item = await get_scheduled_campaign(owner, job_id)
+        if not item:
+            await q.answer('Scheduled broadcast not found.', show_alert=True)
+            return True
+
+        if is_schedule:
+            if not item.get('schedule_at'):
+                await q.answer('Set the schedule date and time first.', show_alert=True)
+                return True
+            enabled = not bool(item.get('schedule_enabled', bool(item.get('schedule_at'))))
+            item = await update_scheduled_campaign(owner, job_id, schedule_enabled=enabled)
+        else:
+            if not item.get('repeat_interval'):
+                await q.answer('Set the repeat interval first.', show_alert=True)
+                return True
+            enabled = not bool(item.get('repeat_enabled', bool(item.get('repeat_interval'))))
+            item = await update_scheduled_campaign(owner, job_id, repeat_enabled=enabled)
+
+        operational = bool(item.get('schedule_enabled')) or bool(item.get('repeat_enabled'))
+        item = await update_scheduled_campaign(owner, job_id, status='active' if operational else 'paused')
+        if operational:
+            item = await self.schedule_campaign_from_item(
+                context.application, owner, item,
+                prefer_now_for_repeat=bool(item.get('repeat_enabled') and not item.get('schedule_enabled')),
+            )
+        else:
+            await self._campaign_job_remove(context.application, job_id)
+            item = await update_scheduled_campaign(owner, job_id, next_run_at=None)
+        await q.edit_message_text(_scheduled_settings_text(item), reply_markup=_scheduled_settings_keyboard(item))
+        return True
+
     if a.startswith('a_sb_toggle_'):
         job_id = a.removeprefix('a_sb_toggle_')
         item = await get_scheduled_campaign(owner, job_id)
