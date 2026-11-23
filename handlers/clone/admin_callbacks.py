@@ -1,6 +1,7 @@
 """Clone-bot administrator callback router."""
 
 import logging
+import os
 
 from handlers.common.clone_context import *
 
@@ -29,6 +30,12 @@ class CloneAdminCallbacksMixin:
                 await q.answer("Only the seller can restore a clone backup.", show_alert=True)
                 return
             context.user_data.pop("clone_backup_bytes", None)
+            old_path = context.user_data.pop("clone_backup_path", None)
+            if old_path:
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
             context.user_data["awaiting_clone_backup_upload"] = True
             await q.edit_message_text(
                 "💾 <b>Clone Bot Backup & Restore</b>\n\n"
@@ -43,8 +50,8 @@ class CloneAdminCallbacksMixin:
             if role != "seller":
                 await q.answer("Only the seller can restore a clone backup.", show_alert=True)
                 return
-            raw = context.user_data.get("clone_backup_bytes")
-            if not raw:
+            backup_path = context.user_data.get("clone_backup_path")
+            if not backup_path or not os.path.isfile(backup_path):
                 await q.answer("Please upload the backup file again.", show_alert=True)
                 return
             mode = "merge" if action.endswith("merge") else "replace"
@@ -68,9 +75,18 @@ class CloneAdminCallbacksMixin:
                     pass
             try:
                 from services.clone_backup import restore_clone_backup
+                # Read the disk-staged upload once for the restore operation.
+                with open(backup_path, "rb") as backup_file:
+                    raw = backup_file.read()
                 result = await restore_clone_backup(raw, int(owner), mode, progress_callback=progress)
+                del raw
                 context.user_data.pop("clone_backup_bytes", None)
+                context.user_data.pop("clone_backup_path", None)
                 context.user_data.pop("awaiting_clone_backup_upload", None)
+                try:
+                    os.remove(backup_path)
+                except OSError:
+                    pass
                 await status.edit_text(
                     "✅ <b>Clone backup restored.</b>\n\n"
                     f"Mode: <b>{mode.title()}</b>\n"
