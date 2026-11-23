@@ -2,7 +2,7 @@
 
 from handlers.common.clone_context import *
 from datetime import timedelta
-from handlers.common.editor_engine import build_editor_keyboard, parse_editor_buttons
+from handlers.common.editor_engine import build_editor_keyboard, parse_broadcast_editor_buttons
 from handlers.common.feature_navigation import register_feature_origin
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
 from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -363,7 +363,7 @@ class CloneBroadcastMixin:
 
             if scheduled_field == "buttons":
                 try:
-                    buttons = parse_editor_buttons(raw)
+                    buttons = parse_broadcast_editor_buttons(raw)
                 except ValueError as exc:
                     await update.effective_message.reply_text(f"❌ {exc}")
                     raise ApplicationHandlerStop
@@ -466,7 +466,7 @@ class CloneBroadcastMixin:
                 if field == "text":
                     item = await update_seller_broadcast_draft(owner, text=raw)
                 else:
-                    item = await update_seller_broadcast_draft(owner, buttons=parse_editor_buttons(raw))
+                    item = await update_seller_broadcast_draft(owner, buttons=parse_broadcast_editor_buttons(raw))
             except ValueError as exc:
                 await update.effective_message.reply_text(f"❌ {exc}")
                 raise ApplicationHandlerStop
