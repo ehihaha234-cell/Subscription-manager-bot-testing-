@@ -54,7 +54,14 @@ def _broadcast_buttons_editor_header():
         "• Add a feature button:\n"
         "Button title - feature: feature_name\n\n"
         "Features:\n"
-        "plans, buy, profile, renew, referral, referral_unlock, support, home"
+        "profile, referral, referral_unlock, support, home\n\n"
+        "📦 Separate Plan Group Button:\n"
+        "Button title - feature: plans_(PLAN_ID)\n"
+        "Example: Premium Channel - feature: plans_1001\n\n"
+        "Where to get PLAN ID:\n"
+        "Go to Manage Plan → Plan Groups. Each separate Plan Group has its own 4-digit PLAN ID.\n"
+        "Example: PLAN ID 👉 1001\n"
+        "Use that ID as feature: plans_1001."
     )
 
 
