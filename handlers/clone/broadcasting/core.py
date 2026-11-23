@@ -212,30 +212,34 @@ class CloneBroadcastMixin:
 
     async def _campaign_next_run_from_item(self, owner: int, item: dict, *, prefer_now_for_repeat: bool = False):
         now = datetime.now(timezone.utc)
-        interval = self._campaign_interval_seconds(item.get("repeat_interval"))
         schedule_enabled = bool(item.get("schedule_enabled", bool(item.get("schedule_at"))))
-        repeat_enabled = bool(item.get("repeat_enabled", bool(interval)))
+        repeat_enabled = bool(item.get("repeat_enabled", bool(item.get("repeat_interval"))))
+        interval = self._campaign_interval_seconds(item.get("repeat_interval")) if repeat_enabled else None
 
-        # First run follows the configured date/time. Once it has run, an
-        # enabled repeat interval takes over for subsequent deliveries.
-        if schedule_enabled and not item.get("last_run_at"):
+        # After the first scheduled delivery, an enabled repeat interval takes over.
+        last_run = item.get("last_run_at")
+        if last_run and interval:
+            if last_run.tzinfo is None:
+                last_run = last_run.replace(tzinfo=timezone.utc)
+            return last_run + timedelta(seconds=interval)
+
+        # If a schedule is enabled, it controls the first delivery.
+        if schedule_enabled:
             schedule_at = str(item.get("schedule_at") or "").strip()
-            if schedule_at:
-                try:
-                    parsed = datetime.strptime(schedule_at, "%d %b %Y • %I:%M %p")
-                    settings = await get_seller_settings(int(owner))
-                    zone = ZoneInfo(settings.get("timezone", "Asia/Kolkata"))
-                    return parsed.replace(tzinfo=zone).astimezone(timezone.utc)
-                except Exception:
-                    logger.exception("Could not parse campaign schedule owner=%s job=%s", owner, item.get("job_id"))
-                    return None
+            if not schedule_at:
+                return None
+            try:
+                parsed = datetime.strptime(schedule_at, "%d %b %Y • %I:%M %p")
+                settings = await get_seller_settings(int(owner))
+                zone = ZoneInfo(settings.get("timezone", "Asia/Kolkata"))
+                return parsed.replace(tzinfo=zone).astimezone(timezone.utc)
+            except Exception:
+                logger.exception("Could not parse campaign schedule owner=%s job=%s", owner, item.get("job_id"))
+                return None
 
-        if repeat_enabled and interval:
-            if prefer_now_for_repeat or item.get("last_run_at") or not schedule_enabled:
-                return now + timedelta(seconds=interval)
-        next_run = item.get("next_run_at")
-        if next_run:
-            return next_run if next_run.tzinfo else next_run.replace(tzinfo=timezone.utc)
+        # Repeat-only mode starts one interval from now (or from explicit request).
+        if interval:
+            return now + timedelta(seconds=interval)
         return None
 
     async def _campaign_schedule_job(self, application: Application, item: dict, when=None):
@@ -276,35 +280,31 @@ class CloneBroadcastMixin:
             return
         try:
             await self.send_seller_broadcast(owner, context, item)
-            interval = self._campaign_interval_seconds(item.get("repeat_interval"))
-            now = datetime.now(timezone.utc)
-            repeat_enabled = bool(item.get("repeat_enabled", bool(interval)))
-            if repeat_enabled and interval:
-                next_run = now + timedelta(seconds=interval)
+            interval = self._campaign_interval_seconds(item.get("repeat_interval")) if item.get("repeat_enabled", bool(item.get("repeat_interval"))) else None
+            if interval:
+                last_run = datetime.now(timezone.utc)
+                next_run = last_run + timedelta(seconds=interval)
                 updated = await update_scheduled_campaign(
-                    owner, job_id, next_run_at=next_run, last_run_at=now,
-                    schedule_enabled=False, status="active"
+                    owner, job_id, next_run_at=next_run, last_run_at=last_run, status="active"
                 )
                 if updated:
                     await self._campaign_schedule_job(context.application, updated)
             else:
                 await update_scheduled_campaign(
-                    owner, job_id, next_run_at=None, last_run_at=now,
-                    schedule_enabled=False, status="paused"
+                    owner, job_id, next_run_at=None, last_run_at=datetime.now(timezone.utc), status="paused"
                 )
                 await self._campaign_job_remove(context.application, job_id)
         except Exception:
             logger.exception("Scheduled campaign execution failed owner=%s job=%s", owner, job_id)
-            interval = self._campaign_interval_seconds(item.get("repeat_interval"))
-            if bool(item.get("repeat_enabled", bool(interval))) and interval:
+            interval = self._campaign_interval_seconds(item.get("repeat_interval")) if item.get("repeat_enabled", bool(item.get("repeat_interval"))) else None
+            if interval:
                 updated = await update_scheduled_campaign(
-                    owner, job_id, next_run_at=datetime.now(timezone.utc) + timedelta(seconds=interval),
-                    schedule_enabled=False, status="active"
+                    owner, job_id, next_run_at=datetime.now(timezone.utc) + timedelta(seconds=interval)
                 )
                 if updated:
                     await self._campaign_schedule_job(context.application, updated)
             else:
-                await update_scheduled_campaign(owner, job_id, status="paused", schedule_enabled=False)
+                await update_scheduled_campaign(owner, job_id, status="paused")
 
     async def restore_scheduled_campaigns(self, application: Application, owner_id: int):
         items = await list_scheduled_campaigns(owner_id)
@@ -399,7 +399,7 @@ class CloneBroadcastMixin:
                     raise ApplicationHandlerStop
                 zone = ZoneInfo((await get_seller_settings(owner)).get("timezone", "Asia/Kolkata"))
                 run_at = parsed.replace(tzinfo=zone).astimezone(timezone.utc)
-                item = await update_scheduled_campaign(owner, job_id, schedule_at=display, next_run_at=run_at, last_run_at=None)
+                item = await update_scheduled_campaign(owner, job_id, schedule_at=display, next_run_at=run_at, status="active")
                 item = await self.schedule_campaign_from_item(context.application, owner, item)
                 context.user_data.pop("scheduled_broadcast_editor", None)
                 await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
@@ -412,7 +412,7 @@ class CloneBroadcastMixin:
                     await update.effective_message.reply_text("❌ Use formats like 6s, 7m, 8h or 9d.")
                     raise ApplicationHandlerStop
                 interval = f"{match.group(1)}{match.group(2).lower()}"
-                item = await update_scheduled_campaign(owner, job_id, repeat_interval=interval)
+                item = await update_scheduled_campaign(owner, job_id, repeat_interval=interval, status="active")
                 item = await self.schedule_campaign_from_item(context.application, owner, item, prefer_now_for_repeat=not bool(item.get("schedule_at")))
                 context.user_data.pop("scheduled_broadcast_editor", None)
                 await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
