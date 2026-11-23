@@ -562,7 +562,9 @@ async def create_scheduled_campaign(owner_id: int, name: str) -> dict:
         "media": [],
         "buttons": [],
         "schedule_at": None,
+        "schedule_enabled": False,
         "repeat_interval": "",
+        "repeat_enabled": False,
         "next_run_at": None,
         "last_run_at": None,
         "status": "paused",
@@ -590,7 +592,7 @@ async def get_scheduled_campaign(owner_id: int, job_id: str) -> dict | None:
 
 async def update_scheduled_campaign(owner_id: int, job_id: str, **fields) -> dict | None:
     allowed = {
-        "name", "text", "media", "buttons", "schedule_at", "repeat_interval",
+        "name", "text", "media", "buttons", "schedule_at", "schedule_enabled", "repeat_interval", "repeat_enabled",
         "next_run_at", "last_run_at", "status", "media_type", "media_file_id",
     }
     clean = {key: value for key, value in fields.items() if key in allowed}
