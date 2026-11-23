@@ -145,37 +145,29 @@ def _scheduled_editor_keyboard(item):
 
 
 def _scheduled_settings_text(item):
+    schedule_enabled = bool(item.get("schedule_enabled", bool(item.get("schedule_at"))))
+    repeat_enabled = bool(item.get("repeat_enabled", bool(item.get("repeat_interval"))))
+    schedule_status = "🟢" if schedule_enabled else "🔴"
+    repeat_status = "🟢" if repeat_enabled else "🔴"
     return (
         "📅 Schedule Settings\n\n"
         "Configure when this broadcast should be sent automatically.\n\n"
-        "Examples\n\n"
-        "One-Time\n"
-        "02 Sep 2026 • 06:50 PM\n\n"
-        "Recurring\n"
-        "6s = Every 6 Seconds\n"
-        "7m = Every 7 Minutes\n"
-        "8h = Every 8 Hours\n"
-        "9d = Every 9 Days\n\n"
-        f"Schedule: {item.get('schedule_at') or 'Not Set'}    "
-        f"{'🟢 Enabled' if item.get('schedule_enabled', bool(item.get('schedule_at'))) else '🔴 Disabled'}\n"
-        f"Repeat Broadcast: {item.get('repeat_interval') or 'Not Set'}    "
-        f"{'🟢 Enabled' if item.get('repeat_enabled', bool(item.get('repeat_interval'))) else '🔴 Disabled'}"
+        f"Schedule: {item.get('schedule_at') or 'Not Set'}    {schedule_status}\n"
+        f"Repeat Broadcast: {item.get('repeat_interval') or 'Not Set'}    {repeat_status}"
     )
 
 
 def _scheduled_settings_keyboard(item):
     job_id = item["job_id"]
-    schedule_on = bool(item.get("schedule_enabled", bool(item.get("schedule_at"))))
-    repeat_on = bool(item.get("repeat_enabled", bool(item.get("repeat_interval"))))
+    schedule_enabled = bool(item.get("schedule_enabled", bool(item.get("schedule_at"))))
+    repeat_enabled = bool(item.get("repeat_enabled", bool(item.get("repeat_interval"))))
+    schedule_label = "🟢 Enabled" if schedule_enabled else "🔴 Disabled"
+    repeat_label = "🟢 Enabled" if repeat_enabled else "🔴 Disabled"
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📆 Set Schedule Time", callback_data=f"a_sb_schedule_{job_id}"),
-            InlineKeyboardButton("🟢 Enabled" if schedule_on else "🔴 Disabled", callback_data=f"a_sb_schedule_toggle_{job_id}"),
-        ],
-        [
-            InlineKeyboardButton("🔁 Set Repeat Interval", callback_data=f"a_sb_repeat_{job_id}"),
-            InlineKeyboardButton("🟢 Enabled" if repeat_on else "🔴 Disabled", callback_data=f"a_sb_repeat_toggle_{job_id}"),
-        ],
+        [InlineKeyboardButton("📆 Set Schedule Time", callback_data=f"a_sb_schedule_{job_id}"),
+         InlineKeyboardButton(schedule_label, callback_data=f"a_sb_toggle_schedule_{job_id}")],
+        [InlineKeyboardButton("🔁 Set Repeat Interval", callback_data=f"a_sb_repeat_{job_id}"),
+         InlineKeyboardButton(repeat_label, callback_data=f"a_sb_toggle_repeat_{job_id}")],
         [InlineKeyboardButton("⬅ Back", callback_data=f"a_sb_open_{job_id}")],
     ])
 
@@ -386,40 +378,46 @@ async def handle(self, update, context, q, owner, staff, a, role):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_settings_{job_id}')]]),
         )
         return True
-    if a.startswith('a_sb_schedule_toggle_') or a.startswith('a_sb_repeat_toggle_'):
-        is_schedule = a.startswith('a_sb_schedule_toggle_')
-        job_id = a.removeprefix('a_sb_schedule_toggle_' if is_schedule else 'a_sb_repeat_toggle_')
+    if a.startswith('a_sb_toggle_schedule_') or a.startswith('a_sb_toggle_repeat_'):
+        is_schedule = a.startswith('a_sb_toggle_schedule_')
+        prefix = 'a_sb_toggle_schedule_' if is_schedule else 'a_sb_toggle_repeat_'
+        job_id = a.removeprefix(prefix)
         item = await get_scheduled_campaign(owner, job_id)
         if not item:
             await q.answer('Scheduled broadcast not found.', show_alert=True)
             return True
-
-        if is_schedule:
-            if not item.get('schedule_at'):
-                await q.answer('Set the schedule date and time first.', show_alert=True)
-                return True
-            enabled = not bool(item.get('schedule_enabled', bool(item.get('schedule_at'))))
-            item = await update_scheduled_campaign(owner, job_id, schedule_enabled=enabled)
-        else:
-            if not item.get('repeat_interval'):
-                await q.answer('Set the repeat interval first.', show_alert=True)
-                return True
-            enabled = not bool(item.get('repeat_enabled', bool(item.get('repeat_interval'))))
-            item = await update_scheduled_campaign(owner, job_id, repeat_enabled=enabled)
-
-        operational = bool(item.get('schedule_enabled')) or bool(item.get('repeat_enabled'))
-        item = await update_scheduled_campaign(owner, job_id, status='active' if operational else 'paused')
-        if operational:
-            item = await self.schedule_campaign_from_item(
-                context.application, owner, item,
-                prefer_now_for_repeat=bool(item.get('repeat_enabled') and not item.get('schedule_enabled')),
-            )
+        field = 'schedule_enabled' if is_schedule else 'repeat_enabled'
+        source = item.get('schedule_at') if is_schedule else item.get('repeat_interval')
+        if not source:
+            await q.answer('Set the schedule time first.' if is_schedule else 'Set the repeat interval first.', show_alert=True)
+            return True
+        current = bool(item.get(field, bool(source)))
+        enabled = not current
+        other_enabled = bool(item.get('repeat_enabled', bool(item.get('repeat_interval')))) if is_schedule else bool(item.get('schedule_enabled', bool(item.get('schedule_at'))))
+        status = 'active' if (enabled or other_enabled) else 'paused'
+        item = await update_scheduled_campaign(owner, job_id, **{field: enabled, 'status': status})
+        alert_text = None
+        if status == 'active':
+            item = await self.schedule_campaign_from_item(context.application, owner, item)
+            if not item.get('next_run_at'):
+                alert_text = 'Could not schedule: check the date/time or interval.'
+                # Roll back an invalid enable attempt; do not leave a ghost-active campaign.
+                item = await update_scheduled_campaign(
+                    owner, job_id, **{field: False, 'status': 'active' if other_enabled else 'paused', 'next_run_at': None}
+                ) or item
+                if other_enabled:
+                    item = await self.schedule_campaign_from_item(context.application, owner, item)
+                else:
+                    await self._campaign_job_remove(context.application, job_id)
         else:
             await self._campaign_job_remove(context.application, job_id)
-            item = await update_scheduled_campaign(owner, job_id, next_run_at=None)
+            item = await update_scheduled_campaign(owner, job_id, next_run_at=None) or item
         await q.edit_message_text(_scheduled_settings_text(item), reply_markup=_scheduled_settings_keyboard(item))
+        if alert_text:
+            await q.answer(alert_text, show_alert=True)
+        else:
+            await q.answer('Setting enabled.' if enabled else 'Setting disabled.')
         return True
-
     if a.startswith('a_sb_toggle_'):
         job_id = a.removeprefix('a_sb_toggle_')
         item = await get_scheduled_campaign(owner, job_id)
