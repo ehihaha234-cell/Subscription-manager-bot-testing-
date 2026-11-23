@@ -239,55 +239,50 @@ async def _send_editor_media_see(bot, chat_id, item, title):
         await bot.send_media_group(chat_id=chat_id, media=album)
 
 
-def _broadcast_button_source(button):
-    """Rebuild the editor syntax so See shows exactly what the seller configured."""
-    label = str(button.get("text") or button.get("label") or "Button").strip()
-    kind = str(button.get("type") or "")
-    value = str(button.get("value") or "")
-
-    if kind == "url":
-        target = value
-        if target.startswith("https://"):
-            target = target.removeprefix("https://")
-        elif target.startswith("http://"):
-            target = target.removeprefix("http://")
-    elif kind in {"callback", "feature"}:
-        feature = value.removeprefix("c_")
-        if feature.startswith("plans_list_"):
-            feature = "plans_" + feature.removeprefix("plans_list_")
-        target = f"feature: {feature}"
-    elif kind == "share":
-        target = f"share: {value}"
-    elif kind == "copy":
-        target = f"copy: {value}"
-    elif kind in {"popup", "alert"}:
-        target = f"{kind}: {value}"
-    elif kind == "rules":
-        target = "rules"
-    else:
-        target = value or kind or "unknown"
-
-    return f"{label} - {target}"
-
-
-async def _send_editor_buttons_see(bot, chat_id, item, title):
+async def _send_editor_buttons_see(bot, chat_id, item, title=None):
     buttons = item.get("buttons") or []
     if not buttons:
-        await bot.send_message(chat_id, f"{title}\n\n❌ Not added")
+        await bot.send_message(chat_id, "❌ Not added")
         return
 
-    # Preserve row structure and && syntax from the editor input.
-    source_rows = []
+    # Show only the button syntax, without the extra "Seller Broadcast Buttons"
+    # / "Current Buttons" heading. Rebuild the original editor notation from
+    # the stored parsed button data while keeping the actual inline keyboard.
+    lines = []
     for row in buttons:
-        if isinstance(row, list):
-            source_rows.append(" && ".join(
-                _broadcast_button_source(button)
-                for button in row if isinstance(button, dict)
-            ))
-    source_rows = [row for row in source_rows if row]
-    body = "\n".join(source_rows)
-    text = f"{title}\n\nCurrent Buttons\n{body}"
-    await bot.send_message(chat_id, text, reply_markup=build_editor_keyboard(buttons))
+        if not isinstance(row, list):
+            continue
+        parts = []
+        for button in row:
+            if not isinstance(button, dict):
+                continue
+            label = str(button.get("text") or button.get("label") or "Button")
+            kind = str(button.get("type") or "")
+            value = str(button.get("value") or "")
+            if kind in {"callback", "feature"} and value.startswith("c_plans_list_"):
+                target = f"feature: plans_{value.removeprefix('c_plans_list_')}"
+            elif kind in {"callback", "feature"}:
+                feature_names = {
+                    "c_profile": "profile", "c_referral": "referral",
+                    "c_referral_unlock": "referral_unlock", "c_support": "support",
+                    "c_home": "home",
+                }
+                target = f"feature: {feature_names.get(value, value.removeprefix('c_'))}"
+            elif kind == "share":
+                target = f"share: {value}"
+            elif kind in {"popup", "alert", "copy"}:
+                target = f"{kind}: {value}"
+            elif kind == "rules":
+                target = "rules"
+            else:
+                target = value
+                if target.startswith("https://") and target[8:].startswith("t.me/"):
+                    target = target[8:]
+            parts.append(f"{label} - {target}")
+        if parts:
+            lines.append(" && ".join(parts))
+
+    await bot.send_message(chat_id, "\n".join(lines) or "❌ Not added", reply_markup=build_editor_keyboard(buttons))
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
