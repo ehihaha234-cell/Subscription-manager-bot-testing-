@@ -16,8 +16,11 @@ CLONE_BACKUP_VERSION = 1
 
 # Clone-owned collections use data_owner_id/owner_id as their scope. Keep the
 # seller_bots identity separately so a restore can identify the clone.
+# Every collection below is scoped to one clone's data_owner_id/owner_id.
+# Keep plan groups, payment configuration and feature settings together with
+# the core subscriber records so a restore is a complete clone migration.
 CLONE_COLLECTIONS = (
-    # Core clone configuration and subscriber/payment data.
+    # Core clone data
     "seller_settings",
     "seller_users",
     "seller_payments",
@@ -29,26 +32,43 @@ CLONE_COLLECTIONS = (
     "seller_channels",
     "seller_staff",
     "seller_invoices",
-    # Referral and connected-account configuration.
     "seller_referrals",
     "seller_business_accounts",
     "seller_business_contacts",
-    "seller_official_business_connections",
-    # Clone feature settings and saved editors/buttons.
+
+    # Seller/clone payment setup and seller plan metadata
+    "payment_gateway_configs",
+    # Clone feature configuration and data
+    "seller_forced_join",
+    "seller_forced_join_pending",
+    "seller_forced_join_settings",
+    "seller_forced_join_chat_messages",
+    "seller_group_manager",
     "seller_content_protection_settings",
     "seller_deleting_message_settings",
     "seller_deleting_message_stats",
-    "seller_group_manager",
-    "seller_forced_join",
-    "seller_forced_join_settings",
-    "seller_forced_join_chat_messages",
-    "seller_ai_assistant",
-    "seller_ai_events",
-    "seller_ai_sessions",
-    "seller_ai_unanswered",
     "seller_broadcast_drafts",
     "seller_scheduled_broadcasts",
+    "seller_coupons",
+    "seller_failed_deliveries",
+    "seller_referral_commissions",
+    "seller_ai_assistant",
+    "seller_ai_events",
+    "seller_ai_unanswered",
+    "seller_ai_sessions",
+    "seller_official_business_connections",
+    "business_automation_contact_routes",
+    "business_automation_business_recipients",
+    "clone_live_support_settings",
+    "clone_live_support_topics",
+    "clone_live_support_message_links",
+    "clone_live_support_blocks",
+    "clone_live_support_templates",
+    "clone_live_support_auto_replies",
+    "clone_live_support_deliveries",
+    "clone_referral_unlocks",
 )
+
 
 
 def _json_default(value: Any) -> Any:
@@ -77,7 +97,7 @@ async def create_clone_backup(
     for name in CLONE_COLLECTIONS:
         # All clone-owned collections in the current code use owner_id as the
         # data scope. Do not copy another clone's documents.
-        docs = await db[name].find({"$or": [{"owner_id": scope}, {"data_owner_id": scope}]}).to_list(length=None)
+        docs = await db[name].find({"owner_id": scope}).to_list(length=None)
         collections[name] = docs
         records.extend((name, d) for d in docs)
 
@@ -101,6 +121,9 @@ async def create_clone_backup(
             "owner_id": scope,
             "data_owner_id": scope,
             "seller_account_id": int(bot_record.get("owner_id") or 0),
+            # The QR file_id is stored on seller_bots, not seller_settings.
+            # Copy only this clone's payment asset; never copy its token/identity.
+            "payment_qr_file_id": str(bot_record.get("payment_qr_file_id") or ""),
         },
         "collections": collections,
     }
@@ -200,8 +223,8 @@ def _decode_backup_value(value: Any) -> Any:
 
 
 def _natural_key(collection: str, document: dict[str, Any]) -> dict[str, Any]:
-    """Choose stable fields for merge deduplication without matching _id across clones."""
-    candidates = {
+    """Stable per-clone keys used for idempotent Merge operations."""
+    fields = {
         "seller_settings": ("owner_id",),
         "seller_users": ("owner_id", "user_id"),
         "seller_payments": ("owner_id", "payment_id"),
@@ -213,30 +236,40 @@ def _natural_key(collection: str, document: dict[str, Any]) -> dict[str, Any]:
         "seller_channels": ("owner_id", "chat_id"),
         "seller_staff": ("owner_id", "user_id"),
         "seller_invoices": ("owner_id", "invoice_id"),
-        "seller_referrals": ("owner_id", "referred_seller_id"),
-        "seller_business_accounts": ("owner_id", "account_id"),
-        "seller_business_contacts": ("owner_id", "user_id"),
-        "seller_official_business_connections": ("owner_id", "connection_id"),
+        "seller_referrals": ("owner_id", "referred_user_id"),
+        "seller_business_accounts": ("owner_id", "account_user_id"),
+        "seller_business_contacts": ("owner_id", "account_user_id", "peer_user_id"),
+        "payment_gateway_configs": ("scope", "owner_id"),
+        "seller_subscription_settings": ("owner_id",),
+        "seller_plan_assignments": ("owner_id",),
+        "seller_forced_join_settings": ("owner_id",),
         "seller_content_protection_settings": ("owner_id",),
         "seller_deleting_message_settings": ("owner_id",),
-        "seller_deleting_message_stats": ("owner_id", "date_key"),
-        "seller_group_manager": ("owner_id", "chat_id"),
-        "seller_forced_join": ("owner_id", "chat_id", "access_chat_id"),
-        "seller_forced_join_settings": ("owner_id",),
-        "seller_forced_join_chat_messages": ("owner_id", "chat_id"),
         "seller_ai_assistant": ("owner_id",),
-        "seller_ai_events": ("owner_id", "_append_only"),
-        "seller_ai_sessions": ("owner_id", "user_id"),
-        "seller_ai_unanswered": ("owner_id", "normalized_question"),
-        "seller_broadcast_drafts": ("owner_id",),
-        "seller_scheduled_broadcasts": ("owner_id", "job_id"),
-    }.get(collection, ())
-    if not candidates or "_append_only" in candidates:
-        return {}
-    key = {field: document[field] for field in candidates if field in document and document[field] is not None}
-    if collection == "seller_settings":
-        return {"owner_id": document.get("owner_id")}
-    return key if len(key) == len(candidates) else {}
+        "clone_live_support_settings": ("owner_id",),
+        "seller_official_business_connections": ("owner_id", "account_user_id"),
+        "clone_live_support_topics": ("owner_id", "user_id"),
+        "clone_live_support_blocks": ("owner_id", "user_id"),
+        "clone_live_support_templates": ("owner_id", "command"),
+        "clone_live_support_auto_replies": ("owner_id", "keyword"),
+        "clone_referral_unlocks": ("owner_id", "user_id"),
+        "seller_forced_join": ("owner_id", "access_chat_id", "chat_id"),
+        "seller_forced_join_pending": ("owner_id", "user_id", "access_chat_id"),
+        "seller_forced_join_chat_messages": ("owner_id", "access_chat_id"),
+        "business_automation_contact_routes": ("owner_id", "user_id", "mode"),
+        "business_automation_business_recipients": ("owner_id", "business_user_id"),
+    }.get(collection)
+
+    if fields:
+        key = {field: document[field] for field in fields
+               if field in document and document[field] is not None}
+        return key if len(key) == len(fields) else {}
+
+    # Event/history collections generally have no declared unique natural key.
+    # Keep them as append-only records during Merge rather than accidentally
+    # overwriting unrelated entries.
+    return {}
+
 
 
 async def restore_clone_backup(
@@ -263,7 +296,7 @@ async def restore_clone_backup(
                 raise ValueError(f"Invalid record in {name}")
             doc = _decode_backup_value(row)
             doc.pop("_id", None)
-            if "owner_id" in doc or "data_owner_id" not in doc:
+            if "owner_id" in doc:
                 doc["owner_id"] = int(target_owner_id)
             if "data_owner_id" in doc:
                 doc["data_owner_id"] = int(target_owner_id)
@@ -277,7 +310,7 @@ async def restore_clone_backup(
     if mode == "replace":
         # Delete only target-clone records, preserving the source clone and seller records.
         for name in CLONE_COLLECTIONS:
-            await db[name].delete_many({"$or": [{"owner_id": int(target_owner_id)}, {"data_owner_id": int(target_owner_id)}]})
+            await db[name].delete_many({"owner_id": int(target_owner_id)})
 
     for name in CLONE_COLLECTIONS:
         docs = docs_by_collection[name]
@@ -325,6 +358,19 @@ async def restore_clone_backup(
             done += len(batch)
             if progress_callback:
                 await progress_callback(done, max(total, 1), name)
+    # Restore the per-clone QR asset onto the TARGET clone record. Bot token,
+    # bot_id, username and seller ownership are intentionally never overwritten.
+    clone_meta = payload.get("clone") or {}
+    target_bot = await db["seller_bots"].find_one({"data_owner_id": int(target_owner_id)})
+    if target_bot and "payment_qr_file_id" in clone_meta:
+        await db["seller_bots"].update_one(
+            {"_id": target_bot["_id"]},
+            {"$set": {
+                "payment_qr_file_id": str(clone_meta.get("payment_qr_file_id") or ""),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+
     if progress_callback and total == 0:
         await progress_callback(0, 0, "Backup contains no records")
     return {"restored": restored, "skipped": skipped, "records": total}
