@@ -213,7 +213,14 @@ async def handle(self, update, context, q, owner, action):
         if not group:
             await q.answer('PLAN ID not found in this bot.', show_alert=True)
             return True
-        await self.show_plans(q, owner, True, context, target_chat_ids=group.get('chat_ids') or [])
+        # A PLAN_ID identifies one exact Plan Group. Filter by its stable
+        # group_id, not only by chat IDs (different groups may share chats).
+        # Keep target_chat_ids in context for payment/access delivery metadata.
+        await self.show_plans(
+            q, owner, True, context,
+            target_chat_ids=group.get('chat_ids') or [],
+            group_id=str(group.get('group_id') or ''),
+        )
         return True
     if action == 'c_payment_back':
         context.user_data.pop('waiting_child_screenshot', None)
