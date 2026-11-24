@@ -38,6 +38,7 @@ CLONE_COLLECTIONS = (
 
     # Seller/clone payment setup and seller plan metadata
     "payment_gateway_configs",
+    "razorpay_qr_pool",
     # Clone feature configuration and data
     "seller_forced_join",
     "seller_forced_join_pending",
@@ -57,8 +58,15 @@ CLONE_COLLECTIONS = (
     "seller_ai_unanswered",
     "seller_ai_sessions",
     "seller_official_business_connections",
+    # Business Automation editors store their payloads in dedicated collections,
+    # not only in seller_settings. These were missing from earlier backups.
+    "business_automation_welcome",
+    "business_automation_auto_reply",
+    "business_automation_reply_templates",
+    "business_automation_broadcast",
     "business_automation_contact_routes",
     "business_automation_business_recipients",
+    "business_payment_delivery_logs",
     "clone_live_support_settings",
     "clone_live_support_topics",
     "clone_live_support_message_links",
@@ -84,6 +92,23 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Unsupported backup value: {type(value).__name__}")
 
 
+def _backup_scope_query(name: str, scope: int, bot_id: int) -> dict[str, Any]:
+    """Return the exact source-clone scope for each collection.
+
+    Most clone collections are keyed by owner_id=data_owner_id. A few use a
+    scope discriminator, or a counter document whose _id is the data scope.
+    Keep these exceptions explicit so one seller's other clone data is never
+    swept into this backup.
+    """
+    if name == "seller_plan_group_counters":
+        return {"$or": [{"owner_id": scope}, {"_id": scope}]}
+    if name == "payment_gateway_configs":
+        return {"owner_id": scope, "scope": "seller"}
+    if name == "razorpay_qr_pool":
+        return {"owner_id": scope, "bot_id": int(bot_id)}
+    return {"owner_id": scope}
+
+
 async def create_clone_backup(
     owner_id: int,
     bot_id: int,
@@ -95,9 +120,8 @@ async def create_clone_backup(
     collections: dict[str, list[dict[str, Any]]] = {}
     records = []
     for name in CLONE_COLLECTIONS:
-        # All clone-owned collections in the current code use owner_id as the
-        # data scope. Do not copy another clone's documents.
-        docs = await db[name].find({"owner_id": scope}).to_list(length=None)
+        query = _backup_scope_query(name, scope, int(bot_id))
+        docs = await db[name].find(query).to_list(length=None)
         collections[name] = docs
         records.extend((name, d) for d in docs)
 
@@ -258,8 +282,20 @@ def _natural_key(collection: str, document: dict[str, Any]) -> dict[str, Any]:
         "seller_forced_join_chat_messages": ("owner_id", "access_chat_id"),
         "business_automation_contact_routes": ("owner_id", "user_id", "mode"),
         "business_automation_business_recipients": ("owner_id", "business_user_id"),
+        "business_automation_welcome": ("owner_id",),
+        "business_automation_auto_reply": ("owner_id", "reply_id"),
+        "business_automation_reply_templates": ("owner_id", "template_id"),
+        "business_automation_broadcast": ("owner_id",),
+        "business_payment_delivery_logs": ("owner_id", "delivery_id"),
+        "razorpay_qr_pool": ("owner_id", "bot_id", "qr_code_id"),
     }.get(collection)
 
+    if collection == "seller_plan_group_counters":
+        if document.get("_id") is not None:
+            return {"_id": document["_id"]}
+        if document.get("owner_id") is not None:
+            return {"_id": int(document["owner_id"])}
+        return {}
     if fields:
         key = {field: document[field] for field in fields
                if field in document and document[field] is not None}
@@ -295,11 +331,23 @@ async def restore_clone_backup(
             if not isinstance(row, dict):
                 raise ValueError(f"Invalid record in {name}")
             doc = _decode_backup_value(row)
-            doc.pop("_id", None)
+            # The plan-group counter is deliberately keyed by _id=data_owner_id.
+            # Preserve/rebind that key; dropping it would silently break future
+            # PLAN_ID allocation after a Replace restore.
+            if name == "seller_plan_group_counters":
+                doc["_id"] = int(target_owner_id)
+                if "owner_id" in doc:
+                    doc["owner_id"] = int(target_owner_id)
+            else:
+                doc.pop("_id", None)
             if "owner_id" in doc:
                 doc["owner_id"] = int(target_owner_id)
             if "data_owner_id" in doc:
                 doc["data_owner_id"] = int(target_owner_id)
+            if name == "razorpay_qr_pool":
+                target_meta = await get_database()["seller_bots"].find_one({"data_owner_id": int(target_owner_id)}, {"bot_id": 1})
+                if target_meta and target_meta.get("bot_id") is not None:
+                    doc["bot_id"] = int(target_meta["bot_id"])
             decoded.append(doc)
         docs_by_collection[name] = decoded
 
@@ -310,7 +358,12 @@ async def restore_clone_backup(
     if mode == "replace":
         # Delete only target-clone records, preserving the source clone and seller records.
         for name in CLONE_COLLECTIONS:
-            await db[name].delete_many({"owner_id": int(target_owner_id)})
+            if name == "seller_plan_group_counters":
+                await db[name].delete_many({"$or": [{"owner_id": int(target_owner_id)}, {"_id": int(target_owner_id)}]})
+            elif name == "payment_gateway_configs":
+                await db[name].delete_many({"owner_id": int(target_owner_id), "scope": "seller"})
+            else:
+                await db[name].delete_many({"owner_id": int(target_owner_id)})
 
     for name in CLONE_COLLECTIONS:
         docs = docs_by_collection[name]
