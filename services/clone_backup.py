@@ -17,15 +17,37 @@ CLONE_BACKUP_VERSION = 1
 # Clone-owned collections use data_owner_id/owner_id as their scope. Keep the
 # seller_bots identity separately so a restore can identify the clone.
 CLONE_COLLECTIONS = (
+    # Core clone configuration and subscriber/payment data.
     "seller_settings",
     "seller_users",
     "seller_payments",
     "seller_subscriptions",
     "seller_plan_group_subscriptions",
     "seller_plans",
+    "seller_plan_groups",
+    "seller_plan_group_counters",
     "seller_channels",
     "seller_staff",
     "seller_invoices",
+    # Referral and connected-account configuration.
+    "seller_referrals",
+    "seller_business_accounts",
+    "seller_business_contacts",
+    "seller_official_business_connections",
+    # Clone feature settings and saved editors/buttons.
+    "seller_content_protection_settings",
+    "seller_deleting_message_settings",
+    "seller_deleting_message_stats",
+    "seller_group_manager",
+    "seller_forced_join",
+    "seller_forced_join_settings",
+    "seller_forced_join_chat_messages",
+    "seller_ai_assistant",
+    "seller_ai_events",
+    "seller_ai_sessions",
+    "seller_ai_unanswered",
+    "seller_broadcast_drafts",
+    "seller_scheduled_broadcasts",
 )
 
 
@@ -55,7 +77,7 @@ async def create_clone_backup(
     for name in CLONE_COLLECTIONS:
         # All clone-owned collections in the current code use owner_id as the
         # data scope. Do not copy another clone's documents.
-        docs = await db[name].find({"owner_id": scope}).to_list(length=None)
+        docs = await db[name].find({"$or": [{"owner_id": scope}, {"data_owner_id": scope}]}).to_list(length=None)
         collections[name] = docs
         records.extend((name, d) for d in docs)
 
@@ -186,10 +208,31 @@ def _natural_key(collection: str, document: dict[str, Any]) -> dict[str, Any]:
         "seller_subscriptions": ("owner_id", "user_id"),
         "seller_plan_group_subscriptions": ("owner_id", "user_id", "group_id"),
         "seller_plans": ("owner_id", "plan_id"),
+        "seller_plan_groups": ("owner_id", "group_id"),
+        "seller_plan_group_counters": ("owner_id",),
         "seller_channels": ("owner_id", "chat_id"),
         "seller_staff": ("owner_id", "user_id"),
         "seller_invoices": ("owner_id", "invoice_id"),
-    }.get(collection, ("owner_id", "_id"))
+        "seller_referrals": ("owner_id", "referred_seller_id"),
+        "seller_business_accounts": ("owner_id", "account_id"),
+        "seller_business_contacts": ("owner_id", "user_id"),
+        "seller_official_business_connections": ("owner_id", "connection_id"),
+        "seller_content_protection_settings": ("owner_id",),
+        "seller_deleting_message_settings": ("owner_id",),
+        "seller_deleting_message_stats": ("owner_id", "date_key"),
+        "seller_group_manager": ("owner_id", "chat_id"),
+        "seller_forced_join": ("owner_id", "chat_id", "access_chat_id"),
+        "seller_forced_join_settings": ("owner_id",),
+        "seller_forced_join_chat_messages": ("owner_id", "chat_id"),
+        "seller_ai_assistant": ("owner_id",),
+        "seller_ai_events": ("owner_id", "_append_only"),
+        "seller_ai_sessions": ("owner_id", "user_id"),
+        "seller_ai_unanswered": ("owner_id", "normalized_question"),
+        "seller_broadcast_drafts": ("owner_id",),
+        "seller_scheduled_broadcasts": ("owner_id", "job_id"),
+    }.get(collection, ())
+    if not candidates or "_append_only" in candidates:
+        return {}
     key = {field: document[field] for field in candidates if field in document and document[field] is not None}
     if collection == "seller_settings":
         return {"owner_id": document.get("owner_id")}
@@ -220,7 +263,7 @@ async def restore_clone_backup(
                 raise ValueError(f"Invalid record in {name}")
             doc = _decode_backup_value(row)
             doc.pop("_id", None)
-            if "owner_id" in doc:
+            if "owner_id" in doc or "data_owner_id" not in doc:
                 doc["owner_id"] = int(target_owner_id)
             if "data_owner_id" in doc:
                 doc["data_owner_id"] = int(target_owner_id)
@@ -234,7 +277,7 @@ async def restore_clone_backup(
     if mode == "replace":
         # Delete only target-clone records, preserving the source clone and seller records.
         for name in CLONE_COLLECTIONS:
-            await db[name].delete_many({"owner_id": int(target_owner_id)})
+            await db[name].delete_many({"$or": [{"owner_id": int(target_owner_id)}, {"data_owner_id": int(target_owner_id)}]})
 
     for name in CLONE_COLLECTIONS:
         docs = docs_by_collection[name]
