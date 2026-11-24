@@ -36,14 +36,14 @@ class ClonePlansMixin:
     async def show_plans(self, q, owner, select=False, context=None, force_new_message=False, target_chat_ids=None, group_id=None):
         plans,settings=await _cached_plan_data(owner, group_id)
         target_chat_ids=[int(x) for x in (target_chat_ids or [])]
-        if target_chat_ids:
+        if target_chat_ids and not group_id:
             wanted=set(target_chat_ids)
             filtered=[]
             for plan in plans:
                 assigned={int(x) for x in (plan.get("target_chat_ids") or [])}
-                # Legacy/unassigned plans remain available everywhere. A
-                # targeted plan appears only when its assignment exactly covers
-                # the destination set requested by this welcome button.
+                # Legacy target-chat buttons retain their previous behavior.
+                # PLAN_ID buttons use the exact group_id query above and must
+                # never include unassigned/global plans from other groups.
                 if not assigned or assigned == wanted:
                     filtered.append(plan)
             plans=filtered
