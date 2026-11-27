@@ -43,9 +43,23 @@ def _button_target(item):
     if kind == "url":
         return value
     if kind == "callback":
+        # Render feature callbacks using the same syntax accepted in the
+        # Welcome Buttons editor, rather than exposing internal callback IDs.
+        match = re.fullmatch(r"c_plans_list_(\d{4})", value)
+        if match:
+            return f"feature: plans_{match.group(1)}"
         reverse = {v: k for k, v in WELCOME_FEATURE_CALLBACKS.items()}
+        reverse.update({
+            "c_profile": "profile",
+            "c_referral": "referral",
+            "c_referral_unlock": "referral_unlock",
+            "c_support": "support",
+            "c_home": "home",
+            "c_buy": "buy",
+            "c_renew": "renew",
+        })
         feature = reverse.get(value)
-        return f"feature:{feature}" if feature else value
+        return f"feature: {feature}" if feature else value
     if kind == "plans":
         return f"plans:{value}"
     if kind in {"popup", "alert", "share", "copy"}:
@@ -165,11 +179,17 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.edit_message_text('🔗 No buttons set.', reply_markup=self.welcome_buttons_menu(False))
             return True
 
-        lines = ['🔗 Current Buttons', '']
-        for row_index, row in enumerate(rows, 1):
-            for item in row:
-                lines.append(f"Row {row_index}: {item.get('text', 'Button')} - {_button_target(item)}")
-
+        # Show the saved configuration in the same editable text format the
+        # seller entered: one line per keyboard row, with && between buttons
+        # on the same row. Do not add "Current Buttons" or "Row N" labels.
+        lines = []
+        for row in rows:
+            rendered = [
+                f"{item.get('text', 'Button')} - {_button_target(item)}"
+                for item in row
+            ]
+            if rendered:
+                lines.append(" && ".join(rendered))
         preview = build_welcome_keyboard(rows)
         keyboard_rows = [list(row) for row in (preview.inline_keyboard if preview else [])]
         keyboard_rows.append([InlineKeyboardButton('⬅ Back', callback_data='a_welcome')])
