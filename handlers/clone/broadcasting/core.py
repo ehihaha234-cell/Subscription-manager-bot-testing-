@@ -397,10 +397,10 @@ class CloneBroadcastMixin:
                     raise ApplicationHandlerStop
                 zone = ZoneInfo((await get_seller_settings(owner)).get("timezone", "Asia/Kolkata"))
                 run_at = parsed.replace(tzinfo=zone).astimezone(timezone.utc)
-                item = await update_scheduled_campaign(owner, job_id, schedule_at=display, next_run_at=run_at, status="active")
+                item = await update_scheduled_campaign(owner, job_id, schedule_at=display, next_run_at=run_at if item.get('schedule_enabled') else None, status="active" if (item.get('schedule_enabled') or item.get('repeat_enabled')) else "paused")
                 item = await self.schedule_campaign_from_item(context.application, owner, item)
                 context.user_data.pop("scheduled_broadcast_editor", None)
-                await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
+                await edit_scheduled_menu(_scheduled_editor_text(item), _scheduled_editor_keyboard(item))
                 raise ApplicationHandlerStop
 
             if scheduled_field == "repeat":
@@ -410,10 +410,10 @@ class CloneBroadcastMixin:
                     await update.effective_message.reply_text("❌ Use formats like 6s, 7m, 8h or 9d.")
                     raise ApplicationHandlerStop
                 interval = f"{match.group(1)}{match.group(2).lower()}"
-                item = await update_scheduled_campaign(owner, job_id, repeat_interval=interval, status="active")
+                item = await update_scheduled_campaign(owner, job_id, repeat_interval=interval, status="active" if (item.get('repeat_enabled') or item.get('schedule_enabled')) else "paused")
                 item = await self.schedule_campaign_from_item(context.application, owner, item, prefer_now_for_repeat=not bool(item.get("schedule_at")))
                 context.user_data.pop("scheduled_broadcast_editor", None)
-                await edit_scheduled_menu(_scheduled_settings_text(item), _scheduled_settings_keyboard(item))
+                await edit_scheduled_menu(_scheduled_editor_text(item), _scheduled_editor_keyboard(item))
                 raise ApplicationHandlerStop
 
             if scheduled_field == "media":
