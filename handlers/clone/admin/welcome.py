@@ -1,5 +1,6 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
+import re
 from handlers.common.clone_context import *
 from handlers.clone.welcome_editor import welcome_url_buttons_header, build_welcome_keyboard, WELCOME_FEATURE_CALLBACKS
 
