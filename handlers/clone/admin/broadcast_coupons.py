@@ -112,11 +112,14 @@ def _scheduled_editor_text(item):
     repeat_enabled = bool(item.get("repeat_enabled", bool(item.get("repeat_interval"))))
     schedule_status = "🟢 Enabled" if schedule_enabled else "🔴 Disabled"
     repeat_status = "🟢 Enabled" if repeat_enabled else "🔴 Disabled"
+    running = (schedule_enabled and bool(item.get("schedule_at"))) or (repeat_enabled and bool(item.get("repeat_interval")))
+    run_status = "🟢 Running" if running else "⏸️ Paused"
     return (
         "📅 Scheduled Broadcast\n\n"
         "Automatically sends this saved broadcast to your selected audience at the scheduled time. "
         "You can send it once or repeat it automatically.\n\n"
-        f"Name: {item.get('name') or 'Scheduled Broadcast'}\n\n"
+        f"Name: {item.get('name') or 'Scheduled Broadcast'}\n"
+        f"Status: {run_status}\n\n"
         f"📝 Text: {'✅ Added' if item.get('text') else '❌ Not added'}\n"
         f"{media_line}\n"
         f"🔗 Buttons: {button_count}\n\n"
@@ -330,7 +333,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         }
         await q.edit_message_text(
             '📅 Schedule\n\nSend the date and time for this broadcast.\n\nExample:\n02 Sep 2026 06:50 PM\n\nAccepted format: DD Mon YYYY HH:MM AM/PM',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_settings_{job_id}')]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_open_{job_id}')]]),
         )
         return True
     if a.startswith('a_sb_repeat_'):
@@ -340,7 +343,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
         }
         await q.edit_message_text(
             '🔁 Repeat Broadcast\n\nSend how often this broadcast should repeat.\n\nExamples:\n6s = Every 6 Seconds\n7m = Every 7 Minutes\n8h = Every 8 Hours\n9d = Every 9 Days',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_settings_{job_id}')]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅ Back', callback_data=f'a_sb_open_{job_id}')]]),
         )
         return True
     if a.startswith('a_sb_toggle_schedule_') or a.startswith('a_sb_toggle_repeat_'):
@@ -351,8 +354,14 @@ async def handle(self, update, context, q, owner, staff, a, role):
             await q.answer('Scheduled broadcast not found.', show_alert=True)
             return True
         field = 'schedule_enabled' if is_schedule else 'repeat_enabled'
+        configured = bool(item.get('schedule_at') if is_schedule else item.get('repeat_interval'))
         fallback = bool(item.get('schedule_at') if is_schedule else item.get('repeat_interval'))
-        enabled = not bool(item.get(field, fallback))
+        current_enabled = bool(item.get(field, fallback))
+        enabled = not current_enabled
+        if enabled and not configured:
+            prompt = 'Please set schedule time first.' if is_schedule else 'Please set repeat interval time first.'
+            await q.answer(prompt, show_alert=True)
+            return True
         other_field = 'repeat_enabled' if is_schedule else 'schedule_enabled'
         other_fallback = bool(item.get('repeat_interval') if is_schedule else item.get('schedule_at'))
         other_enabled = bool(item.get(other_field, other_fallback))
