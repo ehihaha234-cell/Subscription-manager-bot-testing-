@@ -340,10 +340,8 @@ class CloneBroadcastMixin:
                             chat_id=int(chat_id), message_id=int(message_id),
                             text=text, reply_markup=markup,
                         )
-                        try:
-                            await update.effective_message.delete()
-                        except Exception:
-                            pass
+                        # Keep the seller's submitted text/media/buttons in chat history.
+                        # Saving an editor field must not auto-delete the input message.
                         return
                     except Exception:
                         logger.exception("Scheduled broadcast menu edit failed owner=%s", owner)
