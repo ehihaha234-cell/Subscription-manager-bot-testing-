@@ -1,12 +1,42 @@
 """Clone-bot seller broadcast editor and delivery engine."""
 
 from handlers.common.clone_context import *
+import asyncio
 from datetime import timedelta
+import time
 from handlers.common.editor_engine import build_editor_keyboard, parse_broadcast_editor_buttons
 from handlers.common.feature_navigation import register_feature_origin
 from database.broadcast import get_seller_broadcast_draft, update_seller_broadcast_draft
 from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from telegram.error import RetryAfter
+
+
+# Telegram free-broadcast safety: pace API calls below the global bot limit.
+# The limiter is shared by all seller broadcast workers in this process.
+_BROADCAST_RATE = 20.0
+_BROADCAST_LIMITERS: dict[int, dict] = {}
+
+
+async def _broadcast_api_call(bot, method_name: str, **kwargs):
+    bot_key = int(getattr(bot, "id", 0) or id(bot))
+    state = _BROADCAST_LIMITERS.setdefault(
+        bot_key, {"lock": asyncio.Lock(), "next_at": 0.0}
+    )
+    method = getattr(bot, method_name)
+    while True:
+        async with state["lock"]:
+            now = time.monotonic()
+            wait_for = max(0.0, state["next_at"] - now)
+            if wait_for:
+                await asyncio.sleep(wait_for)
+            state["next_at"] = time.monotonic() + (1.0 / _BROADCAST_RATE)
+        try:
+            return await method(**kwargs)
+        except RetryAfter as exc:
+            retry_after = getattr(exc, "retry_after", 1)
+            if hasattr(retry_after, "total_seconds"):
+                retry_after = retry_after.total_seconds()
+            await asyncio.sleep(max(1.0, float(retry_after)) + 0.5)
 
 
 class CloneBroadcastMixin:
@@ -48,7 +78,7 @@ class CloneBroadcastMixin:
             media = [{"type": item.get("media_type"), "file_id": item.get("media_file_id")}]
 
         if not media:
-            sent = await bot.send_message(chat_id, text or "Broadcast", reply_markup=buttons)
+            sent = await _broadcast_api_call(bot, "send_message", chat_id=chat_id, text=text or "Broadcast", reply_markup=buttons)
             register_feature_origin(sent, text=text or "Broadcast", markup=buttons)
             return
 
@@ -57,13 +87,13 @@ class CloneBroadcastMixin:
             file_id = str(media[0].get("file_id") or "")
             kwargs = {"chat_id": chat_id, "caption": text or None, "reply_markup": buttons}
             if media_type == "photo":
-                sent = await bot.send_photo(photo=file_id, **kwargs)
+                sent = await _broadcast_api_call(bot, "send_photo", photo=file_id, **kwargs)
             elif media_type == "video":
-                sent = await bot.send_video(video=file_id, **kwargs)
+                sent = await _broadcast_api_call(bot, "send_video", video=file_id, **kwargs)
             elif media_type == "document":
-                sent = await bot.send_document(document=file_id, **kwargs)
+                sent = await _broadcast_api_call(bot, "send_document", document=file_id, **kwargs)
             elif media_type == "animation":
-                sent = await bot.send_animation(animation=file_id, **kwargs)
+                sent = await _broadcast_api_call(bot, "send_animation", animation=file_id, **kwargs)
             else:
                 raise ValueError("Unsupported broadcast media")
             register_feature_origin(sent, text=text, markup=buttons)
@@ -76,9 +106,9 @@ class CloneBroadcastMixin:
                 album.append(built)
         if not album:
             raise ValueError("No valid album media")
-        await bot.send_media_group(chat_id=chat_id, media=album)
+        await _broadcast_api_call(bot, "send_media_group", chat_id=chat_id, media=album)
         if buttons:
-            sent = await bot.send_message(chat_id, "Choose an option:", reply_markup=buttons)
+            sent = await _broadcast_api_call(bot, "send_message", chat_id=chat_id, text="Choose an option:", reply_markup=buttons)
             register_feature_origin(sent, text="Choose an option:", markup=buttons)
 
     async def send_seller_broadcast_preview(self, message, item):
@@ -101,29 +131,57 @@ class CloneBroadcastMixin:
             users.append(user)
 
         total = len(users)
-        success = failed = 0
+        success = failed = processed = next_index = 0
+        progress_lock = asyncio.Lock()
         if progress_callback:
             await progress_callback(total=total, success=0, failed=0, processed=0)
 
-        for index, user in enumerate(users, start=1):
-            user_id = int(user.get("user_id"))
-            try:
-                while True:
-                    try:
-                        await self._send_seller_broadcast_item(context.bot, user_id, item, user)
-                        success += 1
-                        break
-                    except RetryAfter as exc:
-                        wait_for = max(1, int(getattr(exc, "retry_after", 1) or 1))
-                        logger.warning("Seller broadcast flood wait owner=%s user=%s retry_after=%s", owner, user_id, wait_for)
-                        await asyncio.sleep(wait_for + 1)
-            except Exception as exc:
-                failed += 1
-                logger.warning("Seller broadcast failed owner=%s user=%s error=%s", owner, user_id, exc)
+        # Bounded parallel workers avoid one coroutine per recipient and keep
+        # the Telegram API request rate below the free-broadcast allowance.
+        worker_count = min(20, total)
 
-            if progress_callback:
-                await progress_callback(total=total, success=success, failed=failed, processed=index)
-            await asyncio.sleep(0.08)
+        async def worker():
+            nonlocal success, failed, processed, next_index
+            while True:
+                # No await between reading and incrementing: safe on this loop.
+                if next_index >= total:
+                    return
+                user = users[next_index]
+                next_index += 1
+                user_id = int(user.get("user_id"))
+                try:
+                    await self._send_seller_broadcast_item(
+                        context.bot, user_id, item, user
+                    )
+                    was_success = True
+                except Exception as exc:
+                    was_success = False
+                    logger.warning(
+                        "Seller broadcast failed owner=%s user=%s error=%s",
+                        owner, user_id, exc
+                    )
+
+                async with progress_lock:
+                    if was_success:
+                        success += 1
+                    else:
+                        failed += 1
+                    processed += 1
+                    current_processed = processed
+                    current_success = success
+                    current_failed = failed
+                    if progress_callback and (
+                        current_processed == total or current_processed % 25 == 0
+                    ):
+                        await progress_callback(
+                            total=total,
+                            success=current_success,
+                            failed=current_failed,
+                            processed=current_processed,
+                        )
+
+        if worker_count:
+            await asyncio.gather(*(worker() for _ in range(worker_count)))
 
         return {"total": total, "success": success, "failed": failed}
 
