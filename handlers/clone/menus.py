@@ -86,6 +86,7 @@ class CloneMenusMixin:
                 f"📢 Channels / Groups: <b>{int(usage.get('channels', 0)):,}</b>\n"
                 f"⏳ Pending Payments: <b>{int(usage.get('pending', 0)):,}</b>\n"
                 f"💰 Today Revenue: <b>{symbol}{float(usage.get('today_revenue', 0) or 0):,.2f}</b>\n"
+                f"📅 Monthly Revenue: <b>{symbol}{float(usage.get('monthly_revenue', 0) or 0):,.2f}</b>\n"
                 f"💵 Total Revenue: <b>{symbol}{float(usage.get('total_revenue', usage.get('revenue', 0)) or 0):,.2f}</b>"
             )
         except Exception:
