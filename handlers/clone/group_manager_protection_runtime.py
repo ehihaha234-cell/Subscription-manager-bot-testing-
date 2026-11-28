@@ -161,6 +161,16 @@ async def anti_flood_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     m=update.effective_message
     chat=update.effective_chat
     user=update.effective_user
+    # Telegram automatically copies linked-channel posts into its discussion
+    # group. They are not user-generated flood and must bypass anti-flood.
+    if m and bool(getattr(m, "is_automatic_forward", False)):
+        return
+    # Linked-channel posts are automatically forwarded by Telegram to the
+    # discussion group. Exempt them from all user anti-spam checks, while
+    # keeping the service-message cleanup above intact.
+    if m and bool(getattr(m, "is_automatic_forward", False)):
+        return
+
     if not m or not chat or not user or user.is_bot or chat.type not in {"group","supergroup"}:
         return
 
