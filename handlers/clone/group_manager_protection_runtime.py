@@ -166,10 +166,6 @@ async def anti_flood_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # must continue through the configured anti-spam rules.
     if m and bool(getattr(m, "is_automatic_forward", False)):
         return
-    # Exempt only Telegram's automatic channel-to-discussion copy. A user
-    # manually forwarding a channel post is not exempt and remains moderated.
-    if m and bool(getattr(m, "is_automatic_forward", False)):
-        return
 
     if not m or not chat or not user or user.is_bot or chat.type not in {"group","supergroup"}:
         return
@@ -249,6 +245,11 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     chat=update.effective_chat
     user=update.effective_user
     if not m or not chat or chat.type not in {"group","supergroup"}:
+        return
+
+    # Telegram automatically copies linked-channel posts into their discussion
+    # group. These are not user forwards and must bypass anti-spam moderation.
+    if bool(getattr(m, "is_automatic_forward", False)):
         return
 
     # Service-message cleanup is independent of user/admin/anonymous checks.
