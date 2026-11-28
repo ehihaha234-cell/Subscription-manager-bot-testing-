@@ -161,13 +161,13 @@ async def anti_flood_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     m=update.effective_message
     chat=update.effective_chat
     user=update.effective_user
-    # Telegram automatically copies linked-channel posts into its discussion
-    # group. They are not user-generated flood and must bypass anti-flood.
+    # Telegram auto-copies channel posts into the linked discussion group.
+    # Ignore only these automatic copies; ordinary forwarded channel posts
+    # must continue through the configured anti-spam rules.
     if m and bool(getattr(m, "is_automatic_forward", False)):
         return
-    # Linked-channel posts are automatically forwarded by Telegram to the
-    # discussion group. Exempt them from all user anti-spam checks, while
-    # keeping the service-message cleanup above intact.
+    # Exempt only Telegram's automatic channel-to-discussion copy. A user
+    # manually forwarding a channel post is not exempt and remains moderated.
     if m and bool(getattr(m, "is_automatic_forward", False)):
         return
 
@@ -351,10 +351,10 @@ async def group_manager_protection_message(update:Update, context:ContextTypes.D
     fw=spam.get("forwarding") or {}
     ftype=_forward_type(m)
     if ftype:
-        # Trusted/configured subscription channels are never punished by the
-        # forwarding anti-spam rule.
-        if ftype=="channels" and await _forward_is_connected_channel(owner, m):
-            return
+        # Manual channel forwards are subject to the configured forwarding
+        # anti-spam rule, even when the source channel is connected to this bot.
+        # Automatic discussion-group copies were exempted above via
+        # Message.is_automatic_forward.
 
         # If the original sender is a bot and that bot is an administrator of
         # this destination group, treat it as an admin exemption rather than a
