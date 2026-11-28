@@ -248,8 +248,10 @@ async def _is_chat_admin(context: ContextTypes.DEFAULT_TYPE, message: Message) -
 class MessageModerationService:
     """Evaluate and delete messages according to one seller's settings."""
 
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, seller_id: Optional[int] = None):
         self.owner_id = int(owner_id)
+        # Seller account ID is distinct from the owner ID used to scope data.
+        self.seller_id = int(seller_id) if seller_id is not None else None
 
     async def evaluate(
         self,
@@ -309,7 +311,7 @@ class MessageModerationService:
                 seller_account_id=int(context.application.bot_data.get("seller_account_id") or -1)
                 sender_is_admin = (
                     anonymous_group_admin
-                    or (user_id is not None and user_id == int(self.seller_id))
+                    or (user_id is not None and self.seller_id is not None and user_id == self.seller_id)
                     or (user_id is not None and user_id == seller_account_id)
                     or await is_group_admin()
                 )
@@ -329,7 +331,7 @@ class MessageModerationService:
                         return ModerationDecision(True,"command","commands_deleted")
 
         if user_id is not None:
-            if settings.get("ignore_owner",True) and user_id==self.seller_id: return ModerationDecision(False)
+            if settings.get("ignore_owner",True) and self.seller_id is not None and user_id==self.seller_id: return ModerationDecision(False)
             if user_id in {int(x) for x in settings.get("whitelisted_user_ids",[])}: return ModerationDecision(False)
             if settings.get("ignore_admins",True) and await is_group_admin(): return ModerationDecision(False)
 
@@ -407,7 +409,7 @@ async def moderate_seller_message(
         return False
 
     seller_id = context.application.bot_data.get("seller_account_id")
-    deleted = await MessageModerationService(int(resolved_owner)).moderate(update, context)
+    deleted = await MessageModerationService(int(resolved_owner), seller_id=seller_id).moderate(update, context)
     if deleted:
         raise ApplicationHandlerStop
     return False
