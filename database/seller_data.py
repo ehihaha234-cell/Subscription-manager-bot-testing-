@@ -2012,6 +2012,8 @@ async def stats(owner_id):
     local_now = now.astimezone(local_tz)
     local_day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_start_utc = local_day_start.astimezone(timezone.utc)
+    local_month_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_start_utc = local_month_start.astimezone(timezone.utc)
 
     active_subscription_query = {
         "owner_id": owner_id,
@@ -2042,6 +2044,19 @@ async def stats(owner_id):
             "input": "$amount", "to": "double", "onError": 0, "onNull": 0,
         }}}}},
     ]
+    monthly_revenue_pipeline = [
+        {"$match": {
+            "owner_id": owner_id,
+            "status": "approved",
+            "$expr": {"$gte": [
+                {"$ifNull": ["$processed_at", {"$ifNull": ["$updated_at", "$created_at"]}]},
+                month_start_utc,
+            ]},
+        }},
+        {"$group": {"_id": None, "total": {"$sum": {"$convert": {
+            "input": "$amount", "to": "double", "onError": 0, "onNull": 0,
+        }}}}},
+    ]
 
     # Use the same seller-level active-subscriber source used by Seller Search /
     # Seller Profile so every dashboard surface shows exactly the same number.
@@ -2058,6 +2073,7 @@ async def stats(owner_id):
         pending,
         total_revenue_rows,
         today_revenue_rows,
+        monthly_revenue_rows,
     ) = await asyncio.gather(
         c(USERS).count_documents({"owner_id": owner_id}),
         c(USERS).count_documents(active_today_query),
@@ -2067,10 +2083,12 @@ async def stats(owner_id):
         c(PAYMENTS).count_documents({"owner_id": owner_id, "status": "pending"}),
         c(PAYMENTS).aggregate(total_revenue_pipeline).to_list(length=1),
         c(PAYMENTS).aggregate(today_revenue_pipeline).to_list(length=1),
+        c(PAYMENTS).aggregate(monthly_revenue_pipeline).to_list(length=1),
     )
 
     total_revenue = float(total_revenue_rows[0].get("total", 0) or 0) if total_revenue_rows else 0.0
     today_revenue = float(today_revenue_rows[0].get("total", 0) or 0) if today_revenue_rows else 0.0
+    monthly_revenue = float(monthly_revenue_rows[0].get("total", 0) or 0) if monthly_revenue_rows else 0.0
 
     return {
         "users": int(total_users),
@@ -2082,6 +2100,7 @@ async def stats(owner_id):
         "channels": int(channels),
         "pending": int(pending),
         "today_revenue": today_revenue,
+        "monthly_revenue": monthly_revenue,
         "total_revenue": total_revenue,
         "revenue": total_revenue,
     }
